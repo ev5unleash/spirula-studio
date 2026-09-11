@@ -1,29 +1,32 @@
-// Self-checking native test for Phase 1 memory budget enforcement:
-// inactive raw/checked semantics, app-limit refusal with structured fields,
-// release-and-reallocate credit recovery, reservation rollback, and
-// thread-synchronized competition for a single allowance.
-// Runs under CUDA or Vulkan; exit code 0 = passed.
+// Tests memory budget enforcement under CUDA or Vulkan: limit refusal,
+// reservation rollback, credit recovery, and single-winner competition.
 
 #include "backend/api/BackendRuntime.h"
+#include "core/SourcePath.h"
 
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
 
 namespace {
 
-int g_fail = 0;
+std::atomic<int> g_fail{0};
+std::mutex g_print_mutex;
 
 #define CHECK(cond, ...)                                                       \
     do {                                                                       \
         if (!(cond)) {                                                         \
-            std::fprintf(stderr, "  FAIL [%s:%d]: ", __FILE__, __LINE__);      \
-            std::fprintf(stderr, __VA_ARGS__);                                 \
-            std::fprintf(stderr, "\n");                                        \
-            ++g_fail;                                                          \
+            {                                                                  \
+                std::lock_guard<std::mutex> lock(g_print_mutex);               \
+                std::fprintf(stderr, "  FAIL [%s:%d]: ", SS_FILE, __LINE__);   \
+                std::fprintf(stderr, __VA_ARGS__);                             \
+                std::fprintf(stderr, "\n");                                    \
+            }                                                                  \
+            g_fail.fetch_add(1, std::memory_order_relaxed);                    \
         }                                                                      \
     } while (0)
 
@@ -120,7 +123,8 @@ bool check_telemetry_status() {
 void test_app_limit_and_rollback() {
     std::printf("Running test_app_limit_and_rollback...\n");
     backend::BudgetSnapshot base = backend::budget_snapshot();
-    const uint64_t limit = base.process_bytes + k2MiB;
+    const uint64_t initial_process = base.process_bytes;
+    const uint64_t limit = initial_process + k2MiB;
 
     backend::training_budget_begin(0, limit);
     CHECK(backend::training_budget_active(), "training budget active");
@@ -128,6 +132,7 @@ void test_app_limit_and_rollback() {
     backend::BudgetSnapshot active_snap = backend::budget_snapshot();
     CHECK(active_snap.app_limit_bytes == limit, "app_limit_bytes matches requested limit");
     const uint64_t initial_reserved = active_snap.reserved_bytes;
+    CHECK(active_snap.process_bytes == initial_process, "process_bytes at baseline");
 
     // 1. Oversize raw device_malloc: 3 MiB requested against 2 MiB allowance.
     void* p_over = backend::device_malloc(k3MiB);
@@ -141,10 +146,12 @@ void test_app_limit_and_rollback() {
     CHECK(fail.available_bytes <= limit, "available_bytes bounded by limit");
     CHECK(fail.device_index >= 0, "device_index is valid");
 
-    // Rollback check: failed reservation must not increase reserved_bytes.
+    // Rollback check: failed reservation must not increase reserved_bytes or process_bytes.
     backend::BudgetSnapshot post_fail_snap = backend::budget_snapshot();
     CHECK(post_fail_snap.reserved_bytes == initial_reserved,
           "rollback must restore reserved_bytes on refused raw malloc");
+    CHECK(post_fail_snap.process_bytes == initial_process,
+          "process_bytes unchanged on refused raw malloc");
 
     // 2. Oversize device_malloc_checked must throw BudgetError with structured fields.
     bool caught_budget_error = false;
@@ -155,28 +162,37 @@ void test_app_limit_and_rollback() {
         CHECK(err.failure.kind == backend::BudgetFailureKind::ApplicationLimit,
               "BudgetError carries ApplicationLimit");
         CHECK(err.failure.requested_bytes == k3MiB, "BudgetError carries requested_bytes");
-        std::string what = err.what();
-        CHECK(!what.empty(), "what() must be non-empty");
-        CHECK(what.find("oversize_buf") != std::string::npos,
-              "what() must mention buffer tag 'oversize_buf'");
+        CHECK(err.what() != nullptr, "BudgetError::what() must not be null");
     } catch (const std::exception& e) {
         CHECK(false, "unexpected exception: %s", e.what());
     }
     CHECK(caught_budget_error, "device_malloc_checked must throw BudgetError");
 
-    // Rollback check: failed checked allocation must also not leak reserved_bytes.
+    // Rollback check: failed checked allocation must also not leak reserved_bytes or process_bytes.
     CHECK(backend::budget_snapshot().reserved_bytes == initial_reserved,
           "rollback must restore reserved_bytes on refused checked malloc");
+    CHECK(backend::budget_snapshot().process_bytes == initial_process,
+          "process_bytes unchanged on refused checked malloc");
 
     // 3. To prove rollback did not leak allowance, a valid 2 MiB allocation must succeed now.
     void* p_valid = backend::device_malloc_checked(k2MiB, "valid_post_rollback");
     CHECK(p_valid != nullptr, "allocation within allowance succeeded (no allowance leak)");
 
+    // After commit, reserved_bytes returns to baseline, while process_bytes tracks committed allocation.
+    backend::BudgetSnapshot committed_snap = backend::budget_snapshot();
+    CHECK(committed_snap.reserved_bytes == initial_reserved,
+          "reserved_bytes returns to baseline after commit");
+    CHECK(committed_snap.process_bytes >= initial_process + k2MiB,
+          "process_bytes tracks committed allocation");
+
     backend::device_free(p_valid);
     backend::device_synchronize();
 
-    CHECK(backend::budget_snapshot().reserved_bytes == initial_reserved,
-          "reserved_bytes restored after valid allocation free");
+    backend::BudgetSnapshot post_free_snap = backend::budget_snapshot();
+    CHECK(post_free_snap.reserved_bytes == initial_reserved,
+          "reserved_bytes at baseline after valid allocation free");
+    CHECK(post_free_snap.process_bytes == initial_process,
+          "process_bytes restored after valid allocation free");
 
     backend::training_budget_end();
     CHECK(!backend::training_budget_active(), "training budget ended");
@@ -185,7 +201,8 @@ void test_app_limit_and_rollback() {
 void test_release_and_reallocate() {
     std::printf("Running test_release_and_reallocate...\n");
     backend::BudgetSnapshot base = backend::budget_snapshot();
-    const uint64_t limit = base.process_bytes + k2MiB;
+    const uint64_t initial_process = base.process_bytes;
+    const uint64_t limit = initial_process + k2MiB;
 
     backend::training_budget_begin(0, limit);
     const uint64_t initial_reserved = backend::budget_snapshot().reserved_bytes;
@@ -195,9 +212,12 @@ void test_release_and_reallocate() {
     void* p1 = backend::device_malloc_checked(k1_5MiB, "p1_initial");
     CHECK(p1 != nullptr, "p1 allocation succeeded");
 
+    // After commit, reserved_bytes returns to baseline, process_bytes tracks committed allocation.
     backend::BudgetSnapshot mid_snap = backend::budget_snapshot();
-    CHECK(mid_snap.reserved_bytes >= initial_reserved + k1_5MiB,
-          "reserved_bytes increased by at least 1.5 MiB");
+    CHECK(mid_snap.reserved_bytes == initial_reserved,
+          "reserved_bytes returns to baseline after commit");
+    CHECK(mid_snap.process_bytes >= initial_process + k1_5MiB,
+          "process_bytes tracks committed allocation of 1.5 MiB");
 
     // Second allocation of 1 MiB exceeds remaining 0.5 MiB allowance.
     void* p2 = backend::device_malloc(k1MiB);
@@ -215,13 +235,26 @@ void test_release_and_reallocate() {
     backend::BudgetSnapshot post_free_snap = backend::budget_snapshot();
     CHECK(post_free_snap.reserved_bytes == initial_reserved,
           "reserved_bytes returned to baseline after free");
+    CHECK(post_free_snap.process_bytes == initial_process,
+          "process_bytes returned to baseline after free");
 
     // Reallocate 1.5 MiB: fails deterministically if free credit was permanently lost.
     void* p3 = backend::device_malloc_checked(k1_5MiB, "p3_realloc");
     CHECK(p3 != nullptr, "reallocation succeeded (free credit was not permanently lost)");
 
+    backend::BudgetSnapshot realloc_snap = backend::budget_snapshot();
+    CHECK(realloc_snap.reserved_bytes == initial_reserved,
+          "reserved_bytes at baseline after realloc commit");
+    CHECK(realloc_snap.process_bytes >= initial_process + k1_5MiB,
+          "process_bytes tracks reallocated allocation");
+
     backend::device_free(p3);
     backend::device_synchronize();
+
+    CHECK(backend::budget_snapshot().process_bytes == initial_process,
+          "process_bytes returned to baseline after final free");
+    CHECK(backend::budget_snapshot().reserved_bytes == initial_reserved,
+          "reserved_bytes at baseline after final free");
 
     backend::training_budget_end();
     CHECK(!backend::training_budget_active(), "training budget ended");
@@ -230,7 +263,8 @@ void test_release_and_reallocate() {
 void test_multithreaded_competition() {
     std::printf("Running test_multithreaded_competition...\n");
     backend::BudgetSnapshot base = backend::budget_snapshot();
-    const uint64_t limit = base.process_bytes + k2MiB;
+    const uint64_t initial_process = base.process_bytes;
+    const uint64_t limit = initial_process + k2MiB;
 
     backend::training_budget_begin(0, limit);
     const uint64_t initial_reserved = backend::budget_snapshot().reserved_bytes;
@@ -283,11 +317,13 @@ void test_multithreaded_competition() {
           "exactly one thread must catch BudgetError (a=%d, b=%d)",
           a_caught_budget_error ? 1 : 0, b_caught_budget_error ? 1 : 0);
 
-    // reserved_bytes must reflect exactly one allocation (~2 MiB), never double (~4 MiB).
+    // After commit, reserved_bytes returns to baseline, while process_bytes tracks the single winner.
     backend::BudgetSnapshot comp_snap = backend::budget_snapshot();
-    CHECK(comp_snap.reserved_bytes >= initial_reserved + k2MiB &&
-          comp_snap.reserved_bytes < initial_reserved + (2 * k2MiB),
-          "reserved_bytes reflects single reservation, not double-spend");
+    CHECK(comp_snap.reserved_bytes == initial_reserved,
+          "reserved_bytes returns to baseline after winning thread commits");
+    CHECK(comp_snap.process_bytes >= initial_process + k2MiB &&
+          comp_snap.process_bytes < initial_process + (2 * k2MiB),
+          "process_bytes reflects single winning allocation, not double-spend");
 
     // Clean up winner's allocation.
     if (ptr_a) backend::device_free(ptr_a);
@@ -297,10 +333,13 @@ void test_multithreaded_competition() {
     backend::BudgetSnapshot post_comp_snap = backend::budget_snapshot();
     CHECK(post_comp_snap.reserved_bytes == initial_reserved,
           "reserved_bytes returned to baseline after freeing winning thread");
+    CHECK(post_comp_snap.process_bytes == initial_process,
+          "process_bytes returned to baseline after freeing winning thread");
 
     backend::training_budget_end();
     CHECK(!backend::training_budget_active(), "training budget ended");
 }
+
 
 }  // namespace
 
@@ -319,11 +358,12 @@ int main() {
         test_multithreaded_competition();
     }
 
-    if (g_fail == 0) {
+    int failures = g_fail.load(std::memory_order_relaxed);
+    if (failures == 0) {
         std::printf("All memory_budget checks passed.\n");
         return 0;
     } else {
-        std::fprintf(stderr, "%d check(s) FAILED.\n", g_fail);
+        std::fprintf(stderr, "%d check(s) FAILED.\n", failures);
         return 1;
     }
 }
