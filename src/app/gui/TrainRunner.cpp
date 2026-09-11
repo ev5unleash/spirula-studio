@@ -33,6 +33,11 @@ std::optional<backend::BudgetFailure> TrainRunner::memory_failure() {
     return _memory_failure;
 }
 
+std::optional<TrainRunner::MemoryStatus> TrainRunner::memory_status() {
+    std::lock_guard<std::mutex> lk(_mu);
+    return _memory_status;
+}
+
 spirula::TrainerProgress TrainRunner::latest_progress() {
     std::lock_guard<std::mutex> lk(_mu);
     return _latest;
@@ -95,6 +100,16 @@ void TrainRunner::shutdown() {
     join_worker();
 }
 
+void TrainRunner::note_engine_taken() {
+    TrainerSession* session;
+    {
+        std::lock_guard<std::mutex> lk(_mu);
+        session = _session.get();
+        _engine_ready = false;
+    }
+    if (session) session->release_engine_budget();
+}
+
 void TrainRunner::cleanup_failed_engine() {
     // Only a failed run owes cleanup; calling it mid-run would join a live
     // worker and hang the caller. One-shot: the first caller does the work,
@@ -124,6 +139,7 @@ void TrainRunner::load_dataset(const TrainConfig& cfg, const std::string& preset
         std::lock_guard<std::mutex> lk(_mu);
         _error.clear();
         _memory_failure.reset();
+        _memory_status.reset();
     }
     _session.reset(new TrainerSession());
     _session->cfg = cfg;
@@ -152,6 +168,7 @@ void TrainRunner::start_training(const TrainConfig& cfg, const std::string& pres
         std::lock_guard<std::mutex> lk(_mu);
         _error.clear();
         _memory_failure.reset();
+        _memory_status.reset();
         _latest = {};
         _latencies.clear();
         _metrics.clear();
@@ -170,6 +187,11 @@ void TrainRunner::start_training(const TrainConfig& cfg, const std::string& pres
             // failure owes cleanup_failed_engine() a call.
             _engine_dirty = true;
             s->setup_engine();
+            {
+                std::lock_guard<std::mutex> lk(_mu);
+                _memory_status = MemoryStatus{
+                    s->memory_estimate, s->memory_allowance};
+            }
             s->viewer_base_camera_size = viewer_upload_cameras(s->post);
             viewer_upload_grid(s->post);
             _engine_ready = true;
@@ -218,6 +240,8 @@ void TrainRunner::start_training(const TrainConfig& cfg, const std::string& pres
             std::lock_guard<std::mutex> lk(_mu);
             _error = e.what();
             _memory_failure = e.failure;
+            _memory_status = MemoryStatus{
+                s->memory_estimate, s->memory_allowance};
             _engine_ready = false;
             _phase = Phase::TrainError;
         } catch (const std::exception& e) {

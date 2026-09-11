@@ -34,17 +34,7 @@ extern std::string g_error;
 // by backend::memory_usage() in VulkanContext.cpp. Host-pinned allocations
 // are excluded — they are not device-local VRAM.
 std::atomic<uint64_t> g_device_bytes{0};
-// Training budget state.
-//
-// g_budget_txn_mutex is the single transaction order for every budget
-// operation: snapshot, begin/end, allocation (heap query -> reserve -> driver
-// calls -> commit or rollback) and free (destroy -> credit). It MAY span
-// driver calls, which is what makes a heap sample and the reservation it
-// justifies one transaction. g_budget_mutex guards the counters only and is
-// never held across a Vulkan call. The transaction mutex is recursive because
-// the public allocation entry points hold it across create_allocation plus the
-// map insert that publishes the resulting charge.
-std::recursive_mutex g_budget_txn_mutex;
+std::mutex g_budget_txn_mutex;
 std::mutex g_budget_mutex;
 std::atomic<bool> g_budget_active{false};
 std::atomic<uint64_t> g_budget_reserve_bytes{0};
@@ -91,7 +81,8 @@ namespace {
 std::mutex g_alloc_mutex;
 std::map<uint64_t, Allocation> g_device_allocs;  // key: device address
 std::map<uint64_t, Allocation> g_host_allocs;    // key: mapped host address
-std::map<uint64_t, VkDeviceSize> g_alloc_accounting;  // key: address, value: accounting bytes
+std::map<uint64_t, VkDeviceSize> g_device_accounting;
+std::map<uint64_t, VkDeviceSize> g_host_accounting;
 
 bool lookup(const std::map<uint64_t, Allocation>& m, uint64_t addr,
             Allocation* alloc, VkDeviceSize* offset) {
@@ -109,12 +100,14 @@ bool lookup(const std::map<uint64_t, Allocation>& m, uint64_t addr,
 bool create_allocation(VkDeviceSize bytes, bool host_visible,
                        Allocation* out,
                        VkDeviceSize* out_accounting_bytes = nullptr) {
+    std::lock_guard<std::mutex> transaction(g_budget_txn_mutex);
     Context& ctx = Context::get();
     if (!ctx.ok()) {
         if (backend::training_budget_active()) {
             BudgetFailure f{};
-            f.kind = ctx.has_error() ? BudgetFailureKind::TelemetryError
-                                     : BudgetFailureKind::TelemetryUnavailable;
+            f.kind = ctx.init_status() == BudgetStatus::Unavailable
+                         ? BudgetFailureKind::TelemetryUnavailable
+                         : BudgetFailureKind::TelemetryError;
             f.requested_bytes = bytes;
             f.available_bytes = 0;
             f.device_index = device_current();
@@ -124,30 +117,6 @@ bool create_allocation(VkDeviceSize bytes, bool host_visible,
         return false;
     }
     ctx.set_shutdown_hook(&runtime_shutdown);
-
-    if (backend::training_budget_active()) {
-        if (!ctx.caps().memory_budget || device_count() <= 0 ||
-            device_current() < 0) {
-            BudgetFailure f{};
-            f.kind = BudgetFailureKind::TelemetryUnavailable;
-            f.requested_bytes = bytes;
-            f.available_bytes = 0;
-            f.device_index = device_current();
-            f.heap_index = -1;
-            set_pending_failure(f);
-            return false;
-        }
-        if (has_error()) {
-            BudgetFailure f{};
-            f.kind = BudgetFailureKind::TelemetryError;
-            f.requested_bytes = bytes;
-            f.available_bytes = 0;
-            f.device_index = device_current();
-            f.heap_index = -1;
-            set_pending_failure(f);
-            return false;
-        }
-    }
 
     VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     bci.size = bytes;
@@ -199,22 +168,12 @@ bool create_allocation(VkDeviceSize bytes, bool host_visible,
 
     bool reserved_budget = false;
     if (backend::training_budget_active() && is_dev_local) {
-        // 1. Query headroom without holding accounting/budget locks.
         HeapBudget hb = ctx.query_heap_budget(heap);
-        if (hb.status == BudgetStatus::Unavailable) {
+        if (hb.status != BudgetStatus::Available) {
             BudgetFailure f{};
-            f.kind = BudgetFailureKind::TelemetryUnavailable;
-            f.requested_bytes = bytes;
-            f.available_bytes = 0;
-            f.device_index = device_current();
-            f.heap_index = (int)heap;
-            set_pending_failure(f);
-            vkDestroyBuffer(ctx.device(), a.buffer, nullptr);
-            return false;
-        }
-        if (hb.status == BudgetStatus::QueryError) {
-            BudgetFailure f{};
-            f.kind = BudgetFailureKind::TelemetryError;
+            f.kind = hb.status == BudgetStatus::Unavailable
+                         ? BudgetFailureKind::TelemetryUnavailable
+                         : BudgetFailureKind::TelemetryError;
             f.requested_bytes = bytes;
             f.available_bytes = 0;
             f.device_index = device_current();
@@ -224,58 +183,56 @@ bool create_allocation(VkDeviceSize bytes, bool host_visible,
             return false;
         }
 
-        // 2. Under dedicated budget lock, atomically reserve against live headroom
-        // and optional app limit.
+        BudgetFailure failure{};
+        bool refused = false;
         {
             std::lock_guard<std::mutex> lock(g_budget_mutex);
-            uint64_t reserve = g_budget_reserve_bytes.load(std::memory_order_relaxed);
-            uint64_t app_limit = g_budget_app_limit_bytes.load(std::memory_order_relaxed);
-            uint64_t reserved = g_budget_reserved_bytes.load(std::memory_order_relaxed);
-            uint64_t process = g_device_bytes.load(std::memory_order_relaxed);
+            uint64_t reserve =
+                g_budget_reserve_bytes.load(std::memory_order_relaxed);
+            uint64_t reserved =
+                g_budget_reserved_bytes.load(std::memory_order_relaxed);
+            uint64_t headroom = hb.available_bytes;
+            headroom = headroom > reserve ? headroom - reserve : 0;
+            headroom = headroom > reserved ? headroom - reserved : 0;
 
-            uint64_t occupied = reserve + reserved;
-            uint64_t headroom = (hb.available_bytes > occupied) ? (hb.available_bytes - occupied) : 0;
-
-            uint64_t app_used = process + reserved;
-            uint64_t app_headroom = (app_limit > 0) ? ((app_limit > app_used) ? (app_limit - app_used) : 0)
-                                                    : UINT64_MAX;
-
-            if (app_limit > 0 && accounting_bytes > app_headroom && app_headroom <= headroom) {
-                BudgetFailure f{};
-                f.kind = BudgetFailureKind::ApplicationLimit;
-                f.requested_bytes = bytes;
-                f.available_bytes = app_headroom;
-                f.device_index = device_current();
-                f.heap_index = (int)heap;
-                set_pending_failure(f);
-                vkDestroyBuffer(ctx.device(), a.buffer, nullptr);
-                return false;
-            }
-            if (accounting_bytes > headroom) {
-                BudgetFailure f{};
-                f.kind = BudgetFailureKind::DriverHeadroom;
-                f.requested_bytes = bytes;
-                f.available_bytes = headroom;
-                f.device_index = device_current();
-                f.heap_index = (int)heap;
-                set_pending_failure(f);
-                vkDestroyBuffer(ctx.device(), a.buffer, nullptr);
-                return false;
-            }
-            if (app_limit > 0 && accounting_bytes > app_headroom) {
-                BudgetFailure f{};
-                f.kind = BudgetFailureKind::ApplicationLimit;
-                f.requested_bytes = bytes;
-                f.available_bytes = app_headroom;
-                f.device_index = device_current();
-                f.heap_index = (int)heap;
-                set_pending_failure(f);
-                vkDestroyBuffer(ctx.device(), a.buffer, nullptr);
-                return false;
+            uint64_t app_limit =
+                g_budget_app_limit_bytes.load(std::memory_order_relaxed);
+            uint64_t app_headroom = UINT64_MAX;
+            if (app_limit > 0) {
+                uint64_t process =
+                    g_device_bytes.load(std::memory_order_relaxed);
+                app_headroom = app_limit > process ? app_limit - process : 0;
+                app_headroom =
+                    app_headroom > reserved ? app_headroom - reserved : 0;
             }
 
-            g_budget_reserved_bytes.fetch_add(accounting_bytes, std::memory_order_relaxed);
-            reserved_budget = true;
+            if (app_limit > 0 && accounting_bytes > app_headroom &&
+                app_headroom <= headroom) {
+                failure.kind = BudgetFailureKind::ApplicationLimit;
+                failure.available_bytes = app_headroom;
+                refused = true;
+            } else if (accounting_bytes > headroom) {
+                failure.kind = BudgetFailureKind::DriverHeadroom;
+                failure.available_bytes = headroom;
+                refused = true;
+            } else if (app_limit > 0 &&
+                       accounting_bytes > app_headroom) {
+                failure.kind = BudgetFailureKind::ApplicationLimit;
+                failure.available_bytes = app_headroom;
+                refused = true;
+            } else {
+                g_budget_reserved_bytes.fetch_add(
+                    accounting_bytes, std::memory_order_relaxed);
+                reserved_budget = true;
+            }
+        }
+        if (refused) {
+            failure.requested_bytes = bytes;
+            failure.device_index = device_current();
+            failure.heap_index = (int)heap;
+            set_pending_failure(failure);
+            vkDestroyBuffer(ctx.device(), a.buffer, nullptr);
+            return false;
         }
     }
 
@@ -638,32 +595,34 @@ constexpr size_t kAllocRound = 16;
 }  // namespace
 
 BudgetSnapshot budget_snapshot() {
+    std::lock_guard<std::mutex> transaction(vk::g_budget_txn_mutex);
     BudgetSnapshot s{};
     s.heap_index = -1;
-    s.device_index = device_current();
-    s.reserve_bytes = vk::g_budget_reserve_bytes.load(std::memory_order_relaxed);
-    s.app_limit_bytes = vk::g_budget_app_limit_bytes.load(std::memory_order_relaxed);
-    s.reserved_bytes = vk::g_budget_reserved_bytes.load(std::memory_order_relaxed);
-    s.process_bytes = vk::g_device_bytes.load(std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(vk::g_budget_mutex);
+        s.reserve_bytes =
+            vk::g_budget_reserve_bytes.load(std::memory_order_relaxed);
+        s.app_limit_bytes =
+            vk::g_budget_app_limit_bytes.load(std::memory_order_relaxed);
+        s.reserved_bytes =
+            vk::g_budget_reserved_bytes.load(std::memory_order_relaxed);
+        s.process_bytes =
+            vk::g_device_bytes.load(std::memory_order_relaxed);
+    }
 
-    if (device_count() <= 0 || s.device_index < 0) {
+    if (!vk::context_created()) {
+        s.device_index = device_current();
         s.status = BudgetStatus::Unavailable;
         return s;
     }
-
-    if (vk::has_error()) {
-        s.status = BudgetStatus::QueryError;
-        return s;
-    }
-
     vk::Context& ctx = vk::Context::get();
-    if (!ctx.ok() || !ctx.caps().memory_budget) {
-        s.status = BudgetStatus::Unavailable;
+    s.device_index = device_current();
+    if (!ctx.ok()) {
+        s.status = ctx.init_status();
         return s;
     }
-
-    if (ctx.has_error()) {
-        s.status = BudgetStatus::QueryError;
+    if (!ctx.caps().memory_budget) {
+        s.status = BudgetStatus::Unavailable;
         return s;
     }
 
@@ -684,17 +643,23 @@ BudgetSnapshot budget_snapshot() {
 }
 
 void training_budget_begin(uint64_t reserve_bytes, uint64_t app_limit_bytes) {
+    std::lock_guard<std::mutex> transaction(vk::g_budget_txn_mutex);
     std::lock_guard<std::mutex> lock(vk::g_budget_mutex);
-    vk::g_budget_reserve_bytes.store(reserve_bytes, std::memory_order_relaxed);
-    vk::g_budget_app_limit_bytes.store(app_limit_bytes, std::memory_order_relaxed);
+    vk::g_budget_reserve_bytes.store(reserve_bytes,
+                                      std::memory_order_relaxed);
+    vk::g_budget_app_limit_bytes.store(app_limit_bytes,
+                                        std::memory_order_relaxed);
+    vk::g_budget_reserved_bytes.store(0, std::memory_order_relaxed);
     vk::g_budget_active.store(true, std::memory_order_release);
 }
 
 void training_budget_end() {
+    std::lock_guard<std::mutex> transaction(vk::g_budget_txn_mutex);
     std::lock_guard<std::mutex> lock(vk::g_budget_mutex);
     vk::g_budget_active.store(false, std::memory_order_release);
     vk::g_budget_reserve_bytes.store(0, std::memory_order_relaxed);
     vk::g_budget_app_limit_bytes.store(0, std::memory_order_relaxed);
+    vk::g_budget_reserved_bytes.store(0, std::memory_order_relaxed);
 }
 
 bool training_budget_active() {
@@ -706,24 +671,25 @@ bool consume_budget_failure(BudgetFailure& failure) {
 }
 
 void* device_malloc(size_t bytes) {
-    if (bytes == 0) return nullptr;  // cudaMalloc(0) analog
     vk::clear_pending_failure();
+    if (bytes == 0 || bytes > SIZE_MAX - (kAllocRound - 1)) return nullptr;
 
     size_t rounded = (bytes + kAllocRound - 1) / kAllocRound * kAllocRound;
     vk::Allocation a;
     VkDeviceSize accounting_bytes = 0;
-    if (!vk::create_allocation(rounded, /*host_visible=*/false, &a, &accounting_bytes))
+    if (!vk::create_allocation(rounded, false, &a, &accounting_bytes))
         return nullptr;
     {
         std::lock_guard<std::mutex> lock(vk::g_alloc_mutex);
         vk::g_device_allocs[a.base] = a;
-        vk::g_alloc_accounting[a.base] = accounting_bytes;
+        vk::g_device_accounting[a.base] = accounting_bytes;
     }
     return (void*)a.base;
 }
 
 void device_free(void* ptr) {
     if (!ptr) return;
+    std::lock_guard<std::mutex> transaction(vk::g_budget_txn_mutex);
     vk::Allocation a;
     VkDeviceSize accounting_bytes = 0;
     {
@@ -736,40 +702,39 @@ void device_free(void* ptr) {
         }
         a = it->second;
         vk::g_device_allocs.erase(it);
-
-        auto ac_it = vk::g_alloc_accounting.find((uint64_t)ptr);
-        if (ac_it != vk::g_alloc_accounting.end()) {
+        auto ac_it = vk::g_device_accounting.find((uint64_t)ptr);
+        if (ac_it != vk::g_device_accounting.end()) {
             accounting_bytes = ac_it->second;
-            vk::g_alloc_accounting.erase(ac_it);
+            vk::g_device_accounting.erase(ac_it);
         }
     }
-    // Contract (BackendRuntime.h): all in-flight work completes first.
     vk::Context::get().wait(vk::flush_all_streams());
     vk::destroy_allocation(a);
-    if (accounting_bytes > 0) {
-        vk::g_device_bytes.fetch_sub(accounting_bytes, std::memory_order_relaxed);
-    }
+    if (accounting_bytes > 0)
+        vk::g_device_bytes.fetch_sub(accounting_bytes,
+                                      std::memory_order_relaxed);
 }
 
 void* host_malloc_pinned(size_t bytes) {
-    if (bytes == 0) return nullptr;
     vk::clear_pending_failure();
+    if (bytes == 0 || bytes > SIZE_MAX - (kAllocRound - 1)) return nullptr;
 
     size_t rounded = (bytes + kAllocRound - 1) / kAllocRound * kAllocRound;
     vk::Allocation a;
     VkDeviceSize accounting_bytes = 0;
-    if (!vk::create_allocation(rounded, /*host_visible=*/true, &a, &accounting_bytes))
+    if (!vk::create_allocation(rounded, true, &a, &accounting_bytes))
         return nullptr;
     {
         std::lock_guard<std::mutex> lock(vk::g_alloc_mutex);
         vk::g_host_allocs[a.base] = a;
-        vk::g_alloc_accounting[a.base] = accounting_bytes;
+        vk::g_host_accounting[a.base] = accounting_bytes;
     }
     return a.mapped;
 }
 
 void host_free_pinned(void* ptr) {
     if (!ptr) return;
+    std::lock_guard<std::mutex> transaction(vk::g_budget_txn_mutex);
     vk::Allocation a;
     VkDeviceSize accounting_bytes = 0;
     {
@@ -782,18 +747,17 @@ void host_free_pinned(void* ptr) {
         }
         a = it->second;
         vk::g_host_allocs.erase(it);
-
-        auto ac_it = vk::g_alloc_accounting.find((uint64_t)ptr);
-        if (ac_it != vk::g_alloc_accounting.end()) {
+        auto ac_it = vk::g_host_accounting.find((uint64_t)ptr);
+        if (ac_it != vk::g_host_accounting.end()) {
             accounting_bytes = ac_it->second;
-            vk::g_alloc_accounting.erase(ac_it);
+            vk::g_host_accounting.erase(ac_it);
         }
     }
     vk::Context::get().wait(vk::flush_all_streams());
     vk::destroy_allocation(a);
-    if (accounting_bytes > 0) {
-        vk::g_device_bytes.fetch_sub(accounting_bytes, std::memory_order_relaxed);
-    }
+    if (accounting_bytes > 0)
+        vk::g_device_bytes.fetch_sub(accounting_bytes,
+                                      std::memory_order_relaxed);
 }
 
 namespace {
@@ -1374,13 +1338,12 @@ void pipelines_shutdown();  // VulkanPipelines.cpp
 
 void runtime_shutdown() {
     training_budget_end();
-    g_budget_reserved_bytes.store(0, std::memory_order_relaxed);
     clear_pending_failure();
 
-    Context& ctx = Context::get();  // called from within ~Context's body;
-    VkDevice dev = ctx.device();    // the device is still alive here
+    Context& ctx = Context::get();
+    VkDevice dev = ctx.device();
 
-    gpu_ts_report_by_entry();  // per-kernel GPU breakdown (SS_PROFILE)
+    gpu_ts_report_by_entry();
     pipelines_shutdown();
     {
         std::lock_guard<std::mutex> lock(g_stream_mutex);
@@ -1401,14 +1364,17 @@ void runtime_shutdown() {
         g_params_ring = Allocation{};
         g_params_cursor = 0;
     }
+    std::vector<Allocation> remaining;
     {
         std::lock_guard<std::mutex> lock(g_alloc_mutex);
-        for (auto& kv : g_device_allocs) destroy_allocation(kv.second);
-        for (auto& kv : g_host_allocs) destroy_allocation(kv.second);
+        for (auto& kv : g_device_allocs) remaining.push_back(kv.second);
+        for (auto& kv : g_host_allocs) remaining.push_back(kv.second);
         g_device_allocs.clear();
         g_host_allocs.clear();
-        g_alloc_accounting.clear();
+        g_device_accounting.clear();
+        g_host_accounting.clear();
     }
+    for (const Allocation& a : remaining) destroy_allocation(a);
     g_device_bytes.store(0, std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> lock(g_query_mutex);

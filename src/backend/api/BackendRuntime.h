@@ -68,6 +68,8 @@ bool device_select(int index);
 // it would pick (explicit selection, then backend env override, then
 // auto-score). -1 if no usable device.
 int device_current();
+// Initializes the selected device. Call only when device selection is final.
+bool device_prepare();
 
 // --- device memory usage (best-effort, for status/telemetry UIs) ---
 // Snapshot of VRAM usage on the current device. Each field is independently

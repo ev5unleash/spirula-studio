@@ -3,6 +3,9 @@
 
 #include "backend/api/BackendRuntime.h"
 #include "core/SourcePath.h"
+#ifdef SS_BACKEND_VULKAN
+#include "backend/vulkan/VulkanContext.h"
+#endif
 
 #include <atomic>
 #include <cstdint>
@@ -346,9 +349,18 @@ void test_multithreaded_competition() {
 int main() {
     std::printf("== memory_budget unit test ==\n");
 
+#ifdef SS_BACKEND_VULKAN
+    CHECK(!backend::vk::context_created(), "snapshot test starts before context creation");
+    (void)backend::budget_snapshot();
+    CHECK(!backend::vk::context_created(), "inactive snapshot must not create a context");
+#endif
     if (backend::device_count() > 0 && backend::device_current() < 0) {
         backend::device_select(0);
     }
+    CHECK(backend::device_prepare(), "selected device initializes");
+#ifdef SS_BACKEND_VULKAN
+    CHECK(backend::vk::context_created(), "device_prepare creates the selected context");
+#endif
 
     test_inactive_semantics();
 

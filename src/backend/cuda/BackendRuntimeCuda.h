@@ -38,6 +38,10 @@ inline std::mutex& budget_mutex() {
     static std::mutex m;
     return m;
 }
+inline std::mutex& budget_transaction_mutex() {
+    static std::mutex m;
+    return m;
+}
 inline std::atomic<bool>& budget_active() {
     static std::atomic<bool> a{false};
     return a;
@@ -125,6 +129,7 @@ inline int device_current() {
     }
     return d;
 }
+inline bool device_prepare() { return device_current() >= 0; }
 inline MemoryUsage memory_usage() {
     MemoryUsage m;
     size_t free_bytes = 0, total_bytes = 0;
@@ -143,30 +148,43 @@ inline MemoryUsage memory_usage() {
 }
 
 inline BudgetSnapshot budget_snapshot() {
+    std::lock_guard<std::mutex> transaction(detail::budget_transaction_mutex());
     BudgetSnapshot s{};
     s.heap_index = -1;
-    s.reserve_bytes = detail::budget_reserve_bytes().load(std::memory_order_relaxed);
-    s.app_limit_bytes = detail::budget_app_limit_bytes().load(std::memory_order_relaxed);
-    s.reserved_bytes = detail::budget_reserved_bytes().load(std::memory_order_relaxed);
-    s.process_bytes = detail::device_bytes().load(std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(detail::budget_mutex());
+        s.reserve_bytes =
+            detail::budget_reserve_bytes().load(std::memory_order_relaxed);
+        s.app_limit_bytes =
+            detail::budget_app_limit_bytes().load(std::memory_order_relaxed);
+        s.reserved_bytes =
+            detail::budget_reserved_bytes().load(std::memory_order_relaxed);
+        s.process_bytes = detail::device_bytes().load(std::memory_order_relaxed);
+    }
 
     int count = 0;
-    if (cudaGetDeviceCount(&count) != cudaSuccess || count <= 0) {
+    cudaError_t err = cudaGetDeviceCount(&count);
+    if (err != cudaSuccess) {
+        s.status = err == cudaErrorNoDevice ? BudgetStatus::Unavailable
+                                            : BudgetStatus::QueryError;
+        return s;
+    }
+    if (count <= 0) {
         s.status = BudgetStatus::Unavailable;
         return s;
     }
 
     int dev = -1;
-    if (cudaGetDevice(&dev) != cudaSuccess || dev < 0) {
+    err = cudaGetDevice(&dev);
+    if (err != cudaSuccess) {
+        s.status = BudgetStatus::QueryError;
+        return s;
+    }
+    if (dev < 0) {
         s.status = BudgetStatus::Unavailable;
         return s;
     }
     s.device_index = dev;
-
-    if (cudaPeekAtLastError() != cudaSuccess) {
-        s.status = BudgetStatus::QueryError;
-        return s;
-    }
 
     size_t free_bytes = 0, total_bytes = 0;
     if (cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess) {
@@ -180,18 +198,24 @@ inline BudgetSnapshot budget_snapshot() {
     return s;
 }
 
-inline void training_budget_begin(uint64_t reserve_bytes, uint64_t app_limit_bytes) {
+inline void training_budget_begin(uint64_t reserve_bytes,
+                                  uint64_t app_limit_bytes) {
+    std::lock_guard<std::mutex> transaction(detail::budget_transaction_mutex());
     std::lock_guard<std::mutex> lock(detail::budget_mutex());
     detail::budget_reserve_bytes().store(reserve_bytes, std::memory_order_relaxed);
-    detail::budget_app_limit_bytes().store(app_limit_bytes, std::memory_order_relaxed);
+    detail::budget_app_limit_bytes().store(app_limit_bytes,
+                                           std::memory_order_relaxed);
+    detail::budget_reserved_bytes().store(0, std::memory_order_relaxed);
     detail::budget_active().store(true, std::memory_order_release);
 }
 
 inline void training_budget_end() {
+    std::lock_guard<std::mutex> transaction(detail::budget_transaction_mutex());
     std::lock_guard<std::mutex> lock(detail::budget_mutex());
     detail::budget_active().store(false, std::memory_order_release);
     detail::budget_reserve_bytes().store(0, std::memory_order_relaxed);
     detail::budget_app_limit_bytes().store(0, std::memory_order_relaxed);
+    detail::budget_reserved_bytes().store(0, std::memory_order_relaxed);
 }
 
 inline bool training_budget_active() {
@@ -234,10 +258,11 @@ inline bool is_device_pointer(const void* ptr) {
 
 // --- memory ---
 inline void* device_malloc(size_t bytes) {
+    detail::clear_pending_failure();
     if (bytes == 0) return nullptr;
 
-    detail::clear_pending_failure();
-
+    std::lock_guard<std::mutex> transaction(
+        detail::budget_transaction_mutex());
     if (!training_budget_active()) {
         void* ptr = nullptr;
         cudaError_t alloc_err = cudaMalloc(&ptr, bytes);
@@ -249,145 +274,105 @@ inline void* device_malloc(size_t bytes) {
         return ptr;
     }
 
-    // 1. Non-destructive telemetry query without holding accounting locks.
-    int count = 0;
-    if (cudaGetDeviceCount(&count) != cudaSuccess || count <= 0) {
+    auto refuse = [&](BudgetFailureKind kind, uint64_t available,
+                      int device = -1) -> void* {
         BudgetFailure f{};
-        f.kind = BudgetFailureKind::TelemetryUnavailable;
+        f.kind = kind;
         f.requested_bytes = bytes;
-        f.available_bytes = 0;
-        f.device_index = -1;
+        f.available_bytes = available;
+        f.device_index = device;
         f.heap_index = -1;
         detail::set_pending_failure(f);
         return nullptr;
-    }
+    };
+
+    int count = 0;
+    cudaError_t err = cudaGetDeviceCount(&count);
+    if (err != cudaSuccess)
+        return refuse(err == cudaErrorNoDevice
+                          ? BudgetFailureKind::TelemetryUnavailable
+                          : BudgetFailureKind::TelemetryError,
+                      0);
+    if (count <= 0)
+        return refuse(BudgetFailureKind::TelemetryUnavailable, 0);
 
     int dev = -1;
-    if (cudaGetDevice(&dev) != cudaSuccess || dev < 0) {
-        BudgetFailure f{};
-        f.kind = BudgetFailureKind::TelemetryUnavailable;
-        f.requested_bytes = bytes;
-        f.available_bytes = 0;
-        f.device_index = -1;
-        f.heap_index = -1;
-        detail::set_pending_failure(f);
-        return nullptr;
-    }
+    err = cudaGetDevice(&dev);
+    if (err != cudaSuccess)
+        return refuse(BudgetFailureKind::TelemetryError, 0);
+    if (dev < 0)
+        return refuse(BudgetFailureKind::TelemetryUnavailable, 0);
 
-    if (cudaPeekAtLastError() != cudaSuccess) {
-        BudgetFailure f{};
-        f.kind = BudgetFailureKind::TelemetryError;
-        f.requested_bytes = bytes;
-        f.available_bytes = 0;
-        f.device_index = dev;
-        f.heap_index = -1;
-        detail::set_pending_failure(f);
-        return nullptr;
-    }
+    size_t free_bytes = 0, total_bytes = 0;
+    if (cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess)
+        return refuse(BudgetFailureKind::TelemetryError, 0, dev);
 
-    size_t free_b = 0, total_b = 0;
-    if (cudaMemGetInfo(&free_b, &total_b) != cudaSuccess) {
-        BudgetFailure f{};
-        f.kind = BudgetFailureKind::TelemetryError;
-        f.requested_bytes = bytes;
-        f.available_bytes = 0;
-        f.device_index = dev;
-        f.heap_index = -1;
-        detail::set_pending_failure(f);
-        return nullptr;
-    }
-
-    // 2. Under dedicated budget lock, atomically reserve against live headroom
-    // and optional app limit.
     {
         std::lock_guard<std::mutex> lock(detail::budget_mutex());
-        uint64_t reserve = detail::budget_reserve_bytes().load(std::memory_order_relaxed);
-        uint64_t app_limit = detail::budget_app_limit_bytes().load(std::memory_order_relaxed);
-        uint64_t reserved = detail::budget_reserved_bytes().load(std::memory_order_relaxed);
-        uint64_t process = detail::device_bytes().load(std::memory_order_relaxed);
+        uint64_t headroom = (uint64_t)free_bytes;
+        uint64_t reserve =
+            detail::budget_reserve_bytes().load(std::memory_order_relaxed);
+        uint64_t reserved =
+            detail::budget_reserved_bytes().load(std::memory_order_relaxed);
+        headroom = headroom > reserve ? headroom - reserve : 0;
+        headroom = headroom > reserved ? headroom - reserved : 0;
 
-        uint64_t occupied = reserve + reserved;
-        uint64_t headroom = (free_b > occupied) ? (free_b - occupied) : 0;
-
-        uint64_t app_used = process + reserved;
-        uint64_t app_headroom = (app_limit > 0) ? ((app_limit > app_used) ? (app_limit - app_used) : 0)
-                                                : UINT64_MAX;
-
-        if (app_limit > 0 && bytes > app_headroom && app_headroom <= headroom) {
-            BudgetFailure f{};
-            f.kind = BudgetFailureKind::ApplicationLimit;
-            f.requested_bytes = bytes;
-            f.available_bytes = app_headroom;
-            f.device_index = dev;
-            f.heap_index = -1;
-            detail::set_pending_failure(f);
-            return nullptr;
-        }
-        if (bytes > headroom) {
-            BudgetFailure f{};
-            f.kind = BudgetFailureKind::DriverHeadroom;
-            f.requested_bytes = bytes;
-            f.available_bytes = headroom;
-            f.device_index = dev;
-            f.heap_index = -1;
-            detail::set_pending_failure(f);
-            return nullptr;
-        }
-        if (app_limit > 0 && bytes > app_headroom) {
-            BudgetFailure f{};
-            f.kind = BudgetFailureKind::ApplicationLimit;
-            f.requested_bytes = bytes;
-            f.available_bytes = app_headroom;
-            f.device_index = dev;
-            f.heap_index = -1;
-            detail::set_pending_failure(f);
-            return nullptr;
+        uint64_t app_limit =
+            detail::budget_app_limit_bytes().load(std::memory_order_relaxed);
+        uint64_t app_headroom = UINT64_MAX;
+        if (app_limit > 0) {
+            uint64_t process =
+                detail::device_bytes().load(std::memory_order_relaxed);
+            app_headroom = app_limit > process ? app_limit - process : 0;
+            app_headroom =
+                app_headroom > reserved ? app_headroom - reserved : 0;
         }
 
-        detail::budget_reserved_bytes().fetch_add(bytes, std::memory_order_relaxed);
+        if (app_limit > 0 && bytes > app_headroom &&
+            app_headroom <= headroom)
+            return refuse(BudgetFailureKind::ApplicationLimit, app_headroom,
+                          dev);
+        if (bytes > headroom)
+            return refuse(BudgetFailureKind::DriverHeadroom, headroom, dev);
+        if (app_limit > 0 && bytes > app_headroom)
+            return refuse(BudgetFailureKind::ApplicationLimit, app_headroom,
+                          dev);
+        detail::budget_reserved_bytes().fetch_add(bytes,
+                                                   std::memory_order_relaxed);
     }
 
-    // 3. Driver allocation without holding accounting locks.
     void* ptr = nullptr;
     cudaError_t alloc_err = cudaMalloc(&ptr, bytes);
-
-    // 4. Commit or rollback.
-    // Lock order: budget_mutex() before alloc_mutex().
-    if (ptr != nullptr && alloc_err == cudaSuccess) {
-        std::lock_guard<std::mutex> b_lock(detail::budget_mutex());
-        std::lock_guard<std::mutex> a_lock(detail::alloc_mutex());
-        detail::alloc_sizes()[ptr] = bytes;
-        detail::device_bytes().fetch_add(bytes, std::memory_order_relaxed);
-        detail::budget_reserved_bytes().fetch_sub(bytes, std::memory_order_relaxed);
-        return ptr;
-    }
-
     {
-        std::lock_guard<std::mutex> b_lock(detail::budget_mutex());
-        detail::budget_reserved_bytes().fetch_sub(bytes, std::memory_order_relaxed);
+        std::lock_guard<std::mutex> budget_lock(detail::budget_mutex());
+        detail::budget_reserved_bytes().fetch_sub(bytes,
+                                                   std::memory_order_relaxed);
+        if (ptr != nullptr && alloc_err == cudaSuccess) {
+            std::lock_guard<std::mutex> alloc_lock(detail::alloc_mutex());
+            detail::alloc_sizes()[ptr] = bytes;
+            detail::device_bytes().fetch_add(bytes, std::memory_order_relaxed);
+            return ptr;
+        }
     }
     return nullptr;
 }
 
 inline void device_free(void* ptr) {
     if (!ptr) return;
+    std::lock_guard<std::mutex> transaction(
+        detail::budget_transaction_mutex());
     size_t bytes = 0;
     {
         std::lock_guard<std::mutex> lock(detail::alloc_mutex());
-        auto& sizes = detail::alloc_sizes();
-        auto it = sizes.find(ptr);
-        if (it != sizes.end()) {
-            bytes = it->second;
-        }
+        auto it = detail::alloc_sizes().find(ptr);
+        if (it != detail::alloc_sizes().end()) bytes = it->second;
     }
-    cudaError_t err = cudaFree(ptr);
-    if (err == cudaSuccess) {
-        if (bytes > 0) {
-            std::lock_guard<std::mutex> lock(detail::alloc_mutex());
-            detail::alloc_sizes().erase(ptr);
-            detail::device_bytes().fetch_sub(bytes, std::memory_order_relaxed);
-        }
+    if (cudaFree(ptr) != cudaSuccess || bytes == 0) return;
+    {
+        std::lock_guard<std::mutex> lock(detail::alloc_mutex());
+        detail::alloc_sizes().erase(ptr);
     }
+    detail::device_bytes().fetch_sub(bytes, std::memory_order_relaxed);
 }
 inline void* host_malloc_pinned(size_t bytes) {
     void* ptr = nullptr;
