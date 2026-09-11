@@ -35,6 +35,11 @@ void set_error(const char* what, VkResult result) {
         g_error += ")";
     }
 }
+bool has_error() {
+    std::lock_guard<std::mutex> lock(g_error_mutex);
+    return !g_error.empty();
+}
+
 
 namespace {
 
@@ -661,6 +666,64 @@ uint32_t Context::find_memory_type(uint32_t type_bits,
             return i;
     }
     return UINT32_MAX;
+}
+bool Context::has_error() const {
+    return vk::has_error();
+}
+
+uint32_t Context::memory_type_heap(uint32_t type_index) const {
+    if (type_index < _mem_props.memoryTypeCount)
+        return _mem_props.memoryTypes[type_index].heapIndex;
+    return UINT32_MAX;
+}
+
+bool Context::is_heap_device_local(uint32_t heap_index) const {
+    if (heap_index < _mem_props.memoryHeapCount)
+        return (_mem_props.memoryHeaps[heap_index].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0;
+    return false;
+}
+
+int Context::default_device_local_heap() const {
+    int best = -1;
+    for (uint32_t i = 0; i < _mem_props.memoryHeapCount; i++) {
+        if (_mem_props.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+            if (best < 0 || _mem_props.memoryHeaps[i].size > _mem_props.memoryHeaps[best].size)
+                best = (int)i;
+        }
+    }
+    return best;
+}
+
+HeapBudget Context::query_heap_budget(uint32_t heap_index) const {
+    HeapBudget out{};
+    if (!ok() || _physical == VK_NULL_HANDLE || !_caps.memory_budget) {
+        out.status = BudgetStatus::Unavailable;
+        return out;
+    }
+    if (heap_index >= _mem_props.memoryHeapCount) {
+        out.status = BudgetStatus::Unavailable;
+        return out;
+    }
+    if (has_error()) {
+        out.status = BudgetStatus::QueryError;
+        return out;
+    }
+
+    VkPhysicalDeviceMemoryBudgetPropertiesEXT budget{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+    VkPhysicalDeviceMemoryProperties2 mp2{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2};
+    mp2.pNext = &budget;
+    vkGetPhysicalDeviceMemoryProperties2(_physical, &mp2);
+
+    out.status = BudgetStatus::Available;
+    out.budget_bytes = budget.heapBudget[heap_index];
+    out.usage_bytes = budget.heapUsage[heap_index];
+    out.total_bytes = _mem_props.memoryHeaps[heap_index].size;
+    out.available_bytes = (out.budget_bytes > out.usage_bytes)
+                              ? (out.budget_bytes - out.usage_bytes)
+                              : 0;
+    return out;
 }
 
 }  // namespace vk

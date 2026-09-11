@@ -5,6 +5,7 @@
 // reported through ok() + backend::last_error(), never by throwing across
 // the backend API surface.
 
+#include "backend/api/BackendRuntime.h"
 #include <vulkan/vulkan.h>
 
 #include <cstdint>
@@ -39,6 +40,14 @@ struct Capabilities {
     uint32_t max_shared_memory = 0;
     VkDeviceSize non_coherent_atom_size = 64;
 };
+struct HeapBudget {
+    BudgetStatus status = BudgetStatus::Unavailable;
+    uint64_t total_bytes = 0;
+    uint64_t available_bytes = 0;
+    uint64_t budget_bytes = 0;
+    uint64_t usage_bytes = 0;
+};
+
 
 class Context {
 public:
@@ -75,6 +84,15 @@ public:
     // or UINT32_MAX.
     uint32_t find_memory_type(uint32_t type_bits,
                               VkMemoryPropertyFlags required) const;
+    // Memory-type index to heap index mapping, and heap property helpers.
+    uint32_t memory_type_heap(uint32_t type_index) const;
+    bool is_heap_device_local(uint32_t heap_index) const;
+    int default_device_local_heap() const;
+
+    // Queries one heap's EXT memory budget.
+    HeapBudget query_heap_budget(uint32_t heap_index) const;
+    bool has_error() const;
+
 
     // Called by the runtime layer so its device children (command pools,
     // staging buffer, query pool, leaked allocations) are destroyed inside
@@ -110,6 +128,7 @@ private:
 // Sets the sticky backend error (returned once by backend::last_error()).
 // `result` may be VK_SUCCESS for non-VkResult failures.
 void set_error(const char* what, VkResult result);
+bool has_error();
 
 }  // namespace vk
 }  // namespace backend
