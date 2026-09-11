@@ -34,7 +34,17 @@ extern std::string g_error;
 // by backend::memory_usage() in VulkanContext.cpp. Host-pinned allocations
 // are excluded — they are not device-local VRAM.
 std::atomic<uint64_t> g_device_bytes{0};
-// Training budget state
+// Training budget state.
+//
+// g_budget_txn_mutex is the single transaction order for every budget
+// operation: snapshot, begin/end, allocation (heap query -> reserve -> driver
+// calls -> commit or rollback) and free (destroy -> credit). It MAY span
+// driver calls, which is what makes a heap sample and the reservation it
+// justifies one transaction. g_budget_mutex guards the counters only and is
+// never held across a Vulkan call. The transaction mutex is recursive because
+// the public allocation entry points hold it across create_allocation plus the
+// map insert that publishes the resulting charge.
+std::recursive_mutex g_budget_txn_mutex;
 std::mutex g_budget_mutex;
 std::atomic<bool> g_budget_active{false};
 std::atomic<uint64_t> g_budget_reserve_bytes{0};
