@@ -12,15 +12,19 @@
 //    must detach first (GuiApp does this).
 //  - engine_ready() flips true after engine setup; only then may a
 //    RenderWorker attach.
+//  - A run that failed after engine setup (Phase::TrainError) needs
+//    cleanup_failed_engine() once every render consumer has detached.
 
 #include "app/TrainerCore.h"
 #include "app/webviewer/Viewer.h"
+#include "backend/api/BackendRuntime.h"
 
 #include <atomic>
 #include <condition_variable>
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -78,6 +82,22 @@ public:
     void note_engine_taken() { _engine_ready = false; }
     std::string error();
 
+    // Structured GPU-memory failure behind a failed run, if that is what
+    // failed it (copy). Empty for a generic training exception. Localize the
+    // message from these fields -- error() is the English fallback.
+    std::optional<backend::BudgetFailure> memory_failure();
+
+    // ---- Failed-engine cleanup --------------------------------------------
+    //
+    // A run that failed before/inside engine setup can leave the process-global
+    // engine holding that session's state. Call this ONCE the GUI's native
+    // render consumers have detached (viewport, image compare, model viewer --
+    // nothing may hold hooks into session() any more). It stops the web viewer
+    // outside _mu, joins the worker without holding engine_mutex, then resets
+    // the engine. Repeated calls, or a call after a successful run, are
+    // harmless no-ops. The last checkpoint on disk is never touched.
+    void cleanup_failed_engine();
+
     // Valid between load_dataset()/start_training() calls; see lifetime
     // rules above.
     spirula::TrainerSession* session() { return _session.get(); }
@@ -121,8 +141,14 @@ private:
     std::string             _data_err;     // non-empty while awaiting an answer
     int                     _data_answer = 0;   // 0 pending, 1 retry, 2 stop
 
+    // Set when the worker failed inside engine setup/training: the engine may
+    // hold this session's state, and cleanup_failed_engine() is owed. Reset on
+    // every new load_dataset()/start_training().
+    std::atomic<bool> _engine_dirty{false};
+
     mutable std::mutex _mu;       // guards everything below
     std::string _error;
+    std::optional<backend::BudgetFailure> _memory_failure;
     spirula::TrainerProgress _latest;
     std::deque<double> _latencies;
     std::vector<MetricPoint> _metrics;
