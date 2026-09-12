@@ -785,13 +785,18 @@ void GuiApp::open_training_run(std::string path) {
 
 void GuiApp::clear_training_resume() {
     fs::path source;
-    if (!_cfg.resume.empty()) {
-        const fs::path checkpoint(_cfg.resume);
-        source = ckpt::checkpoint_step(checkpoint) >= 0
-                     ? checkpoint.parent_path()
-                     : checkpoint;
-    } else if (const auto* session = _runner.session()) {
-        source = session->out_dir;
+    const TrainRunner::Phase ph = _runner.phase();
+    if (ph == TrainRunner::Phase::Done ||
+        ph == TrainRunner::Phase::TrainError) {
+        if (const auto* session = _runner.session();
+            session && !session->out_dir.empty())
+            source = session->out_dir;
+    }
+    if (source.empty() && !_cfg.resume.empty())
+        source = fs::path(_cfg.resume).parent_path();
+    if (source.empty() && _cfg.resume.empty()) {
+        if (const auto* session = _runner.session())
+            source = session->out_dir;
     }
 
     auto same_path = [](const fs::path& a, const fs::path& b) {
@@ -1980,7 +1985,6 @@ void GuiApp::frame() {
     draw_menu_bar();
     if (!_resume_error.empty()) {
         ui::TextColoredWrappedRaw(kErr, _resume_error);
-        ImGui::SameLine();
         if (ui::SmallButton(msg::resume_dismiss)) _resume_error.clear();
     }
     switch (_screen) {
