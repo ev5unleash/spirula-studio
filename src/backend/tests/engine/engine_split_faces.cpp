@@ -3,13 +3,14 @@
 #include <engine/EngineState.h>
 
 #include <app/TrainerCore.h>
+#include <checkpoint/Resume.h>
 #include <core/Camera.h>
+#include <core/CheckpointIO.h>
 #include <data/CameraMath.h>
 #include <data/DatasetParser.h>
 #include <data/ImageProbe.h>
 #include <external/stb_image.h>
 #include <external/stb_image_write.h>
-
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -832,6 +833,267 @@ bool run_managed_control(const fs::path& fixture, const fs::path& out_dir) {
     return ok;
 }
 
+std::string checkpoint_name(int step) {
+    char name[32];
+    std::snprintf(name, sizeof name, "step-%09d.ckpt", step);
+    return name;
+}
+
+std::vector<uint8_t> read_file_bytes(const fs::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) throw std::runtime_error("cannot read " + path.string());
+    return std::vector<uint8_t>(std::istreambuf_iterator<char>(in), {});
+}
+
+bool any_nonzero(const std::vector<float>& values) {
+    for (float value : values)
+        if (value != 0.0f) return true;
+    return false;
+}
+
+bool run_checkpoint_autosave(const fs::path& fixture,
+                             const fs::path& out_dir,
+                             const fs::path& keep_all_dir,
+                             const fs::path& different_dir) {
+    std::error_code ec;
+    fs::remove_all(out_dir, ec);
+    fs::remove_all(keep_all_dir, ec);
+    fs::remove_all(different_dir, ec);
+    bool ok = true;
+    std::vector<float> saved_means;
+    std::vector<float> saved_g1_means;
+
+    // Stop just after callback step 2. The periodic save runs immediately
+    // before step 2, so its manifest records the two completed steps.
+    {
+        spirula::TrainerSession session;
+        configure_control_session(session, fixture, out_dir);
+        session.cfg.steps_per_save = 2;
+        session.save_on_stop.store(false);
+        session.check_config();
+        session.load_dataset();
+        session.setup_engine();
+        spirula::TrainerCallbacks cb;
+        cb.on_step = [&](const spirula::TrainerProgress& p) {
+            if (p.step == 1) {
+                saved_means = {};
+                append_device(saved_means,
+                              (const float*)engine().world.means.data_ptr(),
+                              engine().world.means.size() * 3);
+                saved_g1_means = {};
+                if (engine().optim.g1_means.data_ptr())
+                    append_device(saved_g1_means,
+                                  (const float*)engine().optim.g1_means.data_ptr(),
+                                  engine().optim.g1_means.size() * 3);
+                if (!any_nonzero(saved_g1_means))
+                    std::printf("engine_split_faces: autosave optimizer state was zero\n");
+            }
+            if (p.step == 2) session.stop_requested.store(true);
+        };
+        session.train(cb);
+        session.reset_engine();
+    }
+
+    const fs::path step2 = out_dir / "step-000000002.ckpt";
+    try {
+        const JsonValue state = ckpt::validate_checkpoint(step2, true);
+        ok = state.find("step") && state.find("step")->as_int() == 2 && ok;
+        const auto cfg = ckpt::config_from_json(step2 / "config.json");
+        ok = !cfg.data.empty() && fs::is_regular_file(step2 / "splat.ply") && ok;
+    } catch (const std::exception& e) {
+        std::printf("engine_split_faces: autosave validation FAILED: %s\n", e.what());
+        ok = false;
+    }
+    const auto state_before = read_file_bytes(step2 / "state.tar");
+    const auto ply_before = read_file_bytes(step2 / "splat.ply");
+    const auto config_before = read_file_bytes(step2 / "config.json");
+
+    // A serializer open failure after PLY output must not disturb the
+    // previously published checkpoint.
+    {
+        spirula::TrainerSession session;
+        configure_control_session(session, fixture, out_dir);
+        session.cfg.resume = step2.string();
+        session.cfg.steps_per_save = 2;
+        session.cfg.num_iterations = 3;
+        session.save_on_stop.store(false);
+        session.check_config();
+        session.load_dataset();
+        session.setup_engine();
+        ok = session.start_step == 2 && session.cur_step.load() == 2 && ok;
+        if (saved_means.empty() || saved_g1_means.empty()) ok = false;
+        std::vector<float> loaded_means;
+        append_device(loaded_means,
+                      (const float*)engine().world.means.data_ptr(),
+                      engine().world.means.size() * 3);
+        ok = loaded_means == saved_means && ok;
+
+        const fs::path fault = out_dir / ".fault-state";
+        fs::create_directories(fault / "state.tar");
+        bool threw = false;
+        try {
+            engine_save_checkpoint(fault.string(), true, 2);
+        } catch (const std::exception& e) {
+            threw = true;
+            std::printf("engine_split_faces: autosave serializer failure raised: %s\n",
+                        e.what());
+        }
+        ok = threw && ok;
+        fs::remove_all(fault, ec);
+        const fs::path sentinel_dir = out_dir / "step-000000003.ckpt";
+        fs::create_directories(sentinel_dir);
+        {
+            std::ofstream sentinel(sentinel_dir / "sentinel", std::ios::binary);
+            sentinel << "do not overwrite";
+        }
+        const auto sentinel_before = read_file_bytes(sentinel_dir / "sentinel");
+        threw = false;
+        try {
+            session.save_checkpoint(3);
+        } catch (const std::exception&) {
+            threw = true;
+        }
+        ok = threw && read_file_bytes(sentinel_dir / "sentinel") == sentinel_before && ok;
+        fs::remove_all(sentinel_dir, ec);
+
+        session.train();
+        session.reset_engine();
+    }
+    try {
+        const auto resolved = ckpt::resolve_checkpoint(out_dir);
+        ok = resolved.ckpt_dir == fs::absolute(step2) && ok;
+        ok = read_file_bytes(step2 / "state.tar") == state_before &&
+             read_file_bytes(step2 / "splat.ply") == ply_before &&
+             read_file_bytes(step2 / "config.json") == config_before && ok;
+    } catch (const std::exception& e) {
+        std::printf("engine_split_faces: autosave preservation FAILED: %s\n", e.what());
+        ok = false;
+    }
+
+    // Continue to six with latest-only pruning. The known step-2 save at the
+    // first loop boundary is idempotent; successful publication of step 6 is
+    // the only checkpoint left.
+    {
+        spirula::TrainerSession session;
+        configure_control_session(session, fixture, out_dir);
+        session.cfg.resume = step2.string();
+        session.cfg.steps_per_save = 2;
+        session.cfg.num_iterations = 6;
+        session.save_on_stop.store(true);
+        session.check_config();
+        session.load_dataset();
+        session.setup_engine();
+        session.train();
+        session.reset_engine();
+    }
+    const fs::path step6 = out_dir / "step-000000006.ckpt";
+    try {
+        ok = ckpt::validate_checkpoint(step6, true).find("step") != nullptr && ok;
+        ok = !fs::exists(step2) && !fs::exists(out_dir / "step-000000004.ckpt") && ok;
+        ok = ckpt::resolve_checkpoint(out_dir).ckpt_dir == fs::absolute(step6) && ok;
+    } catch (const std::exception& e) {
+        std::printf("engine_split_faces: latest-only autosave FAILED: %s\n", e.what());
+        ok = false;
+    }
+
+    // Keep-all uses the same scheduler but retains steps 2, 4 and 6.
+    {
+        spirula::TrainerSession session;
+        configure_control_session(session, fixture, keep_all_dir);
+        session.cfg.steps_per_save = 2;
+        session.cfg.save_only_latest_checkpoint = false;
+        session.check_config();
+        session.load_dataset();
+        session.setup_engine();
+        session.train();
+        session.reset_engine();
+    }
+    for (int step : {2, 4, 6}) {
+        const fs::path path = keep_all_dir / checkpoint_name(step);
+        try {
+            ok = ckpt::validate_checkpoint(path, true).find("step") != nullptr && ok;
+        } catch (const std::exception& e) {
+            std::printf("engine_split_faces: keep-all step %d FAILED: %s\n",
+                        step, e.what());
+        }
+    }
+
+    // Removing a legacy checkpoint's local snapshot is migrated before the
+    // root config is rewritten. The retained bytes then remain independent of
+    // a later corrupt convenience root.
+    const fs::path legacy_step = keep_all_dir / "step-000000006.ckpt";
+    fs::remove(legacy_step / "config.json", ec);
+    {
+        spirula::TrainerSession session;
+        configure_control_session(session, fixture, keep_all_dir);
+        session.cfg.resume = legacy_step.string();
+        session.cfg.num_iterations = 6;
+        session.save_on_stop.store(false);
+        session.check_config();
+        session.load_dataset();
+        session.setup_engine();
+        session.reset_engine();
+    }
+    ok = fs::is_regular_file(legacy_step / "config.json") && ok;
+    {
+        std::ofstream corrupt(keep_all_dir / "config.json", std::ios::binary |
+                                                        std::ios::trunc);
+        corrupt << "not json";
+    }
+    try {
+        const auto resolved = ckpt::resolve_checkpoint(keep_all_dir);
+        ok = resolved.ckpt_dir == fs::absolute(legacy_step) &&
+             resolved.config_path == fs::absolute(legacy_step / "config.json") && ok;
+    } catch (const std::exception& e) {
+        std::printf("engine_split_faces: legacy snapshot FAILED: %s\n", e.what());
+        ok = false;
+    }
+
+    // An explicit older checkpoint cannot branch in-place past a higher
+    // canonical entry; a distinct output directory remains allowed.
+    const auto conflict_root = read_file_bytes(keep_all_dir / "config.json");
+    {
+        spirula::TrainerSession session;
+        configure_control_session(session, fixture, keep_all_dir);
+        session.cfg.resume = (keep_all_dir / "step-000000002.ckpt").string();
+        session.cfg.num_iterations = 6;
+        bool threw = false;
+        try {
+            session.check_config();
+            session.load_dataset();
+            session.setup_engine();
+        } catch (const std::exception&) {
+            threw = true;
+        }
+        ok = threw && read_file_bytes(keep_all_dir / "config.json") == conflict_root && ok;
+        session.reset_engine();
+    }
+    {
+        spirula::TrainerSession session;
+        configure_control_session(session, fixture, different_dir);
+        session.cfg.resume = (keep_all_dir / "step-000000002.ckpt").string();
+        session.cfg.num_iterations = 3;
+        session.save_on_stop.store(false);
+        bool threw = false;
+        try {
+            session.check_config();
+            session.load_dataset();
+            session.setup_engine();
+        } catch (const std::exception& e) {
+            threw = true;
+            std::printf("engine_split_faces: different-output resume FAILED: %s\n",
+                        e.what());
+        }
+        ok = !threw && ok;
+        session.reset_engine();
+    }
+
+    std::printf("engine_split_faces: checkpoint autosave %s\n",
+                ok ? "ok" : "FAILED");
+    std::fflush(stdout);
+    return ok;
+}
+
 // Removes the internally created temp trees on every exit path; an explicit
 // export-fixture directory is the caller's to keep.
 struct TempCleanup {
@@ -1288,8 +1550,15 @@ int main(int argc, char** argv) {
         fs::temp_directory_path() / "spirula_engine_split_faces_refusal";
     const fs::path collision_out =
         fs::temp_directory_path() / "spirula_engine_split_faces_collision";
+    const fs::path autosave_out =
+        fs::temp_directory_path() / "spirula_engine_split_faces_autosave";
+    const fs::path keep_all_out =
+        fs::temp_directory_path() / "spirula_engine_split_faces_keep_all";
+    const fs::path different_out =
+        fs::temp_directory_path() / "spirula_engine_split_faces_different";
     TempCleanup cleanup{{fixture_dir, control_out, faces_out, refusal_out,
-                         collision_out}};
+                         collision_out, autosave_out, keep_all_out,
+                         different_out}};
 
     bool ok = false;
     bool fixture_ok = false;
@@ -1318,6 +1587,18 @@ int main(int argc, char** argv) {
     } else {
         std::printf("engine_split_faces: managed control skipped (no fixture)\n");
     }
+    bool autosave_ok = false;
+    if (fixture_ok) {
+        try {
+            autosave_ok = run_checkpoint_autosave(
+                fixture_dir, autosave_out, keep_all_out, different_out);
+        } catch (const std::exception& e) {
+            std::printf("engine_split_faces: checkpoint autosave FAILED: %s\n",
+                        e.what());
+        }
+    } else {
+        std::printf("engine_split_faces: checkpoint autosave skipped (no fixture)\n");
+    }
 
     // After the control leg: these replace the engine's DataManager and move
     // the pool's retained capacities, which the control's stage reports read.
@@ -1341,7 +1622,6 @@ int main(int argc, char** argv) {
     }
     engine_reset();
 
-    ok = fixture_ok && control_ok && faces_ok && ok;
-    std::printf(ok ? "engine_split_faces: PASSED\n" : "engine_split_faces: FAILED\n");
+    ok = fixture_ok && control_ok && autosave_ok && faces_ok && ok;
     return ok ? 0 : 1;
 }

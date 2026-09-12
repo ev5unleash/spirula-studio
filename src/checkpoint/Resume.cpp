@@ -4,28 +4,34 @@
 
 #include "config/TrainConfigJson.h"
 #include "core/CheckpointIO.h"
+#include "i18n/catalog/Log.h"
 
 #include <algorithm>
+#include <charconv>
+#include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 #include <vector>
+#include <climits>
 
 namespace fs = std::filesystem;
+namespace lmsg = spirula::i18n::msg::log;
 
 namespace ckpt {
 
 namespace {
 
 // Read state.tar once and hand back both its member index and the stream.
-// Callers want either state.json or the member name list, usually both.
 struct TarView {
     std::ifstream in;
     std::vector<TarMember> members;
 };
 
 TarView open_state_tar(const fs::path& ckpt_dir) {
-    fs::path tarpath = ckpt_dir / "state.tar";
+    const fs::path tarpath = ckpt_dir / "state.tar";
     TarView v;
     v.in.open(tarpath.string(), std::ios::binary);
     if (!v.in)
@@ -41,32 +47,145 @@ std::string read_member(TarView& v, const std::string& name) {
     return {};
 }
 
+bool is_staging(const fs::path& path) {
+    const std::string name = path.filename().string();
+    return name.rfind(".checkpoint-", 0) == 0;
+}
+
+fs::path paired_config_path(const fs::path& run_dir, const fs::path& ckpt_dir) {
+    const fs::path local = ckpt_dir / "config.json";
+    std::error_code ec;
+    fs::file_status st = fs::symlink_status(local, ec);
+    if (ec == std::errc::no_such_file_or_directory) {
+        ec.clear();
+        st = fs::file_status(fs::file_type::not_found);
+    }
+    if (ec)
+        throw std::runtime_error("cannot inspect " + local.string() +
+                                 ": " + ec.message());
+    if (st.type() != fs::file_type::not_found)
+        return local;
+    return run_dir / "config.json";
+}
+
+[[noreturn]] void no_checkpoint(const fs::path& run_dir) {
+    throw std::runtime_error(spirula::i18n::format(
+        lmsg::checkpoint_resume_unavailable, {run_dir.string()}));
+}
+
+int state_step(const JsonValue& state, const fs::path& ckpt_dir) {
+    const JsonValue* v = state.find("step");
+    if (!v || v->type != JsonValue::Type::Number ||
+        !std::isfinite(v->num) || std::floor(v->num) != v->num ||
+        v->num < 0.0 || v->num > (double)INT_MAX)
+        throw std::runtime_error("checkpoint " + ckpt_dir.string() +
+                                 " has an invalid state step");
+    return (int)v->num;
+}
+
+
+struct Candidate {
+    int step;
+    fs::path path;
+};
+
 }  // namespace
 
 
-ResolvedCheckpoint resolve_checkpoint(const fs::path& path) {
-    if (fs::is_regular_file(path / "state.tar"))
-        return {path.parent_path(), path};
+int checkpoint_step(const fs::path& path) {
+    const std::string name = path.filename().string();
+    constexpr const char* prefix = "step-";
+    constexpr const char* suffix = ".ckpt";
+    if (name.size() <= std::strlen(prefix) + std::strlen(suffix) ||
+        name.compare(0, std::strlen(prefix), prefix) != 0 ||
+        name.compare(name.size() - std::strlen(suffix),
+                     std::strlen(suffix), suffix) != 0)
+        return -1;
+    const size_t begin = std::strlen(prefix);
+    const size_t end = name.size() - std::strlen(suffix);
+    int value = 0;
+    const auto parsed = std::from_chars(name.data() + begin,
+                                        name.data() + end, value);
+    if (parsed.ec != std::errc() || parsed.ptr != name.data() + end ||
+        value < 0)
+        return -1;
+    char canonical[64];
+    std::snprintf(canonical, sizeof canonical, "step-%09d.ckpt", value);
+    return name == canonical ? value : -1;
+}
 
-    // Checkpoint dirs are step-%09d.ckpt, so lexicographic order is numeric.
-    std::vector<fs::path> ckpts;
-    if (fs::is_directory(path))
-        for (const auto& e : fs::directory_iterator(path)) {
-            std::string b = e.path().filename().string();
-            if (b.rfind("step-", 0) == 0 && b.find(".ckpt") != std::string::npos)
-                ckpts.push_back(e.path());
+
+ResolvedCheckpoint resolve_checkpoint(const fs::path& input) {
+    if (is_staging(input))
+        throw std::runtime_error("staging checkpoint paths cannot be resumed: " +
+                                 input.string());
+    const fs::path path = fs::absolute(input);
+    std::error_code ec;
+
+    fs::file_status tar_status = fs::symlink_status(path / "state.tar", ec);
+    if (ec == std::errc::no_such_file_or_directory) {
+        ec.clear();
+        tar_status = fs::file_status(fs::file_type::not_found);
+    }
+    if (ec)
+        throw std::runtime_error("cannot inspect " +
+                                 (path / "state.tar").string() + ": " +
+                                 ec.message());
+    if (tar_status.type() == fs::file_type::regular)
+        return {path.parent_path(), path,
+                paired_config_path(path.parent_path(), path)};
+
+    // A canonical checkpoint name pins direct-path callers even when its
+    // archive is incomplete; validate_checkpoint reports the actual problem.
+    if (checkpoint_step(path) >= 0)
+        return {path.parent_path(), path,
+                paired_config_path(path.parent_path(), path)};
+
+    const fs::file_status run_status = fs::symlink_status(path, ec);
+    if (ec && ec != std::errc::no_such_file_or_directory)
+        throw std::runtime_error("cannot inspect " + path.string() + ": " +
+                                 ec.message());
+    if (ec || run_status.type() != fs::file_type::directory)
+        no_checkpoint(path);
+
+    std::vector<Candidate> candidates;
+    for (fs::directory_iterator it(path, ec), end; !ec && it != end;
+         it.increment(ec)) {
+        const fs::path candidate = it->path();
+        const int step = checkpoint_step(candidate);
+        if (step < 0) continue;
+        const fs::file_status st = fs::symlink_status(candidate, ec);
+        if (ec) break;
+        if (st.type() == fs::file_type::directory)
+            candidates.push_back({step, candidate});
+    }
+    if (ec) throw std::runtime_error("cannot enumerate " + path.string() +
+                                     ": " + ec.message());
+    std::sort(candidates.begin(), candidates.end(),
+              [](const Candidate& a, const Candidate& b) {
+                  return a.step > b.step;
+              });
+
+    for (const Candidate& candidate : candidates) {
+        try {
+            validate_checkpoint(candidate.path, true);
+            const fs::path config =
+                paired_config_path(path, candidate.path);
+            const TrainConfig saved = config_from_json(config);
+            if (saved.data.empty())
+                throw std::runtime_error("checkpoint config has no data");
+            return {path, candidate.path, config};
+        } catch (const std::exception&) {
+            // A damaged/newer candidate must not hide an older usable one.
         }
-    if (ckpts.empty())
-        throw std::runtime_error("no state.tar or step-*.ckpt found under " +
-                                 path.string());
-    std::sort(ckpts.begin(), ckpts.end());
-    return {path, ckpts.back()};
+    }
+    no_checkpoint(path);
 }
 
 
 JsonValue read_state_json(const fs::path& ckpt_dir) {
     TarView v = open_state_tar(ckpt_dir);
-    std::string sj = read_member(v, "state.json");
+    const std::string sj = read_member(v, "state.json");
     if (sj.empty())
         throw std::runtime_error("state.json missing in " +
                                  (ckpt_dir / "state.tar").string());
@@ -74,32 +193,58 @@ JsonValue read_state_json(const fs::path& ckpt_dir) {
 }
 
 
-void check_resumable(const fs::path& ckpt_dir) {
+JsonValue validate_checkpoint(const fs::path& ckpt_dir, bool require_full) {
     TarView v = open_state_tar(ckpt_dir);
-    std::string sj = read_member(v, "state.json");
-    JsonValue state = sj.empty() ? JsonValue() : json_parse(sj);
+    const std::string sj = read_member(v, "state.json");
+    if (sj.empty())
+        throw std::runtime_error("state.json missing in " +
+                                 (ckpt_dir / "state.tar").string());
+    const JsonValue state = json_parse(sj);
+    if (!state.is_object())
+        throw std::runtime_error("state.json is not an object in " +
+                                 ckpt_dir.string());
+    const int step = state_step(state, ckpt_dir);
+    const int named_step = checkpoint_step(ckpt_dir);
+    if (named_step >= 0 && named_step != step)
+        throw std::runtime_error("checkpoint filename/state step mismatch in " +
+                                 ckpt_dir.string());
 
-    bool has_world = false;
-    for (const auto& m : v.members)
-        if (m.name == "world.means.npy" || m.name == "world.opacities.npy")
-            has_world = true;
+    bool has_means = false;
+    bool has_opacities = false;
+    for (const auto& m : v.members) {
+        if (m.name == "world.means.npy") has_means = true;
+        if (m.name == "world.opacities.npy") has_opacities = true;
+        if (m.name.size() >= 4 &&
+            m.name.compare(m.name.size() - 4, 4, ".npy") == 0)
+            (void)npy_locate(v.in, m.data_offset, m.size);
+    }
 
     const JsonValue* full = state.find("full_resume");
-    if ((full && full->as_int(1) == 0) || !has_world)
-        throw std::runtime_error(
-            "checkpoint '" + ckpt_dir.string() + "' is NOT resumable: it was "
-            "saved without save_full_checkpoint, so it holds only the "
-            "inference/appearance params and splat.ply -- not the world "
-            "parameters and optimizer state needed to continue training. "
-            "Re-run the source training with --save-full-checkpoint 1 so its "
-            "checkpoints are resumable; this one is usable for inference and "
-            "meshing (splat.ply) only.");
+    if (full) {
+        if (full->type != JsonValue::Type::Number ||
+            !std::isfinite(full->num) || (full->num != 0.0 && full->num != 1.0))
+            throw std::runtime_error("checkpoint full_resume must be numeric 0 or 1");
+    }
+    if (require_full &&
+        ((full && full->num == 0.0) || !has_means || !has_opacities))
+        throw std::runtime_error(spirula::i18n::format(
+            lmsg::checkpoint_not_resumable, {ckpt_dir.string()}));
+    return state;
 }
 
 
 TrainConfig config_from_json(const fs::path& config_json) {
+    std::error_code ec;
+    const fs::file_status status = fs::symlink_status(config_json, ec);
+    if (ec || status.type() != fs::file_type::regular)
+        throw std::runtime_error(config_json.string() +
+                                 " is not a regular file");
+    const JsonValue root = json_parse_file(config_json.string());
+    if (!root.is_object() || !train_config_json_has_fields(root))
+        throw std::runtime_error(config_json.string() +
+                                 " holds no training options");
     TrainConfig c;
-    train_config_from_json(json_parse_file(config_json.string()), c);
+    train_config_from_json(root, c);
     return c;
 }
 
@@ -107,17 +252,14 @@ TrainConfig config_from_json(const fs::path& config_json) {
 TrainConfig build_resume_config(const TrainConfig& cli,
                                  const std::string& preset,
                                  const std::set<std::string>& explicit_flags) {
-    ResolvedCheckpoint r = resolve_checkpoint(cli.resume);
-    check_resumable(r.ckpt_dir);
-
-    fs::path run_dir = fs::absolute(r.run_dir);
-    fs::path cfg_path = run_dir / "config.json";
-    if (!fs::is_regular_file(cfg_path))
-        throw std::runtime_error("no config.json in " + run_dir.string() +
-                                 " (needed to reconstruct the run's config)");
-
-    TrainConfig base = config_from_json(cfg_path);
-    base.resume = cli.resume;
+    const ResolvedCheckpoint r = resolve_checkpoint(cli.resume);
+    const JsonValue state = validate_checkpoint(r.ckpt_dir, true);
+    (void)state;
+    TrainConfig base = config_from_json(r.config_path);
+    if (base.data.empty())
+        throw std::runtime_error(r.config_path.string() +
+                                 " has no dataset path");
+    const fs::path run_dir = fs::absolute(r.run_dir);
 
     // Continue writing into the checkpoint's own run folder, so new
     // checkpoints, eval images and logs land beside the old ones. An explicit
@@ -126,9 +268,7 @@ TrainConfig build_resume_config(const TrainConfig& cli,
     base.output_dir_name   = run_dir.filename().string();
 
     // A preset named on the resume command line re-imposes its deviations on
-    // top of the checkpoint (e.g. resuming a 3dgs run as `synthetic` turns
-    // bilagrid/PPISP off). Applying nothing for a same-preset resume is
-    // automatic: the preset assigns exactly the fields it overrides.
+    // top of the checkpoint.
     if (!preset.empty() && !train_apply_preset(base, preset))
         throw std::runtime_error("unknown preset: " + preset);
 
@@ -138,6 +278,9 @@ TrainConfig build_resume_config(const TrainConfig& cli,
     SS_CONFIG_FIELDS(SS_APPLY_EXPLICIT)
 #undef SS_APPLY_EXPLICIT
 
+    // Always pin the selected checkpoint after applying flags; a run
+    // directory may have resolved to a different step than the input spelling.
+    base.resume = fs::absolute(r.ckpt_dir).string();
     return base;
 }
 
