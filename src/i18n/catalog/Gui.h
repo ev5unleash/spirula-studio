@@ -513,6 +513,21 @@ SS_MSG(resume_run,
     RU("Продолжить из папки запуска…"),
     TR("Çalışma klasöründen sürdür…"));
 
+SS_MSG(resume_run_help,
+    EN("Open a run folder and continue from its newest valid full-state checkpoint."),
+    JA("実行フォルダを開き、最新の有効なフル状態チェックポイントから再開します。"),
+    ZH_HANS("打开运行文件夹，从最新的有效完整状态检查点继续。"),
+    ZH_HANT("開啟執行資料夾，從最新的有效完整狀態檢查點繼續。"),
+    KO("실행 폴더를 열고 가장 최근의 유효한 전체 상태 체크포인트에서 계속합니다."),
+    DE("Öffnen Sie einen Laufordner und setzen Sie am neuesten gültigen Vollzustands-Checkpoint fort."),
+    FR("Ouvrez un dossier d’exécution et reprenez depuis le dernier point de contrôle complet valide."),
+    ES("Abre una carpeta de ejecución y continúa desde el punto de control completo válido más reciente."),
+    PT("Abra uma pasta de execução e continue a partir do ponto de verificação completo válido mais recente."),
+    IT("Apri una cartella di esecuzione e riprendi dal checkpoint completo valido più recente."),
+    NL("Open een runmap en ga verder vanaf het nieuwste geldige volledige checkpoint."),
+    RU("Откройте папку запуска и продолжите с последней допустимой полной контрольной точки."),
+    TR("Bir çalışma klasörü açın ve en yeni geçerli tam durum denetim noktasından devam edin."));
+
 SS_MSG(resume_training,
     EN("Resume Training"),
     JA("学習を再開"),
@@ -632,6 +647,54 @@ SS_MSG(resume_dismiss,
     NL("Sluiten"),
     RU("Скрыть"),
     TR("Kapat"));
+
+SS_MSG(recovery_title,
+    EN("Recover interrupted training?"),
+    JA("中断した学習を再開しますか？"),
+    ZH_HANS("恢复中断的训练吗？"),
+    ZH_HANT("恢復中斷的訓練嗎？"),
+    KO("중단된 학습을 재개할까요?"),
+    DE("Unterbrochenes Training fortsetzen?"),
+    FR("Reprendre l’entraînement interrompu ?"),
+    ES("¿Reanudar el entrenamiento interrumpido?"),
+    PT("Retomar o treinamento interrompido?"),
+    IT("Riprendere l’addestramento interrotto?"),
+    NL("Onderbroken training hervatten?"),
+    RU("Продолжить прерванное обучение?"),
+    TR("Kesintiye uğrayan eğitime devam edilsin mi?"));
+
+SS_MSG(recovery_body,
+    EN("The last GUI training run did not finish. Resume it now?"),
+    JA("前回の GUI 学習は完了しませんでした。今すぐ再開しますか？"),
+    ZH_HANS("上一次 GUI 训练未完成。现在继续吗？"),
+    ZH_HANT("上一次 GUI 訓練未完成。現在繼續嗎？"),
+    KO("마지막 GUI 학습이 완료되지 않았습니다. 지금 재개할까요?"),
+    DE("Der letzte GUI-Trainingslauf wurde nicht abgeschlossen. Jetzt fortsetzen?"),
+    FR("Le dernier entraînement GUI n’est pas terminé. Le reprendre maintenant ?"),
+    ES("El último entrenamiento de la GUI no terminó. ¿Quieres reanudarlo ahora?"),
+    PT("O último treinamento da GUI não terminou. Retomá-lo agora?"),
+    IT("L’ultimo addestramento GUI non è terminato. Riprenderlo ora?"),
+    NL("De laatste GUI-training is niet voltooid. Nu hervatten?"),
+    RU("Последний запуск обучения в GUI не завершился. Продолжить сейчас?"),
+    TR("Son GUI eğitimi tamamlanmadı. Şimdi devam edilsin mi?"));
+
+SS_MSG(recovery_yes,
+    EN("Yes"),       JA("はい"),       ZH_HANS("是"),       ZH_HANT("是"),
+    KO("예"),        DE("Ja"),         FR("Oui"),          ES("Sí"),
+    PT("Sim"),       IT("Sì"),         NL("Ja"),           RU("Да"),
+    TR("Evet"));
+
+SS_MSG(recovery_no,
+    EN("No"),        JA("いいえ"),     ZH_HANS("否"),       ZH_HANT("否"),
+    KO("아니요"),    DE("Nein"),      FR("Non"),         ES("No"),
+    PT("Não"),       IT("No"),        NL("Nee"),          RU("Нет"),
+    TR("Hayır"));
+
+SS_MSG(recovery_later,
+    EN("Later"),     JA("後で"),       ZH_HANS("稍后"),     ZH_HANT("稍後"),
+    KO("나중에"),    DE("Später"),    FR("Plus tard"),    ES("Más tarde"),
+    PT("Mais tarde"), IT("Più tardi"), NL("Later"),       RU("Позже"),
+    TR("Daha sonra"));
 
 SS_MSG(home_new_dataset,
     EN("Create Dataset from Photos or Video..."),

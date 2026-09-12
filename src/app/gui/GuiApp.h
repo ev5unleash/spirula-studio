@@ -120,7 +120,7 @@ private:
                       bool keep_log = false);
     // Route for user-initiated opens: confirms first when training.
     void request_open_dataset(std::string dir);
-    void open_training_run(std::string path);
+    bool open_training_run(std::string path);
     void clear_training_resume();
 
     // The viewer screen: a splat file (or a checkpoint / run directory) opened
@@ -346,6 +346,7 @@ private:
     // The splitter and then the panel. Call after the body child has ended.
     void draw_log_panel(float height);
     void draw_confirm_modal();
+    void draw_recovery_modal();
     void draw_data_error_modal();
     void handle_dialog_result(const std::vector<std::string>& paths);
     // Take paths onto the input list, `replace` clearing what was there (a
@@ -378,6 +379,9 @@ private:
     bool _confirm_shown = false;     // modal currently expected open
     bool _stop_confirmed = false;    // user chose one of the two stops
     bool _data_error_shown = false;  // unreadable-file modal currently open
+    std::string _recovery_run;       // startup marker path, if any
+    bool _recovery_shown = false;    // startup modal currently expected open
+    bool _recovery_suppressed = false; // Later/dismissal: next launch asks again
     // Training is paused for as long as the modal is up -- deciding should not
     // cost GPU time. This is what it goes back to if the user keeps training.
     bool _confirm_was_paused = false;

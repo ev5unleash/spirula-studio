@@ -3,12 +3,61 @@
 #include "app/gui/TrainRunner.h"
 
 #include "i18n/catalog/Log.h"
+#include "app/AppPaths.h"
 
+#include <filesystem>
+#include <fstream>
 #include <algorithm>
+
+namespace fs = std::filesystem;
+
+namespace {
+
+fs::path recovery_marker_path() {
+    return fs::path(app::config_dir()) / "training-recovery.marker";
+}
+
+void write_recovery_marker(const std::string& path) noexcept {
+    try {
+        std::ofstream f(recovery_marker_path(), std::ios::trunc);
+        if (f) f << path << '\n';
+    } catch (...) {
+    }
+}
+
+}  // namespace
 
 namespace gui {
 
 using spirula::TrainerSession;
+
+std::optional<std::string> TrainRunner::pending_recovery_run() {
+    try {
+        std::ifstream f(recovery_marker_path());
+        std::string path;
+        if (!f || !std::getline(f, path)) return std::nullopt;
+        if (!path.empty() && path.back() == '\r') path.pop_back();
+        if (path.find_first_not_of(" \t\r\n") == std::string::npos ||
+            path.find('\0') != std::string::npos)
+            return std::nullopt;
+        std::string extra;
+        while (std::getline(f, extra))
+            if (!extra.empty() && extra != "\r")
+                return std::nullopt;
+        return path;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+void TrainRunner::dismiss_recovery_run() {
+    try {
+        std::error_code ec;
+        fs::remove(recovery_marker_path(), ec);
+    } catch (...) {
+    }
+}
+
 
 void TrainRunner::push_log(const std::string& s) {
     std::lock_guard<std::mutex> lk(_mu);
@@ -91,6 +140,12 @@ void TrainRunner::request_stop(bool save) {
     _data_cv.notify_all();   // the step loop may be parked on a file error
 }
 
+void TrainRunner::clear_armed_recovery_marker() {
+    if (!_recovery_marker_armed) return;
+    dismiss_recovery_run();
+    _recovery_marker_armed = false;
+}
+
 void TrainRunner::shutdown() {
     request_stop();
     // Stop the web viewer before joining the worker: its render thread takes
@@ -98,6 +153,7 @@ void TrainRunner::shutdown() {
     // and write the final checkpoint. Joining first would deadlock the stop.
     if (_web_viewer) { _web_viewer->stop(); _web_viewer.reset(); }
     join_worker();
+    clear_armed_recovery_marker();
 }
 
 void TrainRunner::note_engine_taken() {
@@ -187,6 +243,13 @@ void TrainRunner::start_training(const TrainConfig& cfg, const std::string& pres
             // failure owes cleanup_failed_engine() a call.
             _engine_dirty = true;
             s->setup_engine();
+            _recovery_marker_armed = true;
+            try {
+                write_recovery_marker(
+                    fs::absolute(s->out_dir).lexically_normal().string());
+            } catch (...) {
+            }
+
             {
                 std::lock_guard<std::mutex> lk(_mu);
                 _memory_status = MemoryStatus{
@@ -230,9 +293,11 @@ void TrainRunner::start_training(const TrainConfig& cfg, const std::string& pres
                 _metrics.push_back(m);
             };
             s->train(cb);
+            clear_armed_recovery_marker();
             _engine_dirty = false;   // the engine belongs to a live session
             _phase = Phase::Done;
         } catch (const backend::BudgetError& e) {
+            clear_armed_recovery_marker();
             // A GPU memory refusal carries structured fields the GUI localizes;
             // error() keeps the English what() as the fallback text. The engine
             // is deliberately NOT reset here -- the GUI calls
@@ -245,6 +310,7 @@ void TrainRunner::start_training(const TrainConfig& cfg, const std::string& pres
             _engine_ready = false;
             _phase = Phase::TrainError;
         } catch (const std::exception& e) {
+            clear_armed_recovery_marker();
             std::lock_guard<std::mutex> lk(_mu);
             _error = e.what();
             _engine_ready = false;

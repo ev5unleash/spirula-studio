@@ -139,6 +139,8 @@ std::vector<std::string> video_dialog_filters() {
 
 GuiApp::GuiApp() {
     load_settings();
+    if (auto pending = TrainRunner::pending_recovery_run())
+        _recovery_run = std::move(*pending);
     _batch = load_batch_list();
     apply_preset("3dgs");
     // Built-in when it is there, COLMAP when it is not; effective_engine()
@@ -722,12 +724,12 @@ void GuiApp::request_open_dataset(std::string dir) {
     }
     open_dataset(dir);
 }
-void GuiApp::open_training_run(std::string path) {
-    if (path.empty()) return;
+bool GuiApp::open_training_run(std::string path) {
+    if (path.empty()) return false;
     if (resume_training_busy()) {
         _resume_error = msg::resume_busy.get();
         log(_resume_error);
-        return;
+        return false;
     }
 
     try {
@@ -780,10 +782,12 @@ void GuiApp::open_training_run(std::string path) {
         _resume_error.clear();
         _runner.load_dataset(_cfg, _preset);
         _screen = Screen::Train;
+        return true;
     } catch (const std::exception& e) {
         _resume_error = i18n::format(msg::resume_failed, {path, e.what()});
         log(_resume_error);
     }
+    return false;
 }
 
 void GuiApp::clear_training_resume() {
@@ -2013,6 +2017,7 @@ void GuiApp::frame() {
     }
     draw_preset_save_modal();
     draw_preset_delete_modal();
+    draw_recovery_modal();
     draw_confirm_modal();
     draw_data_error_modal();
 
@@ -2282,6 +2287,7 @@ void GuiApp::draw_home() {
                   FileDialog::Mode::Folder);
     ImGui::EndDisabled();
     if (resume_busy) ui::help_on_hover_disabled(msg::resume_busy);
+    else ui::help_on_hover(msg::resume_run_help);
 
     // Photos and video are one screen and one input list: a capture can hold
     // both, so splitting the entry point in two only asked a question with no
@@ -6384,6 +6390,53 @@ void GuiApp::draw_data_error_modal() {
     ImGui::SameLine();
     if (ui::Button(msg::stop_and_save, ImVec2(bw, 0))) answer(false);
     ui::help_on_hover(msg::stop_and_save_help);
+    ImGui::EndPopup();
+}
+
+void GuiApp::draw_recovery_modal() {
+    if (_recovery_run.empty() || _recovery_suppressed) return;
+    if (!_recovery_shown) {
+        ui::OpenPopup(msg::recovery_title);
+        _recovery_shown = true;
+    }
+    if (!ui::BeginPopupModal(msg::recovery_title, nullptr,
+                             ImGuiWindowFlags_AlwaysAutoResize)) {
+        _recovery_shown = false;
+        _recovery_suppressed = true;
+        return;
+    }
+
+    ImGui::PushTextWrapPos(px(460.0f));
+    ui::TextWrapped(msg::recovery_body);
+    ui::TextDisabledRaw(_recovery_run);
+    ImGui::PopTextWrapPos();
+    ImGui::Spacing();
+
+    const float bw = px(120.0f);
+    if (ui::Button(msg::recovery_yes, ImVec2(bw, 0))) {
+        const std::string path = _recovery_run;
+        if (open_training_run(path)) {
+            TrainRunner::dismiss_recovery_run();
+            _recovery_run.clear();
+            _recovery_suppressed = true;
+            _recovery_shown = false;
+            ImGui::CloseCurrentPopup();
+        }
+    }
+    ImGui::SameLine();
+    if (ui::Button(msg::recovery_no, ImVec2(bw, 0))) {
+        TrainRunner::dismiss_recovery_run();
+        _recovery_run.clear();
+        _recovery_suppressed = true;
+        _recovery_shown = false;
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ui::Button(msg::recovery_later, ImVec2(bw, 0))) {
+        _recovery_suppressed = true;
+        _recovery_shown = false;
+        ImGui::CloseCurrentPopup();
+    }
     ImGui::EndPopup();
 }
 
