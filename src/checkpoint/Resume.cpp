@@ -261,7 +261,9 @@ TrainConfig build_resume_config(const TrainConfig& cli,
     if (base.data.empty())
         throw std::runtime_error(r.config_path.string() +
                                  " has no dataset path");
-    const fs::path run_dir = fs::absolute(r.run_dir);
+    const fs::path run_dir = fs::absolute(r.run_dir).lexically_normal();
+    if (const fs::path data = fs::path(base.data); data.is_relative())
+        base.data = (run_dir / data).lexically_normal().string();
 
     // Continue writing into the checkpoint's own run folder, so new
     // checkpoints, eval images and logs land beside the old ones. An explicit

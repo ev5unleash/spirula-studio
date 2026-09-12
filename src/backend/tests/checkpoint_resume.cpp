@@ -419,6 +419,14 @@ void config_fallbacks() {
     auto r = ckpt::resolve_checkpoint(run);
     CHECK(r.config_path == fs::absolute(run / "config.json"),
           "legacy root config was not selected");
+    TrainConfig legacy_cli;
+    legacy_cli.resume = run.string();
+    const auto legacy_rebuilt =
+        ckpt::build_resume_config(legacy_cli, "", {});
+    const fs::path expected_data =
+        (fs::absolute(run).lexically_normal() / "legacy-data").lexically_normal();
+    CHECK(legacy_rebuilt.data == expected_data.string(),
+          "relative legacy dataset path was not anchored to run directory");
 
     write_config(ckpt / "config.json", "snapshot-data");
     r = ckpt::resolve_checkpoint(run);
