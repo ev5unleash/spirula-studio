@@ -415,7 +415,9 @@ void config_fallbacks() {
     write_checkpoint(ckpt, 4);
     std::error_code ec;
     fs::remove(ckpt / "config.json", ec);
-    write_config(run / "config.json", "legacy-data");
+    const std::string run_data =
+        "run-relative-" + tmp.path.filename().string();
+    write_config(run / "config.json", run_data);
     auto r = ckpt::resolve_checkpoint(run);
     CHECK(r.config_path == fs::absolute(run / "config.json"),
           "legacy root config was not selected");
@@ -424,9 +426,23 @@ void config_fallbacks() {
     const auto legacy_rebuilt =
         ckpt::build_resume_config(legacy_cli, "", {});
     const fs::path expected_data =
-        (fs::absolute(run).lexically_normal() / "legacy-data").lexically_normal();
+        (fs::absolute(run).lexically_normal() / run_data).lexically_normal();
     CHECK(legacy_rebuilt.data == expected_data.string(),
           "relative legacy dataset path was not anchored to run directory");
+
+    const std::string cwd_data_name =
+        "cwd-relative-" + tmp.path.filename().string();
+    const std::string cwd_data = "./" + cwd_data_name + "/.";
+    fs::create_directories(tmp.path / cwd_data_name);
+    write_config(ckpt / "config.json", cwd_data);
+    const fs::path old_cwd = fs::current_path();
+    fs::current_path(tmp.path);
+    const auto cwd_rebuilt = ckpt::build_resume_config(legacy_cli, "", {});
+    fs::current_path(old_cwd);
+    const fs::path expected_cwd_data =
+        (fs::absolute(tmp.path / cwd_data)).lexically_normal();
+    CHECK(cwd_rebuilt.data == expected_cwd_data.string(),
+          "existing CWD dataset path did not take precedence");
 
     write_config(ckpt / "config.json", "snapshot-data");
     r = ckpt::resolve_checkpoint(run);

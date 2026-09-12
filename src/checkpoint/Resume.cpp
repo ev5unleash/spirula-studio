@@ -262,8 +262,22 @@ TrainConfig build_resume_config(const TrainConfig& cli,
         throw std::runtime_error(r.config_path.string() +
                                  " has no dataset path");
     const fs::path run_dir = fs::absolute(r.run_dir).lexically_normal();
-    if (const fs::path data = fs::path(base.data); data.is_relative())
-        base.data = (run_dir / data).lexically_normal().string();
+    if (const fs::path data = fs::path(base.data); data.is_relative()) {
+        std::error_code ec;
+        const fs::file_status status = fs::status(data, ec);
+        if (ec && ec != std::errc::no_such_file_or_directory)
+            throw std::runtime_error("cannot inspect " + data.string() +
+                                     ": " + ec.message());
+        if (!ec && fs::exists(status)) {
+            const fs::path absolute_data = fs::absolute(data, ec);
+            if (ec)
+                throw std::runtime_error("cannot resolve " + data.string() +
+                                         ": " + ec.message());
+            base.data = absolute_data.lexically_normal().string();
+        } else {
+            base.data = (run_dir / data).lexically_normal().string();
+        }
+    }
 
     // Continue writing into the checkpoint's own run folder, so new
     // checkpoints, eval images and logs land beside the old ones. An explicit
