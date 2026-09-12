@@ -72,10 +72,10 @@ public:
 private:
     enum class Screen { Home, NewDataset, Train, Viewer, Batch, Mesh };
     enum class PickAction {
-        None, OpenDataset, SourceImages, SourceVideo, SourceReplace, Workspace,
-        OutputPrefix, VocabTree, MaskModelFile, SplatFile,
-        PresetFile, PresetSaveFolder, BatchDataset, BatchOutput, BatchPresetFile,
-        MeshSource, MeshPhotos, MeshOutput, AddSplatFile
+        None, OpenDataset, ResumeTraining, SourceImages, SourceVideo,
+        SourceReplace, Workspace, OutputPrefix, VocabTree, MaskModelFile,
+        SplatFile, PresetFile, PresetSaveFolder, BatchDataset, BatchOutput,
+        BatchPresetFile, MeshSource, MeshPhotos, MeshOutput, AddSplatFile
     };
     // Which reconstruction back end the New Dataset screen runs.
     enum class Engine { BuiltIn, Colmap };
@@ -120,6 +120,8 @@ private:
                       bool keep_log = false);
     // Route for user-initiated opens: confirms first when training.
     void request_open_dataset(std::string dir);
+    void open_training_run(std::string path);
+    void clear_training_resume();
 
     // The viewer screen: a splat file (or a checkpoint / run directory) opened
     // for looking at. Takes the engine over, so it goes through the same
@@ -505,6 +507,8 @@ private:
     // the user typed is never overwritten when the input list changes.
     std::string _workspace_auto;
     bool _resume = true;
+    int _resume_step = -1;
+    std::string _resume_error;
     bool _mask_enable = false;
     // PrepJob::mask_memory. Off by default: a prompt that matches a crowd pays
     // one model pass per object per frame for it. The two below only apply

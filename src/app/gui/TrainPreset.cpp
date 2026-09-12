@@ -34,23 +34,6 @@ std::string quote(const std::string& v) {
     return s + "\"";
 }
 
-// Every flag whose value differs from `ref`. Used when the file carries no
-// `touched` list -- a run's config.json, or a preset from a build that
-// predates the key -- so that loading one never lets a macro option quietly
-// overwrite a value the file spelled out.
-std::set<std::string> diff_fields(const TrainConfig& c, const TrainConfig& ref) {
-    std::set<std::string> out;
-#define SS_PRESET_DIFF(type, member, default_, section, tier, choices)        \
-    if (!(c.member == ref.member)) out.insert(#member);
-    SS_CONFIG_FIELDS(SS_PRESET_DIFF)
-#undef SS_PRESET_DIFF
-    // The context fields are not part of a preset, so a difference in one is
-    // not tuning to protect.
-#define SS_PRESET_DROP(member) out.erase(#member);
-    SS_PRESET_CONTEXT_FIELDS(SS_PRESET_DROP)
-#undef SS_PRESET_DROP
-    return out;
-}
 
 void clear_context(TrainConfig& c) {
     const TrainConfig stock;
@@ -60,6 +43,18 @@ void clear_context(TrainConfig& c) {
 }
 
 }  // namespace
+std::set<std::string> train_config_overrides(const TrainConfig& c,
+                                             const TrainConfig& baseline) {
+    std::set<std::string> out;
+#define SS_PRESET_DIFF(type, member, default_, section, tier, choices)        \
+    if (!(c.member == baseline.member)) out.insert(#member);
+    SS_CONFIG_FIELDS(SS_PRESET_DIFF)
+#undef SS_PRESET_DIFF
+#define SS_PRESET_DROP(member) out.erase(#member);
+    SS_PRESET_CONTEXT_FIELDS(SS_PRESET_DROP)
+#undef SS_PRESET_DROP
+    return out;
+}
 
 
 std::string preset_dir() {
@@ -183,7 +178,7 @@ TrainPreset load_preset(const std::string& path) {
         for (const JsonValue& e : t->arr)
             if (!e.as_string().empty()) p.touched.insert(e.as_string());
     } else {
-        p.touched = diff_fields(p.cfg, base_cfg);
+        p.touched = train_config_overrides(p.cfg, base_cfg);
     }
     return p;
 }

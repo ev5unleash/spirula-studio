@@ -6,6 +6,7 @@
 #include "core/ExrImage.h"
 
 #include "checkpoint/SplatPly.h"
+#include "checkpoint/Resume.h"
 #include "data/Json.h"
 #include "app/AppPaths.h"
 #include "app/CrashLog.h"
@@ -569,6 +570,7 @@ void GuiApp::apply_preset(const std::string& preset) {
     // Keep GUI-managed context across preset switches.
     fresh.data = _cfg.data;
     fresh.image_dir = _cfg.image_dir;
+    fresh.resume = _cfg.resume;
     fresh.output_dir_prefix = _cfg.output_dir_prefix;
     fresh.output_dir_name = _cfg.output_dir_name;
     // The native viewport replaces the web viewer by default; it can be
@@ -659,6 +661,7 @@ void GuiApp::open_dataset(std::string dir, std::string image_dir,
                           std::string mask_dir, bool mask_flipped,
                           bool keep_log) {
     if (dir.empty()) return;
+    clear_training_resume();
     app::set_crash_note("opening dataset " + dir);
     close_mesh_preview();
     close_splat();
@@ -713,6 +716,108 @@ void GuiApp::request_open_dataset(std::string dir) {
     }
     open_dataset(dir);
 }
+void GuiApp::open_training_run(std::string path) {
+    if (path.empty()) return;
+    const TrainRunner::Phase ph = _runner.phase();
+    if (_batch_active || ph == TrainRunner::Phase::Loading ||
+        ph == TrainRunner::Phase::Preparing ||
+        ph == TrainRunner::Phase::Training) {
+        _resume_error = msg::resume_busy.get();
+        log(_resume_error);
+        return;
+    }
+
+    try {
+        TrainConfig request;
+        request.resume = path;
+        TrainConfig cfg = ckpt::build_resume_config(request, "", {});
+        const ckpt::ResolvedCheckpoint r = ckpt::resolve_checkpoint(cfg.resume);
+        const JsonValue state = ckpt::validate_checkpoint(r.ckpt_dir, true);
+        const JsonValue* step_value = state.find("step");
+        if (!step_value || step_value->type != JsonValue::Type::Number)
+            throw std::runtime_error("checkpoint state has no step");
+        const int step = (int)step_value->as_int();
+
+        std::error_code ec;
+        if (cfg.data.empty() || !fs::exists(fs::path(cfg.data), ec) || ec)
+            throw std::runtime_error(i18n::format(
+                msg::resume_dataset_missing, {cfg.data}));
+
+        // A run config is read as a preset only for its base-preset metadata.
+        const TrainPreset saved = load_preset(r.config_path.string());
+        TrainConfig baseline;
+        train_apply_preset(baseline, saved.base);
+        baseline.quality = cfg.quality;
+        baseline.floater_suppression = cfg.floater_suppression;
+        baseline.distraction_robustness = cfg.distraction_robustness;
+        train_resolve_macros(baseline, {});
+        const std::set<std::string> touched =
+            train_config_overrides(cfg, baseline);
+
+        close_mesh_preview();
+        close_splat();
+        detach_session_views();
+        reset_dataset_preview();
+
+        cfg.disable_viewer = true;
+        TrainConfig defaults = cfg;
+        defaults.disable_viewer = true;
+        app::set_crash_note("resuming training " + cfg.data);
+        _cfg = std::move(cfg);
+        _defaults = std::move(defaults);
+        _preset = saved.base;
+        _preset_file.clear();
+        _preset_display.clear();
+        _preset_desc.clear();
+        _preset_msg.clear();
+        _preset_msg_err = false;
+        _cfg_ui.touched = touched;
+        _parse_dirty = false;
+        _resume_step = step;
+        _resume_error.clear();
+        _runner.load_dataset(_cfg, _preset);
+        _screen = Screen::Train;
+    } catch (const std::exception& e) {
+        _resume_error = i18n::format(msg::resume_failed, {path, e.what()});
+        log(_resume_error);
+    }
+}
+
+void GuiApp::clear_training_resume() {
+    fs::path source;
+    if (!_cfg.resume.empty()) {
+        const fs::path checkpoint(_cfg.resume);
+        source = ckpt::checkpoint_step(checkpoint) >= 0
+                     ? checkpoint.parent_path()
+                     : checkpoint;
+    } else if (const auto* session = _runner.session()) {
+        source = session->out_dir;
+    }
+
+    auto same_path = [](const fs::path& a, const fs::path& b) {
+        std::error_code ec;
+        if (fs::equivalent(a, b, ec)) return true;
+        ec.clear();
+        const fs::path aa = fs::absolute(a, ec);
+        if (ec) return false;
+        ec.clear();
+        const fs::path bb = fs::absolute(b, ec);
+        return !ec && aa.lexically_normal() == bb.lexically_normal();
+    };
+    if (!source.empty()) {
+        for (TrainConfig* c : {&_cfg, &_defaults}) {
+            if (c->output_dir_name.empty()) continue;
+            const fs::path output =
+                fs::path(c->output_dir_prefix) / c->output_dir_name;
+            if (same_path(output, source)) c->output_dir_name.clear();
+        }
+    }
+    _cfg.resume.clear();
+    _defaults.resume.clear();
+    _resume_step = -1;
+    _resume_error.clear();
+}
+
 
 void GuiApp::request_go_home() {
     if (training_busy()) {
@@ -1645,6 +1750,7 @@ const char* GuiApp::dir_key(PickAction a, FileDialog::Mode m) {
         case PickAction::SplatFile:
         case PickAction::AddSplatFile:
         case PickAction::MeshSource:        return "model";
+        case PickAction::ResumeTraining:
         case PickAction::Workspace:
         case PickAction::OutputPrefix:
         case PickAction::BatchOutput:
@@ -1685,6 +1791,9 @@ void GuiApp::handle_dialog_result(const std::vector<std::string>& paths) {
     switch (_pick) {
         case PickAction::OpenDataset:
             request_open_dataset(path);
+            break;
+        case PickAction::ResumeTraining:
+            if (!path.empty()) open_training_run(path);
             break;
         case PickAction::SourceImages:
         case PickAction::SourceVideo:
@@ -1869,6 +1978,11 @@ void GuiApp::frame() {
     ImGui::PopStyleVar();
 
     draw_menu_bar();
+    if (!_resume_error.empty()) {
+        ui::TextColoredWrappedRaw(kErr, _resume_error);
+        ImGui::SameLine();
+        if (ui::SmallButton(msg::resume_dismiss)) _resume_error.clear();
+    }
     switch (_screen) {
         case Screen::Home:   draw_home();   break;
         case Screen::NewDataset: draw_new_dataset(); break;
@@ -1900,6 +2014,17 @@ void GuiApp::draw_menu_bar() {
             open_pick(PickAction::OpenDataset, msg::menu_open_dataset.get(),
                       FileDialog::Mode::Folder);
         }
+        const TrainRunner::Phase resume_phase = _runner.phase();
+        const bool resume_busy =
+            _batch_active || resume_phase == TrainRunner::Phase::Loading ||
+            resume_phase == TrainRunner::Phase::Preparing ||
+            resume_phase == TrainRunner::Phase::Training;
+        ImGui::BeginDisabled(resume_busy);
+        if (ui::MenuItem(msg::resume_run))
+            open_pick(PickAction::ResumeTraining, msg::resume_run.get(),
+                      FileDialog::Mode::Folder);
+        ImGui::EndDisabled();
+        if (resume_busy) ui::help_on_hover_disabled(msg::resume_busy);
         if (ui::MenuItem(msg::menu_new_dataset)) _screen = Screen::NewDataset;
         if (ui::MenuItem(msg::menu_open_splat)) {
             open_pick(PickAction::SplatFile, msg::viewer_pick_file.get(),
@@ -2142,6 +2267,17 @@ void GuiApp::draw_home() {
                   FileDialog::Mode::Folder);
     }
     ui::help_on_hover(msg::home_open_dataset_help);
+    const TrainRunner::Phase resume_phase = _runner.phase();
+    const bool resume_busy =
+        _batch_active || resume_phase == TrainRunner::Phase::Loading ||
+        resume_phase == TrainRunner::Phase::Preparing ||
+        resume_phase == TrainRunner::Phase::Training;
+    ImGui::BeginDisabled(resume_busy);
+    if (ui::Button(msg::resume_run, ImVec2(-1, bh)))
+        open_pick(PickAction::ResumeTraining, msg::resume_run.get(),
+                  FileDialog::Mode::Folder);
+    ImGui::EndDisabled();
+    if (resume_busy) ui::help_on_hover_disabled(msg::resume_busy);
 
     // Photos and video are one screen and one input list: a capture can hold
     // both, so splitting the entry point in two only asked a question with no
@@ -5355,6 +5491,19 @@ void GuiApp::draw_train_settings() {
         if (_device_locked)
             ui::TextColoredWrapped(kDim, msg::device_locked);
     }
+    if (!_batch_active && !_cfg.resume.empty()) {
+        ui::TextWrapped(msg::resume_checkpoint,
+                        {_cfg.resume, (long long)_resume_step});
+        ImGui::BeginDisabled(busy);
+        if (ui::Button(msg::resume_clear)) {
+            clear_training_resume();
+            detach_session_views();
+            reset_dataset_preview();
+            if (!_cfg.data.empty()) _runner.load_dataset(_cfg, _preset);
+        }
+        ImGui::EndDisabled();
+        ImGui::Spacing();
+    }
 
     // ---- preset + options ----
     // A batch owns the config while it runs -- each row's comes from its own
@@ -5833,12 +5982,27 @@ void GuiApp::draw_train_controls() {
             bool can_start = ph == TrainRunner::Phase::Ready ||
                              ph == TrainRunner::Phase::Done ||
                              ph == TrainRunner::Phase::TrainError;
-            ImGui::BeginDisabled(!can_start);
-            if (ui::Button(ph == TrainRunner::Phase::Done ? msg::train_again
-                                                          : msg::start_training,
-                           ImVec2(-8, 36)))
+            const bool selecting_resume =
+                ph == TrainRunner::Phase::Ready && !_cfg.resume.empty();
+            const bool too_short =
+                selecting_resume && _resume_step >= 0 &&
+                _cfg.num_iterations <= _resume_step;
+            const Msg& action =
+                selecting_resume ? msg::resume_training
+                : ph == TrainRunner::Phase::Done ? msg::train_again
+                                                 : msg::start_training;
+            ImGui::BeginDisabled(!can_start || too_short);
+            if (ui::Button(action, ImVec2(-8, 36))) {
+                if (ph == TrainRunner::Phase::Done ||
+                    ph == TrainRunner::Phase::TrainError)
+                    clear_training_resume();
                 start_training();
+            }
             ImGui::EndDisabled();
+            if (too_short)
+                ui::TextColoredWrapped(
+                    kWarn, msg::resume_extend_steps,
+                    {(long long)_resume_step});
             break;
         }
         case TrainRunner::Phase::Loading:

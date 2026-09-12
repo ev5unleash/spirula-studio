@@ -61,6 +61,10 @@ struct TrainPreset {
     TrainConfig cfg;
     std::set<std::string> touched;
 };
+// Fields whose values differ from the preset baseline and must survive macro
+// expansion when a saved run is loaded.
+std::set<std::string> train_config_overrides(const TrainConfig& c,
+                                             const TrainConfig& baseline);
 
 // Where presets live by default, created on first call:
 // <config_dir>/presets. The picker lists what is in here; Save offers it as
