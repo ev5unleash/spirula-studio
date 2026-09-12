@@ -164,6 +164,7 @@ private:
     // through it.
     void launch_training(const TrainConfig& cfg, const std::string& preset);
     bool training_busy() const;   // Preparing or Training
+    bool resume_training_busy() const;
 
     // ---- batch ----
     // Append a row for this dataset, seeded with the preset the trainer

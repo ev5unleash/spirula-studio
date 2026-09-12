@@ -563,6 +563,12 @@ bool GuiApp::training_busy() const {
     return ph == TrainRunner::Phase::Training ||
            ph == TrainRunner::Phase::Preparing;
 }
+bool GuiApp::resume_training_busy() const {
+    const TrainRunner::Phase ph = _runner.phase();
+    return _batch_active || ph == TrainRunner::Phase::Loading ||
+           ph == TrainRunner::Phase::Preparing ||
+           ph == TrainRunner::Phase::Training;
+}
 
 void GuiApp::apply_preset(const std::string& preset) {
     TrainConfig fresh;
@@ -718,10 +724,7 @@ void GuiApp::request_open_dataset(std::string dir) {
 }
 void GuiApp::open_training_run(std::string path) {
     if (path.empty()) return;
-    const TrainRunner::Phase ph = _runner.phase();
-    if (_batch_active || ph == TrainRunner::Phase::Loading ||
-        ph == TrainRunner::Phase::Preparing ||
-        ph == TrainRunner::Phase::Training) {
+    if (resume_training_busy()) {
         _resume_error = msg::resume_busy.get();
         log(_resume_error);
         return;
@@ -2018,11 +2021,7 @@ void GuiApp::draw_menu_bar() {
             open_pick(PickAction::OpenDataset, msg::menu_open_dataset.get(),
                       FileDialog::Mode::Folder);
         }
-        const TrainRunner::Phase resume_phase = _runner.phase();
-        const bool resume_busy =
-            _batch_active || resume_phase == TrainRunner::Phase::Loading ||
-            resume_phase == TrainRunner::Phase::Preparing ||
-            resume_phase == TrainRunner::Phase::Training;
+        const bool resume_busy = resume_training_busy();
         ImGui::BeginDisabled(resume_busy);
         if (ui::MenuItem(msg::resume_run))
             open_pick(PickAction::ResumeTraining, msg::resume_run.get(),
@@ -2271,11 +2270,7 @@ void GuiApp::draw_home() {
                   FileDialog::Mode::Folder);
     }
     ui::help_on_hover(msg::home_open_dataset_help);
-    const TrainRunner::Phase resume_phase = _runner.phase();
-    const bool resume_busy =
-        _batch_active || resume_phase == TrainRunner::Phase::Loading ||
-        resume_phase == TrainRunner::Phase::Preparing ||
-        resume_phase == TrainRunner::Phase::Training;
+    const bool resume_busy = resume_training_busy();
     ImGui::BeginDisabled(resume_busy);
     if (ui::Button(msg::resume_run, ImVec2(-1, bh)))
         open_pick(PickAction::ResumeTraining, msg::resume_run.get(),
