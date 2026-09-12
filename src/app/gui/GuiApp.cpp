@@ -1783,6 +1783,11 @@ void GuiApp::open_pick(PickAction a, const std::string& title,
                        FileDialog::Mode mode,
                        const std::vector<std::string>& extensions,
                        const std::string& start_dir, bool multi) {
+    if (a == PickAction::ResumeTraining && resume_training_busy()) {
+        _resume_error = msg::resume_busy.get();
+        log(_resume_error);
+        return;
+    }
     _pick = a;
     _pick_key = dir_key(a, mode);
     std::string dir = start_dir;
