@@ -915,6 +915,104 @@ bool run_checkpoint_autosave(const fs::path& fixture,
     const auto state_before = read_file_bytes(step2 / "state.tar");
     const auto ply_before = read_file_bytes(step2 / "splat.ply");
     const auto config_before = read_file_bytes(step2 / "config.json");
+    // A resumed run that has no work left still executes its final-save path.
+    // It must recognize the known source checkpoint and leave every payload
+    // byte unchanged.
+    {
+        spirula::TrainerSession session;
+        configure_autosave(session, out_dir);
+        session.cfg.resume = step2.string();
+        session.cfg.steps_per_save = 2;
+        session.cfg.num_iterations = 2;
+        session.save_on_stop.store(true);
+        session.check_config();
+        session.load_dataset();
+        session.setup_engine();
+        ok = session.start_step == 2 && session.cur_step.load() == 2 && ok;
+        session.train();
+        session.reset_engine();
+    }
+    const bool no_progress_unchanged =
+        read_file_bytes(step2 / "state.tar") == state_before &&
+        read_file_bytes(step2 / "splat.ply") == ply_before &&
+        read_file_bytes(step2 / "config.json") == config_before;
+    if (!no_progress_unchanged)
+        std::printf("engine_split_faces: no-progress final save rewrote step 2\n");
+    ok = no_progress_unchanged && ok;
+
+    // Changing the target capacity forces a real .resume_adapt path. A
+    // no-progress final save must still preserve the source checkpoint, while
+    // a later step publishes the adapted layout as a new checkpoint.
+    const int adapted_cap_max = 256;
+    const auto source_state_before_adapt = read_file_bytes(step2 / "state.tar");
+    const auto source_ply_before_adapt = read_file_bytes(step2 / "splat.ply");
+    const auto source_config_before_adapt =
+        read_file_bytes(step2 / "config.json");
+    auto configure_adapt = [&](spirula::TrainerSession& session, int iterations) {
+        configure_autosave(session, out_dir);
+        session.cfg.cap_max = adapted_cap_max;
+        session.cfg.resume = step2.string();
+        session.cfg.steps_per_save = 2;
+        session.cfg.num_iterations = iterations;
+        session.cfg.save_only_latest_checkpoint = false;
+        session.save_on_stop.store(true);
+    };
+    {
+        spirula::TrainerSession session;
+        configure_adapt(session, 2);
+        session.check_config();
+        session.load_dataset();
+        session.setup_engine();
+        ok = session.start_step == 2 && session.cur_step.load() == 2 &&
+             engine_get_max_num_splats() == adapted_cap_max && ok;
+        session.train();
+        session.reset_engine();
+    }
+    const bool adapted_no_progress_unchanged =
+        read_file_bytes(step2 / "state.tar") == source_state_before_adapt &&
+        read_file_bytes(step2 / "splat.ply") == source_ply_before_adapt &&
+        read_file_bytes(step2 / "config.json") == source_config_before_adapt;
+    if (!adapted_no_progress_unchanged)
+        std::printf("engine_split_faces: adapted no-progress save rewrote step 2\n");
+    ok = adapted_no_progress_unchanged && ok;
+
+    {
+        spirula::TrainerSession session;
+        configure_adapt(session, 3);
+        session.check_config();
+        session.load_dataset();
+        session.setup_engine();
+        ok = engine_get_max_num_splats() == adapted_cap_max && ok;
+        session.train();
+        session.reset_engine();
+    }
+    const fs::path adapted_step3 = out_dir / checkpoint_name(3);
+    try {
+        const JsonValue adapted_state = ckpt::validate_checkpoint(adapted_step3, true);
+        const auto adapted_cfg = ckpt::config_from_json(adapted_step3 / "config.json");
+        ok = adapted_state.get_double("step", -1) == 3 &&
+             adapted_state.get_double("max_num_splats", 0) == adapted_cap_max &&
+             adapted_cfg.cap_max == adapted_cap_max && ok;
+    } catch (const std::exception& e) {
+        std::printf("engine_split_faces: adapted publication FAILED: %s\n",
+                    e.what());
+        ok = false;
+    }
+    const bool adapted_source_unchanged =
+        read_file_bytes(step2 / "state.tar") == source_state_before_adapt &&
+        read_file_bytes(step2 / "splat.ply") == source_ply_before_adapt &&
+        read_file_bytes(step2 / "config.json") == source_config_before_adapt;
+    if (!adapted_source_unchanged)
+        std::printf("engine_split_faces: adapted step rewrote source step 2\n");
+    ok = adapted_source_unchanged && ok;
+    ec.clear();
+    fs::remove_all(adapted_step3, ec);
+    if (ec) {
+        std::printf("engine_split_faces: cannot remove adapted test checkpoint: %s\n",
+                    ec.message().c_str());
+        ok = false;
+        ec.clear();
+    }
 
     // A serializer open failure after PLY output must not disturb the
     // previously published checkpoint.
@@ -1065,6 +1163,14 @@ bool run_checkpoint_autosave(const fs::path& fixture,
     // An explicit older checkpoint cannot branch in-place past a higher
     // canonical entry; a distinct output directory remains allowed.
     const auto conflict_root = read_file_bytes(keep_all_dir / "config.json");
+    const auto source_step2_state_before_branch =
+        read_file_bytes(keep_all_dir / "step-000000002.ckpt" / "state.tar");
+    const auto source_step2_ply_before_branch =
+        read_file_bytes(keep_all_dir / "step-000000002.ckpt" / "splat.ply");
+    const auto source_step2_config_before_branch =
+        read_file_bytes(keep_all_dir / "step-000000002.ckpt" / "config.json");
+    const auto source_root_before_branch =
+        read_file_bytes(keep_all_dir / "config.json");
     {
         spirula::TrainerSession session;
         configure_autosave(session, keep_all_dir);
@@ -1100,6 +1206,18 @@ bool run_checkpoint_autosave(const fs::path& fixture,
         ok = !threw && ok;
         session.reset_engine();
     }
+    const bool source_unchanged_after_branch =
+        read_file_bytes(keep_all_dir / "step-000000002.ckpt" / "state.tar") ==
+            source_step2_state_before_branch &&
+        read_file_bytes(keep_all_dir / "step-000000002.ckpt" / "splat.ply") ==
+            source_step2_ply_before_branch &&
+        read_file_bytes(keep_all_dir / "step-000000002.ckpt" / "config.json") ==
+            source_step2_config_before_branch &&
+        read_file_bytes(keep_all_dir / "config.json") == source_root_before_branch;
+    if (!source_unchanged_after_branch)
+        std::printf("engine_split_faces: different-output resume changed source files\n");
+    ok = source_unchanged_after_branch && ok;
+
 
     std::printf("engine_split_faces: checkpoint autosave %s\n",
                 ok ? "ok" : "FAILED");
