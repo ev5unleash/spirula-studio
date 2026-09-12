@@ -82,82 +82,53 @@ SS_MSG(resume,
     IT("Riprendere un'esecuzione precedente"), NL("Eerdere run hervatten"),
     RU("Продолжить прошлый запуск"), TR("Önceki çalıştırmayı sürdür"));
 SS_MSG(resume_help,
-    EN("Continue a previous run instead of starting from scratch. Point this "
-       "at a run's output folder to pick up its newest checkpoint, or at one "
-       "specific step-*.ckpt folder. The model and dataset settings come from "
-       "that run, while run length, save cadence and viewer settings still come "
-       "from the command line. Only works if the earlier run was saved with save_full_checkpoint "
-       "turned on."),
-    JA("最初からではなく、前回の学習の続きから始めます。実行の出力フォルダを指"
-       "定するといちばん新しいチェックポイントを、特定の step-*.ckpt フォルダ"
-       "を指定するとそれを読み込みます。モデルとデータセットの設定はその実行か"
-       "ら引き継がれ、学習の長さ、保存の間隔、ビューアの設定はコマンドラインの"
-       "指定が使われます。前回の実行が save_full_checkpoint を有効にして保存さ"
-       "れている場合にだけ使えます。"),
-    ZH_HANS("从上次训练继续，而不是从头开始。指向某次运行的输出文件夹会取用其"
-            "中最新的检查点，指向具体的 step-*.ckpt 文件夹则读取该检查点。模型"
-            "和数据集设置沿用那次运行，而训练长度、保存间隔和查看器设置仍来自"
-            "命令行。只有当先前的运行开启了 save_full_checkpoint 时才可用。"),
-    ZH_HANT("從上次訓練繼續，而不是從頭開始。指向某次執行的輸出資料夾會取用其"
-            "中最新的檢查點，指向具體的 step-*.ckpt 資料夾則讀取該檢查點。模型"
-            "和資料集設定沿用那次執行，而訓練長度、儲存間隔和檢視器設定仍來自"
-            "命令列。只有當先前的執行開啟了 save_full_checkpoint 時才可用。"),
-    KO("처음부터가 아니라 이전 학습에 이어서 시작합니다. 어떤 실행의 출력 폴더"
-       "를 가리키면 그중 가장 최근 체크포인트를, 특정 step-*.ckpt 폴더를 가리"
-       "키면 그것을 불러옵니다. 모델과 데이터셋 설정은 그 실행에서 가져오고, "
-       "학습 길이·저장 주기·뷰어 설정은 여전히 명령줄에서 옵니다. 이전 실행이"
-       " save_full_checkpoint를 켠 채 저장된 경우에만 동작합니다."),
-    DE("Einen früheren Lauf fortsetzen, statt von vorn zu beginnen. Auf den Ausgabeordner "
-       "eines Laufs zeigen lassen, um dessen neuesten Checkpoint aufzugreifen, "
-       "oder auf einen bestimmten step-*.ckpt-Ordner. Modell- und Datensatzeinstellungen "
-       "stammen aus jenem Lauf, während Lauflänge, Speicherintervall und Viewer-Einstellungen "
-       "weiterhin von der Kommandozeile kommen. Funktioniert nur, wenn der frühere "
-       "Lauf mit eingeschaltetem save_full_checkpoint gespeichert wurde."),
-    FR("Reprendre un entraînement précédent au lieu de repartir de zéro. Pointez "
-       "sur le dossier de sortie d'une exécution pour reprendre sa dernière sauvegarde, "
-       "ou sur un dossier step-*.ckpt précis. Les réglages du modèle et du jeu "
-       "de données viennent de cette exécution, tandis que la durée, la cadence "
-       "de sauvegarde et les réglages de la visionneuse viennent toujours de "
-       "la ligne de commande. Ne fonctionne que si l'exécution précédente a été "
-       "enregistrée avec save_full_checkpoint activé."),
-    ES("Reanudar una ejecución anterior en vez de empezar de cero. Apúntelo a "
-       "la carpeta de salida de una ejecución para tomar su punto de control "
-       "más reciente, o a una carpeta step-*.ckpt concreta. Los ajustes de modelo "
-       "y conjunto de datos vienen de aquella ejecución, mientras que la duración, "
-       "la frecuencia de guardado y los ajustes del visor siguen viniendo de "
-       "la línea de órdenes. Solo funciona si la ejecución anterior se guardó "
-       "con save_full_checkpoint activado."),
-    PT("Retomar uma execução anterior em vez de começar do zero. Aponte para "
-       "a pasta de saída de uma execução para pegar o checkpoint mais recente, "
-       "ou para uma pasta step-*.ckpt específica. Os ajustes de modelo e conjunto "
-       "de dados vêm daquela execução, enquanto a duração, a frequência de gravação "
-       "e os ajustes do visualizador continuam vindo da linha de comando. Só "
-       "funciona se a execução anterior foi salva com save_full_checkpoint ligado."),
-    IT("Riprendere un'esecuzione precedente invece di ricominciare da zero. Puntare "
-       "alla cartella di output di un'esecuzione per riprenderne il checkpoint "
-       "più recente, oppure a una specifica cartella step-*.ckpt. Le impostazioni "
-       "di modello e set di dati vengono da quell'esecuzione, mentre durata, "
-       "cadenza di salvataggio e impostazioni del visualizzatore vengono ancora "
-       "dalla riga di comando. Funziona solo se l'esecuzione precedente è stata "
-       "salvata con save_full_checkpoint attivo."),
-    NL("Een eerdere run hervatten in plaats van opnieuw te beginnen. Wijs naar "
-       "de uitvoermap van een run om het nieuwste checkpoint op te pakken, of "
-       "naar één specifieke step-*.ckpt-map. De model- en datasetinstellingen "
-       "komen uit die run, terwijl runlengte, opslagfrequentie en viewerinstellingen "
-       "nog steeds van de opdrachtregel komen. Werkt alleen als de eerdere run "
-       "met save_full_checkpoint aan is opgeslagen."),
-    RU("Продолжить прошлый запуск, а не начинать заново. Укажите папку вывода "
-       "запуска, чтобы взять его самую свежую контрольную точку, или конкретную "
-       "папку step-*.ckpt. Настройки модели и набора данных берутся из того запуска, "
-       "а длительность, частота сохранения и настройки просмотрщика по-прежнему "
-       "берутся из командной строки. Работает, только если прошлый запуск сохранялся "
-       "с включённым save_full_checkpoint."),
-    TR("Sıfırdan başlamak yerine önceki bir çalıştırmayı sürdürür. Bir çalıştırmanın "
-       "çıktı klasörünü gösterirseniz en yeni denetim noktası, belirli bir step-*.ckpt "
-       "klasörünü gösterirseniz o alınır. Model ve veri kümesi ayarları o çalıştırmadan "
-       "gelir; çalıştırma uzunluğu, kaydetme sıklığı ve görüntüleyici ayarları "
-       "yine komut satırından gelir. Yalnızca önceki çalıştırma save_full_checkpoint "
-       "açıkken kaydedildiyse çalışır."));
+    EN("Resume from a run folder selects its newest valid full-state checkpoint "
+       "and imports that run's settings. Explicit CLI flags override the imported "
+       "settings. Full-state checkpoints include optimizer state; inference-only "
+       "saves cannot resume training."),
+    JA("実行フォルダーから再開すると、最新の有効な完全状態チェックポイントを選び、"
+       "その実行の設定を取り込みます。明示したコマンドライン引数が取り込み設定より"
+       "優先されます。完全状態チェックポイントにはオプティマイザ状態も含まれ、"
+       "推論専用の保存からは学習を再開できません。"),
+    ZH_HANS("从运行文件夹继续训练时，会选择其中最新的有效全状态检查点并导入该运行的设置。"
+            "显式命令行参数会覆盖导入的设置。全状态检查点包含优化器状态；仅用于推理的保存"
+            "无法继续训练。"),
+    ZH_HANT("從執行資料夾繼續訓練時，會選擇其中最新的有效全狀態檢查點並匯入該執行的設定。"
+            "明確指定的命令列參數會覆蓋匯入的設定。全狀態檢查點包含最佳化器狀態；僅供推論"
+            "的儲存無法繼續訓練。"),
+    KO("실행 폴더에서 이어 하면 가장 최근의 유효한 전체 상태 체크포인트를 선택하고 해당 실행의"
+       " 설정을 가져옵니다. 명시한 명령줄 옵션이 가져온 설정보다 우선합니다. 전체 상태 체크포인트"
+       "에는 옵티마이저 상태가 포함되며 추론 전용 저장으로는 학습을 이어갈 수 없습니다."),
+    DE("Beim Fortsetzen aus einem Laufordner wird der neueste gültige vollständige Zustands-Checkpoint "
+       "gewählt und dessen Einstellungen übernommen. Ausdrückliche Befehlszeilenoptionen haben Vorrang. "
+       "Vollständige Zustands-Checkpoints enthalten den Optimiererzustand; reine Inferenz-Speicherstände "
+       "können das Training nicht fortsetzen."),
+    FR("Reprendre depuis un dossier d'exécution sélectionne le point de reprise complet valide le plus "
+       "récent et importe ses réglages. Les options explicites de la ligne de commande sont prioritaires. "
+       "Les points de reprise complets incluent l'état de l'optimiseur ; les sauvegardes d'inférence seules "
+       "ne peuvent pas reprendre l'entraînement."),
+    ES("Reanudar desde una carpeta de ejecución selecciona el punto de control de estado completo válido "
+       "más reciente e importa su configuración. Las opciones explícitas de la línea de órdenes tienen "
+       "prioridad. Los puntos de control completos incluyen el estado del optimizador; las guardas solo "
+       "para inferencia no pueden reanudar el entrenamiento."),
+    PT("Retomar a partir de uma pasta de execução seleciona o checkpoint de estado completo válido mais "
+       "recente e importa suas configurações. As opções explícitas da linha de comando têm prioridade. "
+       "Checkpoints completos incluem o estado do otimizador; salvamentos apenas para inferência não "
+       "podem retomar o treinamento."),
+    IT("Riprendere da una cartella di esecuzione seleziona il checkpoint completo valido più recente e ne "
+       "importa le impostazioni. Le opzioni esplicite della riga di comando hanno la precedenza. I "
+       "checkpoint completi includono lo stato dell'ottimizzatore; i salvataggi solo per l'inferenza non "
+       "possono riprendere l'addestramento."),
+    NL("Hervatten vanuit een runmap kiest het nieuwste geldige volledige statuscheckpoint en neemt de "
+       "instellingen daarvan over. Expliciete opties op de opdrachtregel hebben voorrang. Volledige "
+       "statuscheckpoints bevatten de optimizerstatus; alleen-inferentieopslagen kunnen de training niet "
+       "hervatten."),
+    RU("Продолжение из папки запуска выбирает самую новую допустимую контрольную точку полного состояния "
+       "и импортирует её настройки. Явные параметры командной строки имеют приоритет. Полные точки "
+       "содержат состояние оптимизатора; сохранения только для вывода не позволяют продолжить обучение."),
+    TR("Bir çalıştırma klasöründen devam etmek en yeni geçerli tam durum denetim noktasını seçer ve ayarlarını "
+       "içe aktarır. Açıkça verilen komut satırı seçenekleri önceliklidir. Tam durum denetim noktaları "
+       "iyileştirici durumunu içerir; yalnızca çıkarım kayıtları eğitime devam edemez."));
 
 SS_MSG(output_dir_prefix,
     EN("Output folder"), JA("出力フォルダ"), ZH_HANS("输出文件夹"),
@@ -265,40 +236,30 @@ SS_MSG(steps_per_save_help,
     EN("How often a checkpoint is written, in steps. Use -1 to save only when "
        "training finishes, or 0 to never save. Frequent saves cost disk space "
        "and a little time."),
-    JA("チェックポイントを書き出す間隔をステップ数で指定します。-1 なら学習の"
-       "終わりにだけ保存し、0 なら保存しません。頻繁に保存するとディスク容量と"
-       "少しの時間を使います。"),
-    ZH_HANS("多少步写一次检查点。-1 表示只在训练结束时保存，0 表示从不保存。频"
-            "繁保存会占用磁盘空间和少量时间。"),
-    ZH_HANT("多少步寫一次檢查點。-1 表示只在訓練結束時儲存，0 表示從不儲存。頻"
-            "繁儲存會佔用磁碟空間和少量時間。"),
-    KO("체크포인트를 쓰는 간격을 스텝 수로 지정합니다. -1이면 학습이 끝날 때만"
-       " 저장하고 0이면 저장하지 않습니다. 자주 저장하면 디스크 공간과 약간의"
-       " 시간이 듭니다."),
-    DE("Wie oft ein Checkpoint geschrieben wird, in Schritten. -1 speichert nur "
-       "am Ende des Trainings, 0 gar nicht. Häufiges Speichern kostet Plattenplatz "
-       "und ein wenig Zeit."),
-    FR("À quelle fréquence une sauvegarde est écrite, en étapes. -1 n'enregistre "
-       "qu'à la fin de l'entraînement, 0 jamais. Des sauvegardes fréquentes coûtent "
-       "de l'espace disque et un peu de temps."),
-    ES("Cada cuántos pasos se escribe un punto de control. -1 guarda solo al "
-       "terminar el entrenamiento y 0 no guarda nunca. Guardar a menudo cuesta "
-       "espacio en disco y algo de tiempo."),
-    PT("De quantos em quantos passos um checkpoint é gravado. -1 salva apenas "
-       "ao terminar o treinamento e 0 nunca salva. Gravar com frequência custa "
-       "espaço em disco e um pouco de tempo."),
-    IT("Ogni quanti passi viene scritto un checkpoint. -1 salva solo alla fine "
-       "dell'addestramento, 0 non salva mai. Salvare spesso costa spazio su disco "
-       "e un po' di tempo."),
-    NL("Om de hoeveel stappen een checkpoint wordt geschreven. -1 slaat alleen "
-       "aan het eind van de training op, 0 nooit. Vaak opslaan kost schijfruimte "
-       "en een beetje tijd."),
-    RU("Как часто пишется контрольная точка, в шагах. -1 сохраняет только в конце "
-       "обучения, 0 — никогда. Частые сохранения стоят места на диске и немного "
-       "времени."),
-    TR("Bir denetim noktasının kaç adımda bir yazılacağı. -1 yalnızca eğitim "
-       "bitince kaydeder, 0 hiç kaydetmez. Sık kaydetmek disk alanına ve biraz "
-       "zamana mal olur."));
+    JA("チェックポイントを書き出す間隔をステップ数で指定します。-1 なら学習の終了時だけ"
+       "保存し、0 なら保存しません。頻繁な保存にはディスク容量と少しの時間が必要です。"),
+    ZH_HANS("设置每隔多少步写入检查点。-1 表示只在训练结束时保存，0 表示从不保存。频繁保存"
+            "会占用磁盘空间和少量时间。"),
+    ZH_HANT("設定每隔多少步寫入檢查點。-1 表示只在訓練結束時儲存，0 表示從不儲存。頻繁儲存"
+            "會佔用磁碟空間和少量時間。"),
+    KO("몇 스텝마다 체크포인트를 쓸지 지정합니다. -1이면 학습 종료 때만 저장하고, 0이면 저장하지"
+       " 않습니다. 자주 저장하면 디스크 공간과 시간이 조금 더 듭니다."),
+    DE("Wie oft ein Checkpoint in Schritten geschrieben wird. -1 speichert nur am Ende des Trainings, "
+       "0 nie. Häufige Speicherungen kosten Plattenplatz und etwas Zeit."),
+    FR("Fréquence d'écriture d'un point de reprise, en étapes. -1 enregistre seulement à la fin, "
+       "0 jamais. Des sauvegardes fréquentes utilisent de l'espace et un peu de temps."),
+    ES("Cada cuántos pasos se escribe un punto de control. -1 guarda solo al terminar y 0 nunca. "
+       "Guardar a menudo consume espacio de disco y algo de tiempo."),
+    PT("De quantos em quantos passos gravar um checkpoint. -1 salva apenas ao terminar e 0 nunca. "
+       "Salvar com frequência usa espaço em disco e um pouco de tempo."),
+    IT("Ogni quanti passi scrivere un checkpoint. -1 salva solo al termine e 0 non salva mai. "
+       "Salvare spesso usa spazio su disco e un po' di tempo."),
+    NL("Om de hoeveel stappen een checkpoint wordt geschreven. -1 slaat alleen aan het einde op, "
+       "0 nooit. Vaak opslaan kost schijfruimte en wat tijd."),
+    RU("Как часто записывать контрольную точку, в шагах. -1 сохраняет только по завершении обучения, "
+       "0 — никогда. Частые сохранения занимают место на диске и немного времени."),
+    TR("Denetim noktasının kaç adımda bir yazılacağını belirler. -1 yalnızca eğitim bitince, 0 ise hiç "
+       "kaydetmez. Sık kayıt disk alanı ve biraz zaman kullanır."));
 
 SS_MSG(save_only_latest_checkpoint,
     EN("Keep only the newest checkpoint"),
@@ -313,42 +274,33 @@ SS_MSG(save_only_latest_checkpoint,
     RU("Хранить только последнюю контрольную точку"),
     TR("Yalnızca en yeni denetim noktasını sakla"));
 SS_MSG(save_only_latest_checkpoint_help,
-    EN("Keep only the newest checkpoint and delete older ones as training goes. "
-       "Turn off to keep the whole history, which uses considerably more disk "
-       "space."),
-    JA("いちばん新しいチェックポイントだけを残し、古いものは学習の進行に合わせ"
-       "て削除します。オフにすると履歴をすべて残しますが、ディスク容量をかなり"
-       "多く使います。"),
-    ZH_HANS("只保留最新的检查点，随着训练推进删除较旧的。关闭后会保留全部历史，"
+    EN("After each successful publication, keep only the newest checkpoint and "
+       "delete older ones. Turn off to keep the whole history, which uses "
+       "considerably more disk space."),
+    JA("保存が正常に公開された後、最新のチェックポイントだけを残し、古いものを削除します。"
+       "オフにすると履歴をすべて残しますが、ディスク容量をかなり使います。"),
+    ZH_HANS("每次成功发布后只保留最新检查点，并删除较旧的检查点。关闭后会保留全部历史，"
             "但会占用多得多的磁盘空间。"),
-    ZH_HANT("只保留最新的檢查點，隨著訓練推進刪除較舊的。關閉後會保留全部歷史，"
+    ZH_HANT("每次成功發佈後只保留最新檢查點，並刪除較舊的檢查點。關閉後會保留全部歷史，"
             "但會佔用多得多的磁碟空間。"),
-    KO("가장 최근 체크포인트만 남기고 학습이 진행되는 동안 오래된 것은 지웁니"
-       "다. 끄면 전체 이력을 남기지만 디스크를 훨씬 많이 씁니다."),
-    DE("Nur den neuesten Checkpoint behalten und ältere im Verlauf des Trainings "
-       "löschen. Abgeschaltet bleibt die ganze Historie erhalten, was erheblich "
-       "mehr Plattenplatz braucht."),
-    FR("Ne garder que la sauvegarde la plus récente et supprimer les plus anciennes "
-       "au fil de l'entraînement. Décoché, tout l'historique est conservé, ce "
-       "qui occupe bien plus d'espace disque."),
-    ES("Conservar solo el punto de control más reciente y borrar los anteriores "
-       "según avanza el entrenamiento. Sin marcar se guarda todo el historial, "
-       "lo que ocupa bastante más disco."),
-    PT("Manter apenas o checkpoint mais recente e apagar os antigos conforme "
-       "o treinamento avança. Desmarcado, todo o histórico é mantido, o que ocupa "
-       "bem mais disco."),
-    IT("Conservare solo il checkpoint più recente ed eliminare i precedenti man "
-       "mano che l'addestramento procede. Deselezionato mantiene tutta la storia, "
-       "il che occupa molto più disco."),
-    NL("Alleen het nieuwste checkpoint bewaren en oudere tijdens de training "
-       "verwijderen. Uitgevinkt blijft de hele geschiedenis staan, wat aanzienlijk "
-       "meer schijfruimte kost."),
-    RU("Хранить только самую свежую контрольную точку и удалять старые по ходу "
-       "обучения. Без флажка сохраняется вся история, что занимает заметно больше "
-       "места на диске."),
-    TR("Yalnızca en yeni denetim noktasını tutar ve eğitim ilerledikçe eskileri "
-       "siler. Kapatılırsa tüm geçmiş saklanır ve bu belirgin biçimde daha çok "
-       "disk yeri kaplar."));
+    KO("성공적으로 게시된 뒤 가장 최근 체크포인트만 남기고 오래된 것을 삭제합니다. 끄면 전체"
+       " 이력을 보관하지만 디스크 공간을 훨씬 더 사용합니다."),
+    DE("Nach jeder erfolgreichen Veröffentlichung bleibt nur der neueste Checkpoint erhalten; ältere "
+       "werden gelöscht. Ausgeschaltet bleibt die gesamte Historie erhalten und benötigt deutlich mehr Platz."),
+    FR("Après chaque publication réussie, ne garder que le point de reprise le plus récent et supprimer "
+       "les anciens. Désactivé, tout l'historique est conservé et prend beaucoup plus d'espace."),
+    ES("Después de cada publicación correcta, conservar solo el punto de control más reciente y borrar "
+       "los anteriores. Desactivado se conserva todo el historial y ocupa mucho más espacio."),
+    PT("Após cada publicação bem-sucedida, manter apenas o checkpoint mais recente e apagar os antigos. "
+       "Desativado, todo o histórico é mantido e usa muito mais espaço."),
+    IT("Dopo ogni pubblicazione riuscita, conservare solo il checkpoint più recente ed eliminare i "
+       "precedenti. Disattivato mantiene tutta la cronologia e usa molto più spazio."),
+    NL("Na elke geslaagde publicatie alleen het nieuwste checkpoint bewaren en oudere verwijderen. "
+       "Uitgeschakeld blijft de hele geschiedenis bewaard en kost die veel meer schijfruimte."),
+    RU("После каждой успешной публикации оставлять только самую новую контрольную точку и удалять старые. "
+       "При отключении сохраняется вся история, что занимает гораздо больше места."),
+    TR("Her başarılı yayımdan sonra yalnızca en yeni denetim noktasını tutup eskileri siler. Kapatılırsa "
+       "tüm geçmiş korunur ve çok daha fazla disk alanı kullanır."));
 
 SS_MSG(save_full_checkpoint,
     EN("Save resumable checkpoints"), JA("再開できるチェックポイントを保存"),
@@ -363,56 +315,41 @@ SS_MSG(save_full_checkpoint,
     RU("Сохранять точки для продолжения"),
     TR("Sürdürülebilir denetim noktaları kaydet"));
 SS_MSG(save_full_checkpoint_help,
-    EN("Also store everything needed to resume training later, not just the finished "
-       "splats. Checkpoints get much larger because they carry every splat slot "
-       "and the optimizer state. Leave off if you only want the exported splat "
-       "file."),
-    JA("仕上がったスプラットだけでなく、後で学習を再開するのに必要なものもすべ"
-       "て保存します。すべてのスプラット枠とオプティマイザの状態を持つので、チ"
-       "ェックポイントはかなり大きくなります。書き出したスプラットファイルだけ"
-       "が欲しいならオフのままにしてください。"),
-    ZH_HANS("除了训练好的泼溅，还保存以后继续训练所需的一切。检查点会大得多，"
-            "因为它包含每个泼溅槽位和优化器状态。如果只想要导出的泼溅文件，就"
-            "保持关闭。"),
-    ZH_HANT("除了訓練好的潑濺，還儲存以後繼續訓練所需的一切。檢查點會大得多，"
-            "因為它包含每個潑濺槽位和最佳化器狀態。如果只想要匯出的潑濺檔案，"
-            "就保持關閉。"),
-    KO("완성된 스플랫뿐 아니라 나중에 학습을 이어가는 데 필요한 것도 모두 저장"
-       "합니다. 모든 스플랫 자리와 옵티마이저 상태를 담기 때문에 체크포인트가"
-       " 훨씬 커집니다. 내보낸 스플랫 파일만 필요하면 꺼 두십시오."),
-    DE("Zusätzlich alles speichern, was zum späteren Fortsetzen nötig ist, nicht "
-       "nur die fertigen Splats. Checkpoints werden viel größer, weil sie jeden "
-       "Splat-Platz und den Optimiererzustand mitführen. Ausgeschaltet lassen, "
-       "wenn nur die exportierte Splat-Datei gebraucht wird."),
-    FR("Enregistrer aussi tout ce qu'il faut pour reprendre l'entraînement plus "
-       "tard, pas seulement les splats finis. Les sauvegardes deviennent bien "
-       "plus grosses car elles portent chaque emplacement de splat et l'état "
-       "de l'optimiseur. À laisser décoché si seul le fichier de splats exporté "
-       "vous intéresse."),
-    ES("Guardar además todo lo necesario para reanudar el entrenamiento más tarde, "
-       "no solo los splats terminados. Los puntos de control se vuelven mucho "
-       "mayores porque llevan cada hueco de splat y el estado del optimizador. "
-       "Déjelo sin marcar si solo quiere el archivo de splats exportado."),
-    PT("Guardar também tudo o que é preciso para retomar o treinamento depois, "
-       "não só os splats prontos. Os checkpoints ficam bem maiores porque carregam "
-       "cada posição de splat e o estado do otimizador. Deixe desmarcado se quiser "
-       "apenas o arquivo de splats exportado."),
-    IT("Salvare anche tutto ciò che serve per riprendere l'addestramento più "
-       "tardi, non solo gli splat finiti. I checkpoint diventano molto più grandi "
-       "perché portano ogni posto splat e lo stato dell'ottimizzatore. Lasciare "
-       "deselezionato se serve solo il file di splat esportato."),
-    NL("Ook alles opslaan wat nodig is om later verder te trainen, niet alleen "
-       "de afgeronde splats. Checkpoints worden veel groter omdat ze elke splatplek "
-       "en de optimizerstatus meedragen. Laat uit als je alleen het geëxporteerde "
-       "splatbestand wilt."),
-    RU("Сохранять не только готовые сплаты, но и всё, что нужно, чтобы позже "
-       "продолжить обучение. Контрольные точки становятся заметно больше, поскольку "
-       "несут каждую ячейку сплата и состояние оптимизатора. Оставьте выключенным, "
-       "если нужен только выгруженный файл сплатов."),
-    TR("Yalnızca bitmiş splat'ları değil, sonradan eğitimi sürdürmek için gereken "
-       "her şeyi de kaydeder. Denetim noktaları çok daha büyür, çünkü her splat "
-       "yuvasını ve iyileştirici durumunu taşırlar. Yalnızca dışa aktarılmış "
-       "splat dosyasını istiyorsanız kapalı bırakın."));
+    EN("Full-state checkpoints are enabled by default and include every splat "
+       "slot plus optimizer state needed to resume training. Turn this off only "
+       "for inference-only saves; those cannot resume training."),
+    JA("完全状態チェックポイントは既定で有効で、学習の再開に必要なすべてのスプラット枠と"
+       "オプティマイザ状態を含みます。オフにすると推論専用の保存となり、学習を再開できません。"),
+    ZH_HANS("全状态检查点默认启用，包含继续训练所需的每个泼溅槽位和优化器状态。仅在只需要推理时"
+            "关闭；这种保存无法继续训练。"),
+    ZH_HANT("全狀態檢查點預設啟用，包含繼續訓練所需的每個潑濺槽位和最佳化器狀態。僅在只需要推論"
+            "時關閉；這種儲存無法繼續訓練。"),
+    KO("전체 상태 체크포인트는 기본으로 켜져 있으며 학습 재개에 필요한 모든 스플랫 슬롯과 옵티마이저"
+       " 상태를 포함합니다. 추론 전용 저장이 필요할 때만 끄십시오. 그런 저장은 학습을 재개할 수 없습니다."),
+    DE("Vollständige Zustands-Checkpoints sind standardmäßig aktiviert und enthalten jeden Splat-Platz sowie "
+       "den Optimiererzustand zum Fortsetzen. Nur für reine Inferenzspeicher deaktivieren; damit kann das "
+       "Training nicht fortgesetzt werden."),
+    FR("Les points de reprise complets sont activés par défaut et incluent chaque emplacement de splat ainsi "
+       "que l'état de l'optimiseur nécessaire à la reprise. Désactivez-les uniquement pour une sauvegarde "
+       "réservée à l'inférence, qui ne permet pas de reprendre l'entraînement."),
+    ES("Los puntos de control de estado completo están activados de forma predeterminada e incluyen cada "
+       "hueco de splat y el estado del optimizador necesarios para reanudar. Desactívelos solo para guardas "
+       "de inferencia; esas guardas no pueden reanudar el entrenamiento."),
+    PT("Os checkpoints de estado completo vêm ativados por padrão e incluem cada posição de splat e o estado "
+       "do otimizador necessários para retomar. Desative-os apenas para salvamentos de inferência; eles não "
+       "podem retomar o treinamento."),
+    IT("I checkpoint di stato completo sono attivi per impostazione predefinita e includono ogni posizione "
+       "splat e lo stato dell'ottimizzatore necessari per riprendere. Disattivarli solo per salvataggi "
+       "destinati all'inferenza, che non consentono di riprendere l'addestramento."),
+    NL("Volledige statuscheckpoints staan standaard aan en bevatten elke splatplek en de optimizerstatus die "
+       "nodig zijn om de training te hervatten. Schakel dit alleen uit voor opslag uitsluitend voor inferentie; "
+       "daarmee kan de training niet worden hervat."),
+    RU("Полные контрольные точки состояния включены по умолчанию и содержат все ячейки сплатов и состояние "
+       "оптимизатора, необходимые для продолжения обучения. Отключайте только для сохранений лишь для вывода; "
+       "с ними обучение продолжить нельзя."),
+    TR("Tam durum denetim noktaları varsayılan olarak açıktır ve eğitime devam etmek için gereken tüm splat "
+       "yuvalarıyla iyileştirici durumunu içerir. Yalnızca çıkarım kayıtları için kapatın; bu kayıtlarla eğitime "
+       "devam edilemez."));
 
 SS_MSG(save_eval_images,
     EN("Save evaluation images"), JA("評価用画像を保存"),

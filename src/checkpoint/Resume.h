@@ -21,18 +21,22 @@ namespace ckpt {
 struct ResolvedCheckpoint {
     std::filesystem::path run_dir;    // holds config.json
     std::filesystem::path ckpt_dir;   // holds state.tar
+    std::filesystem::path config_path; // paired snapshot, or legacy run config
 };
 
-// Accepts a run directory or a step-*.ckpt directory. Throws if neither.
+// Numeric step parsed from the exact step-%09d.ckpt spelling, or -1.
+int checkpoint_step(const std::filesystem::path& path);
+
+// Accepts a run directory or a step-*.ckpt directory. Run directories choose
+// the newest valid full-state checkpoint; explicit checkpoint paths are pinned.
 ResolvedCheckpoint resolve_checkpoint(const std::filesystem::path& path);
 
 // The state.json member of ckpt_dir/state.tar.
 JsonValue read_state_json(const std::filesystem::path& ckpt_dir);
 
-// Throws with an actionable message if the checkpoint holds only the Always
-// (inference/appearance) buffers -- i.e. was saved without
-// save_full_checkpoint -- and so cannot restore training.
-void check_resumable(const std::filesystem::path& ckpt_dir);
+// Validate structural resumability and return the parsed state manifest.
+JsonValue validate_checkpoint(const std::filesystem::path& ckpt_dir,
+                              bool require_full);
 
 // A run's config.json -> TrainConfig. Keys absent from the file keep the
 // field's default, so a config.json written by an older build still loads.

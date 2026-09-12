@@ -299,8 +299,11 @@ void engine_save_checkpoint(
     const int vertex_floats = 3 + 3 + 3 + 3 * K + 1 + 3 + 4;  // pos + normal + dc + sh + opa + scale + rot
     fs::path ply_path = out_root / "splat.ply";
     {
-        std::ofstream ply(ply_path, std::ios::binary);
-        if (!ply) throw std::runtime_error("Failed to open PLY for write: " + ply_path.string());
+        std::ofstream ply;
+        ply.exceptions(std::ios::failbit | std::ios::badbit);
+        ply.open(ply_path.string(), std::ios::binary);
+        if (!ply.is_open())
+            throw std::runtime_error("Failed to open PLY for write: " + ply_path.string());
         ply << "ply\n";
         ply << "format binary_little_endian 1.0\n";
         ply << "element vertex " << kept << "\n";
@@ -349,16 +352,23 @@ void engine_save_checkpoint(
             if (rows_in_buf == ROWS_PER_FLUSH) flush();
         }
         flush();
+        ply.flush();
+        ply.close();
     }
 
     // --- state.tar: metadata-driven resume payload (see file header) ---------
     // Which buffers to serialize: Always (base) or Always+Resume (full resume).
     const SaveClass save_min = full_dump ? SaveClass::Resume : SaveClass::Always;
+    const std::vector<DevicePool::SavedSlot> saved =
+        DevicePool::global().saved(save_min);
 
-    std::ofstream tar((out_root / "state.tar").string(), std::ios::binary);
-    if (!tar)
+    std::ofstream tar;
+    tar.exceptions(std::ios::failbit | std::ios::badbit);
+    const fs::path tar_path = out_root / "state.tar";
+    tar.open(tar_path.string(), std::ios::binary);
+    if (!tar.is_open())
         throw std::runtime_error("Failed to open state.tar for write: "
-                                 + (out_root / "state.tar").string());
+                                 + tar_path.string());
 
     // state.json -- runtime + validation manifest (config lives in config.json).
     {
@@ -369,12 +379,43 @@ void engine_save_checkpoint(
     // One flat typed .npy per saved pool slot. Chunked D->H copy through a small
     // reusable host buffer -- bounded host RAM, ZERO extra device memory.
     std::vector<char> host_stage;
-    for (const auto& sl : DevicePool::global().saved(save_min)) {
+    for (const auto& sl : saved) {
         ckpt::tar_write_npy_device(tar, sl.name + ".npy",
                                    sl.ptr, sl.nbytes, sl.dtype_tag, host_stage);
     }
     ckpt::tar_finish(tar);
+    tar.flush();
+    tar.close();
+
+    // Read back only member metadata before publication. The captured slot list
+    // is authoritative: this catches omissions and ordering/name mismatches
+    // without copying tensor payloads a second time.
+    {
+        std::ifstream check(tar_path, std::ios::binary);
+        if (!check)
+            throw std::runtime_error("Failed to reopen state.tar: " + tar_path.string());
+        const auto members = ckpt::tar_index(check);
+        if (members.size() != saved.size() + 1 ||
+            members.empty() || members[0].name != "state.json")
+            throw std::runtime_error("state.tar member list does not match saved slots");
+        for (size_t i = 0; i < saved.size(); ++i) {
+            const auto& sl = saved[i];
+            const auto& m = members[i + 1];
+            const auto dtype = npy_scalar_descr((NpyScalar)sl.dtype_tag);
+            const auto info = ckpt::npy_locate(check, m.data_offset, m.size);
+            if (dtype.second == 0 || sl.nbytes % dtype.second != 0 ||
+                m.name != sl.name + ".npy" ||
+                info.data_bytes != (uint64_t)sl.nbytes ||
+                info.descr != dtype.first ||
+                info.numel != (uint64_t)sl.nbytes / dtype.second)
+                throw std::runtime_error("state.tar slot metadata mismatch for '" +
+                                         sl.name + "'");
+        }
+    }
+    if (const char* err = backend::last_error())
+        throw std::runtime_error(std::string("checkpoint device copy failed: ") + err);
 }
+
 
 
 // Restore engine state from a checkpoint's state.tar for resuming training.
