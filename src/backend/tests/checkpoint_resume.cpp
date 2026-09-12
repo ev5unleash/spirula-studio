@@ -8,10 +8,12 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -60,17 +62,68 @@ void write_config(const fs::path& path, const std::string& data,
         << extra << "}\n";
 }
 
-void write_npy_member(std::ostream& out, const std::string& name,
-                      const std::string& descr = "<f4",
-                      const std::vector<uint8_t>& payload = {0, 0, 0, 0}) {
-    const std::string header = ckpt::npy_header(
-        descr.c_str(), payload.size() / (size_t)(descr[2] - '0'));
+void write_npy_blob(std::ostream& out, const std::string& name,
+                    const std::string& header,
+                    const std::vector<uint8_t>& payload) {
     const size_t member_size = header.size() + payload.size();
     ckpt::tar_header(out, name + ".npy", member_size);
     out.write(header.data(), (std::streamsize)header.size());
     if (!payload.empty())
         out.write((const char*)payload.data(), (std::streamsize)payload.size());
     ckpt::tar_pad(out, member_size);
+}
+
+void write_npy_member(std::ostream& out, const std::string& name,
+                      const std::string& descr = "<f4",
+                      const std::vector<uint8_t>& payload = {0, 0, 0, 0}) {
+    const std::string header = ckpt::npy_header(
+        descr.c_str(), payload.size() / (size_t)(descr[2] - '0'));
+    write_npy_blob(out, name, header, payload);
+}
+
+void write_legacy_full_checkpoint(const fs::path& dir, int step) {
+    fs::create_directories(dir);
+    std::ofstream out(dir / "state.tar", std::ios::binary);
+    if (!out) throw std::runtime_error("cannot write state.tar");
+    const std::string state = "{\"step\":" + std::to_string(step) + "}";
+    ckpt::tar_write_bytes(out, "state.json", state.data(), state.size());
+    write_npy_member(out, "world.means");
+    write_npy_member(out, "world.opacities");
+    ckpt::tar_finish(out);
+    out.close();
+    write_config(dir / "config.json", "dataset");
+}
+
+std::vector<uint8_t> bytes(const fs::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    return std::vector<uint8_t>(std::istreambuf_iterator<char>(in), {});
+}
+
+void write_bytes(const fs::path& path, const std::vector<uint8_t>& data) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out.write((const char*)data.data(), (std::streamsize)data.size());
+}
+
+void write_base256_archive(const fs::path& path, const std::string& name,
+                           const std::string& data) {
+    std::ostringstream encoded;
+    ckpt::tar_write_bytes(encoded, name, data.data(), data.size());
+    ckpt::tar_finish(encoded);
+    std::string archive = encoded.str();
+    if (archive.size() < 512) throw std::runtime_error("short tar fixture");
+    archive[124] = (char)0x80;
+    uint64_t value = data.size();
+    for (int i = 135; i >= 125; --i) {
+        archive[(size_t)i] = (char)(value & 0xff);
+        value >>= 8;
+    }
+    std::memset(archive.data() + 148, ' ', 8);
+    unsigned checksum = 0;
+    for (size_t i = 0; i < 512; ++i)
+        checksum += (unsigned char)archive[i];
+    std::snprintf(archive.data() + 148, 7, "%06o", checksum & 0777777u);
+    archive[155] = ' ';
+    write_bytes(path, std::vector<uint8_t>(archive.begin(), archive.end()));
 }
 
 void write_checkpoint(const fs::path& dir, int step, bool full = true,
@@ -89,15 +142,6 @@ void write_checkpoint(const fs::path& dir, int step, bool full = true,
     if (with_config) write_config(dir / "config.json", "dataset");
 }
 
-std::vector<uint8_t> bytes(const fs::path& path) {
-    std::ifstream in(path, std::ios::binary);
-    return std::vector<uint8_t>(std::istreambuf_iterator<char>(in), {});
-}
-
-void write_bytes(const fs::path& path, const std::vector<uint8_t>& data) {
-    std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    out.write((const char*)data.data(), (std::streamsize)data.size());
-}
 
 template <typename Fn>
 bool throws(const Fn& fn) {
@@ -144,6 +188,32 @@ void selection_and_configs() {
           "ten-digit step parse failed");
     CHECK(ckpt::checkpoint_step("step-000000001.ckpt.tmp") == -1,
           "malformed checkpoint suffix accepted");
+    {
+        const fs::path light_run = tmp.path / "light-run";
+        const fs::path light_old = light_run / "step-000000011.ckpt";
+        const fs::path light_new = light_run / "step-000000012.ckpt";
+        write_checkpoint(light_old, 11);
+        write_checkpoint(light_new, 12, false);
+        write_config(light_run / "config.json", "run-data");
+        const auto fallback = ckpt::resolve_checkpoint(light_run);
+        CHECK(fallback.ckpt_dir == fs::absolute(light_old),
+              "newer lightweight checkpoint hid older full checkpoint");
+
+        TrainConfig light_cli;
+        light_cli.resume = light_new.string();
+        CHECK(throws([&] {
+                  (void)ckpt::build_resume_config(light_cli, "", {});
+              }),
+              "explicit lightweight checkpoint was accepted or substituted");
+    }
+
+    {
+        const fs::path legacy = tmp.path / "legacy" / "step-000000013.ckpt";
+        write_legacy_full_checkpoint(legacy, 13);
+        const auto state = ckpt::validate_checkpoint(legacy, true);
+        CHECK(state.find("full_resume") == nullptr,
+              "legacy checkpoint unexpectedly gained full_resume");
+    }
 }
 
 void archive_boundaries() {
@@ -196,6 +266,73 @@ void archive_boundaries() {
         CHECK(throws([&] { (void)ckpt::validate_checkpoint(bad, false); }),
               "truncated NPY header accepted");
     }
+    {
+        const fs::path base256 = tmp.path / "base256";
+        fs::create_directories(base256);
+        write_base256_archive(base256 / "state.tar", "state.json",
+                              state_json(2));
+        const auto state = ckpt::validate_checkpoint(base256, false);
+        CHECK(state.find("step") != nullptr,
+              "valid GNU base-256 tar size was rejected");
+    }
+    {
+        std::ofstream out(tmp.path / "oversized-npy.tar", std::ios::binary);
+        const std::string state = state_json(3);
+        ckpt::tar_write_bytes(out, "state.json", state.data(), state.size());
+        std::string prefix("\x93NUMPY", 6);
+        prefix.push_back('\x01');
+        prefix.push_back('\0');
+        prefix.push_back('\xff');
+        prefix.push_back('\xff');
+        ckpt::tar_header(out, "world.means.npy", prefix.size());
+        out.write(prefix.data(), (std::streamsize)prefix.size());
+        ckpt::tar_pad(out, prefix.size());
+        ckpt::tar_finish(out);
+        out.close();
+        const fs::path bad = tmp.path / "step-000000003.ckpt";
+        fs::create_directories(bad);
+        fs::copy_file(tmp.path / "oversized-npy.tar", bad / "state.tar");
+        CHECK(throws([&] { (void)ckpt::validate_checkpoint(bad, false); }),
+              "oversized NPY header length was accepted");
+    }
+    {
+        std::ofstream out(tmp.path / "truncated-npy-length.tar",
+                          std::ios::binary);
+        const std::string state = state_json(4);
+        ckpt::tar_write_bytes(out, "state.json", state.data(), state.size());
+        std::string prefix("\x93NUMPY", 6);
+        prefix.push_back('\x02');
+        prefix.push_back('\0');
+        prefix.push_back('\0');
+        prefix.push_back('\0');
+        prefix.push_back('\0');
+        ckpt::tar_header(out, "world.means.npy", prefix.size());
+        out.write(prefix.data(), (std::streamsize)prefix.size());
+        ckpt::tar_pad(out, prefix.size());
+        ckpt::tar_finish(out);
+        out.close();
+        const fs::path bad = tmp.path / "step-000000004.ckpt";
+        fs::create_directories(bad);
+        fs::copy_file(tmp.path / "truncated-npy-length.tar",
+                      bad / "state.tar");
+        CHECK(throws([&] { (void)ckpt::validate_checkpoint(bad, false); }),
+              "truncated NPY header length was accepted");
+    }
+    {
+        std::ofstream out(tmp.path / "truncated-payload.tar",
+                          std::ios::binary);
+        const std::string state = state_json(5);
+        ckpt::tar_write_bytes(out, "state.json", state.data(), state.size());
+        write_npy_blob(out, "world.means", ckpt::npy_header("<f4", 2),
+                       {0, 0, 0, 0});
+        ckpt::tar_finish(out);
+        out.close();
+        const fs::path bad = tmp.path / "step-000000005.ckpt";
+        fs::create_directories(bad);
+        fs::copy_file(tmp.path / "truncated-payload.tar", bad / "state.tar");
+        CHECK(throws([&] { (void)ckpt::validate_checkpoint(bad, false); }),
+              "truncated tensor payload was accepted");
+    }
     CHECK(throws([&] { (void)ckpt::validate_checkpoint(good, true); }) == false,
           "valid octal archive regressed");
 }
@@ -233,6 +370,35 @@ void config_fallbacks() {
           "explicit default-valued override was lost");
     CHECK(rebuilt.resume == fs::absolute(ckpt).string(),
           "resume path was not pinned to selected checkpoint");
+    {
+        const fs::path missing_run = tmp.path / "missing-config";
+        const fs::path missing_ckpt =
+            missing_run / "step-000000005.ckpt";
+        write_checkpoint(missing_ckpt, 5);
+        fs::remove(missing_ckpt / "config.json", ec);
+        CHECK(throws([&] { (void)ckpt::resolve_checkpoint(missing_run); }),
+              "missing local and root config created a default run");
+    }
+    {
+        const fs::path bad_run = tmp.path / "unusable-config";
+        const fs::path bad_ckpt = bad_run / "step-000000006.ckpt";
+        write_checkpoint(bad_ckpt, 6);
+        fs::remove(bad_ckpt / "config.json", ec);
+        std::ofstream bad(bad_run / "config.json", std::ios::trunc);
+        bad << "{}";
+        bad.close();
+        CHECK(throws([&] { (void)ckpt::resolve_checkpoint(bad_run); }),
+              "config without training fields created a default run");
+    }
+    {
+        const fs::path empty_run = tmp.path / "empty-data-config";
+        const fs::path empty_ckpt = empty_run / "step-000000007.ckpt";
+        write_checkpoint(empty_ckpt, 7);
+        fs::remove(empty_ckpt / "config.json", ec);
+        write_config(empty_run / "config.json", "");
+        CHECK(throws([&] { (void)ckpt::resolve_checkpoint(empty_run); }),
+              "config without a dataset path created a default run");
+    }
 }
 
 }  // namespace
