@@ -862,12 +862,18 @@ bool run_checkpoint_autosave(const fs::path& fixture,
     bool ok = true;
     std::vector<float> saved_means;
     std::vector<float> saved_g1_means;
+    auto configure_autosave = [&](spirula::TrainerSession& session,
+                                  const fs::path& output) {
+        configure_control_session(session, fixture, output);
+        session.cfg.use_fused_proj_bwd_optim = false;
+        session.cfg.quantization_level = 0;
+    };
 
     // Stop just after callback step 2. The periodic save runs immediately
     // before step 2, so its manifest records the two completed steps.
     {
         spirula::TrainerSession session;
-        configure_control_session(session, fixture, out_dir);
+        configure_autosave(session, out_dir);
         session.cfg.steps_per_save = 2;
         session.save_on_stop.store(false);
         session.check_config();
@@ -885,8 +891,10 @@ bool run_checkpoint_autosave(const fs::path& fixture,
                     append_device(saved_g1_means,
                                   (const float*)engine().optim.g1_means.data_ptr(),
                                   engine().optim.g1_means.size() * 3);
-                if (!any_nonzero(saved_g1_means))
+                if (!any_nonzero(saved_g1_means)) {
                     std::printf("engine_split_faces: autosave optimizer state was zero\n");
+                    ok = false;
+                }
             }
             if (p.step == 2) session.stop_requested.store(true);
         };
@@ -912,7 +920,7 @@ bool run_checkpoint_autosave(const fs::path& fixture,
     // previously published checkpoint.
     {
         spirula::TrainerSession session;
-        configure_control_session(session, fixture, out_dir);
+        configure_autosave(session, out_dir);
         session.cfg.resume = step2.string();
         session.cfg.steps_per_save = 2;
         session.cfg.num_iterations = 3;
@@ -927,6 +935,11 @@ bool run_checkpoint_autosave(const fs::path& fixture,
                       (const float*)engine().world.means.data_ptr(),
                       engine().world.means.size() * 3);
         ok = loaded_means == saved_means && ok;
+        std::vector<float> loaded_g1_means;
+        append_device(loaded_g1_means,
+                      (const float*)engine().optim.g1_means.data_ptr(),
+                      engine().optim.g1_means.size() * 3);
+        ok = loaded_g1_means == saved_g1_means && ok;
 
         const fs::path fault = out_dir / ".fault-state";
         fs::create_directories(fault / "state.tar");
@@ -975,7 +988,7 @@ bool run_checkpoint_autosave(const fs::path& fixture,
     // the only checkpoint left.
     {
         spirula::TrainerSession session;
-        configure_control_session(session, fixture, out_dir);
+        configure_autosave(session, out_dir);
         session.cfg.resume = step2.string();
         session.cfg.steps_per_save = 2;
         session.cfg.num_iterations = 6;
@@ -999,7 +1012,7 @@ bool run_checkpoint_autosave(const fs::path& fixture,
     // Keep-all uses the same scheduler but retains steps 2, 4 and 6.
     {
         spirula::TrainerSession session;
-        configure_control_session(session, fixture, keep_all_dir);
+        configure_autosave(session, keep_all_dir);
         session.cfg.steps_per_save = 2;
         session.cfg.save_only_latest_checkpoint = false;
         session.check_config();
@@ -1025,7 +1038,7 @@ bool run_checkpoint_autosave(const fs::path& fixture,
     fs::remove(legacy_step / "config.json", ec);
     {
         spirula::TrainerSession session;
-        configure_control_session(session, fixture, keep_all_dir);
+        configure_autosave(session, keep_all_dir);
         session.cfg.resume = legacy_step.string();
         session.cfg.num_iterations = 6;
         session.save_on_stop.store(false);
@@ -1054,7 +1067,7 @@ bool run_checkpoint_autosave(const fs::path& fixture,
     const auto conflict_root = read_file_bytes(keep_all_dir / "config.json");
     {
         spirula::TrainerSession session;
-        configure_control_session(session, fixture, keep_all_dir);
+        configure_autosave(session, keep_all_dir);
         session.cfg.resume = (keep_all_dir / "step-000000002.ckpt").string();
         session.cfg.num_iterations = 6;
         bool threw = false;
@@ -1070,7 +1083,7 @@ bool run_checkpoint_autosave(const fs::path& fixture,
     }
     {
         spirula::TrainerSession session;
-        configure_control_session(session, fixture, different_dir);
+        configure_autosave(session, different_dir);
         session.cfg.resume = (keep_all_dir / "step-000000002.ckpt").string();
         session.cfg.num_iterations = 3;
         session.save_on_stop.store(false);
