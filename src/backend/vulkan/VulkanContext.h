@@ -47,7 +47,7 @@ struct HeapBudget {
     uint64_t budget_bytes = 0;
     uint64_t usage_bytes = 0;
 };
-
+bool context_created();
 
 class Context {
 public:
@@ -57,6 +57,7 @@ public:
     static Context& get();
 
     bool ok() const { return _device != VK_NULL_HANDLE; }
+    BudgetStatus init_status() const { return _init_status; }
 
     VkInstance instance() const { return _instance; }
     VkPhysicalDevice physical() const { return _physical; }
@@ -91,8 +92,6 @@ public:
 
     // Queries one heap's EXT memory budget.
     HeapBudget query_heap_budget(uint32_t heap_index) const;
-    bool has_error() const;
-
 
     // Called by the runtime layer so its device children (command pools,
     // staging buffer, query pool, leaked allocations) are destroyed inside
@@ -122,13 +121,13 @@ private:
     Capabilities _caps;
     std::string _device_name;
     VkPhysicalDeviceMemoryProperties _mem_props{};
+    BudgetStatus _init_status = BudgetStatus::QueryError;
     void (*_shutdown_hook)() = nullptr;
 };
 
 // Sets the sticky backend error (returned once by backend::last_error()).
 // `result` may be VK_SUCCESS for non-VkResult failures.
 void set_error(const char* what, VkResult result);
-bool has_error();
 
 }  // namespace vk
 }  // namespace backend

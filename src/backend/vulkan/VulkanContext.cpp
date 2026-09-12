@@ -35,10 +35,6 @@ void set_error(const char* what, VkResult result) {
         g_error += ")";
     }
 }
-bool has_error() {
-    std::lock_guard<std::mutex> lock(g_error_mutex);
-    return !g_error.empty();
-}
 
 
 namespace {
@@ -364,11 +360,20 @@ void Context::init() {
     }
 
     uint32_t n = 0;
-    vkEnumeratePhysicalDevices(_instance, &n, nullptr);
-    std::vector<VkPhysicalDevice> devices(n);
-    vkEnumeratePhysicalDevices(_instance, &n, devices.data());
+    r = vkEnumeratePhysicalDevices(_instance, &n, nullptr);
+    if (r != VK_SUCCESS) {
+        set_error("vkEnumeratePhysicalDevices failed", r);
+        return;
+    }
     if (n == 0) {
+        _init_status = BudgetStatus::Unavailable;
         set_error("no Vulkan devices found", VK_SUCCESS);
+        return;
+    }
+    std::vector<VkPhysicalDevice> devices(n);
+    r = vkEnumeratePhysicalDevices(_instance, &n, devices.data());
+    if (r != VK_SUCCESS) {
+        set_error("vkEnumeratePhysicalDevices failed", r);
         return;
     }
 
@@ -376,6 +381,7 @@ void Context::init() {
     if (best < 0 || best >= (int)n) {
         set_error("no viable Vulkan device (need Vulkan 1.2 + "
                   "bufferDeviceAddress + timelineSemaphore)", VK_SUCCESS);
+        _init_status = BudgetStatus::Unavailable;
         return;
     }
 
@@ -564,6 +570,7 @@ void Context::init() {
 
     g_context_device.store(best);
     g_context_created.store(true);
+    _init_status = BudgetStatus::Available;
 
     if (spirula::env("VK_VERBOSE")) {
         // The pinned size is what the shaders actually run at; printing the
@@ -667,9 +674,6 @@ uint32_t Context::find_memory_type(uint32_t type_bits,
     }
     return UINT32_MAX;
 }
-bool Context::has_error() const {
-    return vk::has_error();
-}
 
 uint32_t Context::memory_type_heap(uint32_t type_index) const {
     if (type_index < _mem_props.memoryTypeCount)
@@ -702,10 +706,6 @@ HeapBudget Context::query_heap_budget(uint32_t heap_index) const {
     }
     if (heap_index >= _mem_props.memoryHeapCount) {
         out.status = BudgetStatus::Unavailable;
-        return out;
-    }
-    if (has_error()) {
-        out.status = BudgetStatus::QueryError;
         return out;
     }
 
@@ -757,10 +757,16 @@ bool device_select(int index) {
     return true;
 }
 
+bool vk::context_created() {
+    return vk::g_context_created.load();
+}
+
 int device_current() {
     if (vk::g_context_created.load()) return vk::g_context_device.load();
     return vk::resolve_device_index();
 }
+
+bool device_prepare() { return vk::Context::get().ok(); }
 
 MemoryUsage memory_usage() {
     MemoryUsage m;

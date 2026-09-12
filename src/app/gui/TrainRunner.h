@@ -79,13 +79,18 @@ public:
     // file in the viewer, the mesh preview) has just reset it -- which takes
     // this session's engine state with it. Nothing may attach a renderer to
     // the session after that, so engine_ready() goes back to false.
-    void note_engine_taken() { _engine_ready = false; }
+    void note_engine_taken();
     std::string error();
 
     // Structured GPU-memory failure behind a failed run, if that is what
     // failed it (copy). Empty for a generic training exception. Localize the
     // message from these fields -- error() is the English fallback.
     std::optional<backend::BudgetFailure> memory_failure();
+    struct MemoryStatus {
+        spirula::TrainingMemoryEstimate estimate;
+        uint64_t allowance = 0;
+    };
+    std::optional<MemoryStatus> memory_status();
 
     // ---- Failed-engine cleanup --------------------------------------------
     //
@@ -149,6 +154,7 @@ private:
     mutable std::mutex _mu;       // guards everything below
     std::string _error;
     std::optional<backend::BudgetFailure> _memory_failure;
+    std::optional<MemoryStatus> _memory_status;
     spirula::TrainerProgress _latest;
     std::deque<double> _latencies;
     std::vector<MetricPoint> _metrics;
