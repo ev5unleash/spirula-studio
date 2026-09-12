@@ -360,7 +360,18 @@ inline NpyInfo npy_locate(std::istream& in, uint64_t npy_start, uint64_t member_
         throw std::runtime_error("checkpoint NPY: zero item size");
     if (npy::pyparse::parse_bool(fortran_raw))
         throw std::runtime_error("checkpoint NPY: Fortran layout is unsupported");
-    const auto shape = npy::pyparse::parse_tuple(shape_raw);
+    const std::string shape_s = npy::pyparse::trim(shape_raw);
+    if (shape_s.empty() || shape_s.front() != '(' || shape_s.back() != ')')
+        throw std::runtime_error("checkpoint NPY: expected a flat one-dimensional shape tuple");
+    const std::string tuple_body =
+        shape_s.substr(1, shape_s.size() - 2);
+    const size_t comma = tuple_body.find(',');
+    if (comma == std::string::npos ||
+        tuple_body.find(',', comma + 1) != std::string::npos ||
+        !npy::pyparse::trim(tuple_body.substr(comma + 1)).empty())
+        throw std::runtime_error("checkpoint NPY: expected a singleton shape tuple");
+    const auto shape = npy::pyparse::parse_tuple(
+        "(" + npy::pyparse::trim(tuple_body) + ")");
     if (shape.size() != 1)
         throw std::runtime_error("checkpoint NPY: expected a flat one-dimensional shape");
     const std::string dim_s = npy::pyparse::trim(shape.front());

@@ -72,6 +72,35 @@ void write_npy_blob(std::ostream& out, const std::string& name,
         out.write((const char*)payload.data(), (std::streamsize)payload.size());
     ckpt::tar_pad(out, member_size);
 }
+std::string npy_header_variant(uint8_t major, const char* descr,
+                               const std::string& shape) {
+    if (major < 1 || major > 3) throw std::runtime_error("invalid NPY version");
+    const size_t prefix = major >= 2 ? 12 : 10;
+    std::string dict = "{'descr': '" + std::string(descr) +
+                       "', 'fortran_order': False, 'shape': " + shape + ", }";
+    const size_t base = prefix + dict.size() + 1;
+    dict.append((64 - (base % 64)) % 64, ' ');
+    dict.push_back('\n');
+
+    std::string header;
+    header.reserve(prefix + dict.size());
+    header.append("\x93NUMPY", 6);
+    header.push_back((char)major);
+    header.push_back('\0');
+    const uint32_t hlen = (uint32_t)dict.size();
+    if (major == 1) {
+        header.push_back((char)(hlen & 0xff));
+        header.push_back((char)((hlen >> 8) & 0xff));
+    } else {
+        header.push_back((char)(hlen & 0xff));
+        header.push_back((char)((hlen >> 8) & 0xff));
+        header.push_back((char)((hlen >> 16) & 0xff));
+        header.push_back((char)((hlen >> 24) & 0xff));
+    }
+    header.append(dict);
+    return header;
+}
+
 
 void write_npy_member(std::ostream& out, const std::string& name,
                       const std::string& descr = "<f4",
@@ -152,7 +181,6 @@ bool throws(const Fn& fn) {
         return true;
     }
 }
-
 void selection_and_configs() {
     TempDir tmp;
     const fs::path run = tmp.path / "run";
@@ -181,7 +209,16 @@ void selection_and_configs() {
     CHECK(throws([&] { (void)ckpt::build_resume_config(cli, "", explicit_flags); }),
           "explicit unusable checkpoint substituted an older one");
 
-    write_checkpoint(tmp.path / "step-1000000000.ckpt", 1000000000);
+    const fs::path numeric_run = tmp.path / "numeric-run";
+    const fs::path nine_digit = numeric_run / "step-999999999.ckpt";
+    const fs::path ten_digit = numeric_run / "step-1000000000.ckpt";
+    write_checkpoint(nine_digit, 999999999);
+    write_checkpoint(ten_digit, 1000000000);
+    write_config(nine_digit / "config.json", "dataset");
+    write_config(ten_digit / "config.json", "dataset");
+    const auto numeric = ckpt::resolve_checkpoint(numeric_run);
+    CHECK(numeric.ckpt_dir == fs::absolute(ten_digit),
+          "numeric checkpoint ordering failed at the nine/ten-digit boundary");
     CHECK(ckpt::checkpoint_step("step-999999999.ckpt") == 999999999,
           "nine-digit step parse failed");
     CHECK(ckpt::checkpoint_step("step-1000000000.ckpt") == 1000000000,
@@ -222,6 +259,40 @@ void archive_boundaries() {
     write_checkpoint(good, 1);
     CHECK(ckpt::validate_checkpoint(good, true).find("step") != nullptr,
           "valid archive rejected");
+    {
+        const fs::path versioned = tmp.path / "step-000000008.ckpt";
+        fs::create_directories(versioned);
+        std::ofstream out(versioned / "state.tar", std::ios::binary);
+        if (!out) throw std::runtime_error("cannot write versioned state.tar");
+        const std::string state = state_json(8);
+        ckpt::tar_write_bytes(out, "state.json", state.data(), state.size());
+        write_npy_blob(out, "world.means",
+                       npy_header_variant(2, "<f4", "(1,)"),
+                       {0, 0, 0, 0});
+        write_npy_blob(out, "world.opacities",
+                       npy_header_variant(3, "<f4", "( 1 , \t)"),
+                       {0, 0, 0, 0});
+        ckpt::tar_finish(out);
+        out.close();
+        write_config(versioned / "config.json", "dataset");
+        CHECK(ckpt::validate_checkpoint(versioned, true).find("step") != nullptr,
+              "valid NPY v2/v3 headers with four-byte lengths were rejected");
+    }
+    {
+        const fs::path malformed = tmp.path / "step-000000009.ckpt";
+        fs::create_directories(malformed);
+        std::ofstream out(malformed / "state.tar", std::ios::binary);
+        if (!out) throw std::runtime_error("cannot write malformed state.tar");
+        const std::string state = state_json(9, false);
+        ckpt::tar_write_bytes(out, "state.json", state.data(), state.size());
+        write_npy_blob(out, "world.means",
+                       npy_header_variant(1, "<f4", "(1)"),
+                       {0, 0, 0, 0});
+        ckpt::tar_finish(out);
+        out.close();
+        CHECK(throws([&] { (void)ckpt::validate_checkpoint(malformed, false); }),
+              "NPY singleton shape without a tuple comma was accepted");
+    }
 
     {
         auto data = bytes(good / "state.tar");
