@@ -371,6 +371,47 @@ void config_fallbacks() {
     CHECK(rebuilt.resume == fs::absolute(ckpt).string(),
           "resume path was not pinned to selected checkpoint");
     {
+        const fs::path expected_run = fs::absolute(run).lexically_normal();
+        const fs::path expected_ckpt = fs::absolute(ckpt).lexically_normal();
+        fs::path run_with_separator = run;
+        run_with_separator += fs::path::preferred_separator;
+        const auto resolved = ckpt::resolve_checkpoint(run_with_separator);
+        CHECK(resolved.run_dir == expected_run,
+              "trailing run separator changed run_dir");
+        CHECK(resolved.ckpt_dir == expected_ckpt,
+              "trailing run separator changed ckpt_dir");
+        CHECK(resolved.config_path == expected_ckpt / "config.json",
+              "trailing run separator changed config_path");
+
+        TrainConfig trailing_cli = cli;
+        trailing_cli.resume = run_with_separator.string();
+        const auto trailing_rebuilt =
+            ckpt::build_resume_config(trailing_cli, "", {"num_iterations"});
+        CHECK(trailing_rebuilt.resume == expected_ckpt.string(),
+              "trailing run separator did not pin resume output");
+
+        const fs::path explicit_dot = ckpt / ".";
+        const auto explicit_resolved = ckpt::resolve_checkpoint(explicit_dot);
+        CHECK(explicit_resolved.run_dir == expected_run,
+              "checkpoint / . changed run_dir to the checkpoint");
+        CHECK(explicit_resolved.ckpt_dir == expected_ckpt,
+              "checkpoint / . changed ckpt_dir");
+        CHECK(explicit_resolved.config_path == expected_ckpt / "config.json",
+              "checkpoint / . changed config_path");
+
+        TrainConfig explicit_cli = cli;
+        explicit_cli.resume = explicit_dot.string();
+        const auto explicit_rebuilt =
+            ckpt::build_resume_config(explicit_cli, "", {"num_iterations"});
+        CHECK(explicit_rebuilt.resume == expected_ckpt.string(),
+              "checkpoint / . did not pin resume output");
+        CHECK(explicit_rebuilt.output_dir_prefix ==
+                  expected_run.parent_path().string(),
+              "checkpoint / . rewrote output prefix to checkpoint parent");
+        CHECK(explicit_rebuilt.output_dir_name == expected_run.filename().string(),
+              "checkpoint / . rewrote output name to checkpoint");
+    }
+    {
         const fs::path missing_run = tmp.path / "missing-config";
         const fs::path missing_ckpt =
             missing_run / "step-000000005.ckpt";

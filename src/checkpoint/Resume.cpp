@@ -116,10 +116,12 @@ int checkpoint_step(const fs::path& path) {
 
 
 ResolvedCheckpoint resolve_checkpoint(const fs::path& input) {
-    if (is_staging(input))
+    fs::path path = fs::absolute(input).lexically_normal();
+    if (path != path.root_path() && path.filename().empty())
+        path = path.parent_path();
+    if (is_staging(path))
         throw std::runtime_error("staging checkpoint paths cannot be resumed: " +
-                                 input.string());
-    const fs::path path = fs::absolute(input);
+                                 path.string());
     std::error_code ec;
 
     fs::file_status tar_status = fs::symlink_status(path / "state.tar", ec);
