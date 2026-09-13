@@ -205,8 +205,8 @@ the comment on the option in `cmake/SsOptions.cmake` before changing it.
 Treat dependent changes as a branch graph, not a sequence of tasks. Keep two
 kinds of branch apart: **fork integration** (the fork's `master`, which
 accumulates work and is moved only by merging) and **upstream topic branches**
-(the only branches that may ever be a PR base or head). `origin` is the
-contributor fork; `upstream` is the canonical repository.
+(which contain only their reviewable changes). `origin` is the contributor
+fork; `upstream` is the canonical repository.
 
 ### What a topic is based on
 
@@ -214,14 +214,13 @@ contributor fork; `upstream` is the canonical repository.
   `upstream/<default>` and is proposed there directly.
 - **Dependent** work gets a dedicated child branch rooted at the published head
   of the lowest pending PR it requires.
-- **Fork-only** work (local tooling, datasets, experiments) starts from
-  integration and stays out of every upstream PR.
+- **Fork-only** work (fork-specific features, tooling, experiments) starts from
+  integration. Its PRs target integration in the fork, never upstream.
 
-The flow into integration is one way: merge an upstream topic, or
-`upstream/<default>`, into integration. Never merge integration into a topic,
-never offer integration as an upstream PR base or head, and never push
-integration's `master` as an upstream PR. Documentation about the fork's own
-workflow belongs to integration, not to an upstream layer.
+Merge upstream topics, fork-only branches and `upstream/<default>` into
+integration. Never merge integration into an upstream topic or offer
+integration's `master` as an upstream PR base or head. Documentation about the
+fork's own workflow belongs to integration, not to an upstream layer.
 
 Integration is fast-forward-only on push. Move it by merging, never by reset or
 rebase, because it is shared; a rejected push means merge again, not rewrite.
@@ -237,8 +236,8 @@ rebase, because it is shared; a rejected push means merge again, not rewrite.
   published counterpart, the published PR head is canonical: preserve the
   local ref under its own name, start a fresh working ref at the published
   head, and review the local-only commits separately with `git range-diff`.
-- Record each layer's **old parent tip** (its current base OID) before any
-  rebase; `--onto` needs that OID, not the parent's new one.
+- Record each layer's old head and **old parent tip** before any rebase.
+  `--onto` needs the old parent OID; the push lease needs the published old head.
 
 ### Rebasing a stack
 
@@ -257,10 +256,15 @@ layer is rebased onto a parent that has not settled. Verify before publishing:
 - `git range-diff <old-base>..<old-head> <new-base>..<new-head>` shows only the
   intended rebase.
 
-Republish a rewritten published branch only with an explicit expected-OID
-lease, `git push --force-with-lease=<branch>:<expected-old-oid>`; a bare
-`--force-with-lease` trusts whatever the local remote-tracking ref happens to
-be.
+Republish a rewritten branch with an explicit expected-OID lease and refspec:
+
+```bash
+git push --force-with-lease=refs/heads/<branch>:<expected-old-oid> origin <working-ref>:refs/heads/<branch>
+```
+
+A bare `--force-with-lease` trusts whatever the local remote-tracking ref
+happens to be. When refreshing several published layers, use an atomic push
+with one lease and refspec per branch so a rejected lease changes none of them.
 
 ### When the parent branch exists only in a contributor fork
 
@@ -272,8 +276,8 @@ be.
 4. Rebase the child onto the fetched upstream default branch with the recorded
    old parent OID: `git rebase --onto upstream/<default> <old-parent-tip>
    <child>`. After a squash merge that OID is the pre-squash parent head the
-   child still sits on, so record it before the parent lands. Push with
-   `git push --force-with-lease=<child>:<expected-old-oid>`.
+   child still sits on, so record it before the parent lands. Publish with the
+   explicit lease and refspec above.
 5. Open a new upstream PR from the child to the upstream default branch.
 
 If the parent branch exists in the upstream repository, the child may instead
