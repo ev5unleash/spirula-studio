@@ -1806,8 +1806,11 @@ bool DatasetPrep::gather_photos(const PrepJob& job, const PrepInput& in,
     const fs::path src = fs::absolute(in.path, ec);
     const int existing = count_images(images);
     const int existing_masks = count_images(masks);
+    const std::string source_skip =
+        inside(fs::path(images), src) ? images : std::string();
     const bool source_has_images =
-        fs::is_directory(src, ec) && count_images(src.string()) > 0;
+        fs::is_directory(src, ec) &&
+        count_images(src.string(), source_skip) > 0;
     const bool source_masks_present =
         in.mask_dir.empty() || count_images(in.mask_dir) > 0;
     const bool destination_complete =
