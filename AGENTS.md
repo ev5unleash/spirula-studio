@@ -200,6 +200,35 @@ patent-encumbered code in the tree. With it off, everything that wanted it
 shells out to ffmpeg instead; no feature disappears, a subprocess appears. See
 the comment on the option in `cmake/SsOptions.cmake` before changing it.
 
+## Stacked upstream work
+
+Treat dependent changes as a branch graph, not a sequence of tasks. Before
+editing, identify the lowest pending PR the work requires and use a dedicated
+child branch rooted at that PR's head. Never put the child's commits on the
+parent PR branch. Work that does not require the parent starts from the
+upstream default branch instead.
+
+Each branch contains only one reviewable layer. Rebase a child when its parent
+changes; do not merge the parent into it. Keep parent branches until every
+child has been rebased, and land the stack from the bottom up.
+
+When the parent branch exists only in a contributor fork:
+
+1. Push the child as a separate branch in that fork.
+2. Open a draft PR in the fork with the parent branch as its base, and mark it
+   `Depends on <upstream-owner>/<repo>#<PR>`.
+3. After the parent merges upstream, close the fork-only PR. GitHub generally
+   cannot move a PR to another base repository.
+4. Rebase the child onto the fetched upstream default branch, using
+   `git rebase --onto upstream/<default> <parent> <child>` after a squash
+   merge, then push with `--force-with-lease`.
+5. Open a new upstream PR from the child to the upstream default branch.
+
+If the parent branch exists in the upstream repository, the child may instead
+be opened there immediately with the parent branch as its base. Every agent
+handoff must name the child branch, its parent branch and PR, and whether the
+next submission is the fork-only draft or the final upstream PR.
+
 ## Codegen — the invariants that bite
 
 Generated trees are marked in `.gitattributes` (`src/generated/`,
