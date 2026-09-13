@@ -216,6 +216,7 @@ private:
     // Fetch it (with consent), and whether a run would need it and not find it.
     void request_model_download();
     bool mask_model_missing() const;
+    bool geometry_will_run();
     bool license_accepted(const std::string& family) const;
 
     // ---- screens ----
@@ -517,6 +518,9 @@ private:
     // to skip. Separate from GeometryJob::overwrite so pressing the button
     // does not leave the option ticked for every run after it.
     bool _redo_geometry = false;
+    std::string _geometry_output_probe_key;
+    double _geometry_output_probed_at = -1.0;
+    bool _geometry_outputs_complete = false;
     // Panel-level state, copied into whichever job runs. The inputs are kept as
     // the struct both runners take (PrepInput), so the panel edits the thing
     // that runs instead of a parallel copy of it: a video file or photo folder

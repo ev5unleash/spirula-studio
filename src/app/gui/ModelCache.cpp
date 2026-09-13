@@ -240,16 +240,23 @@ void FileDownload::run(std::string url, std::string dest,
 void DownloadQueue::start(std::vector<PendingDownload> files) {
     if (running()) return;
     _rest = std::move(files);
-    pump();
+    pump(true);
 }
 
 void DownloadQueue::pump() {
+    pump(false);
+}
+
+void DownloadQueue::pump(bool replacing) {
     if (running()) return;
     // A part that failed or was stopped makes the rest pointless: half a
     // checkpoint is not a checkpoint.
-    if (_dl.state() == FileDownload::State::Failed ||
-        _dl.state() == FileDownload::State::Cancelled)
+    if (!replacing &&
+        (_dl.state() == FileDownload::State::Failed ||
+         _dl.state() == FileDownload::State::Cancelled)) {
         _rest.clear();
+        return;
+    }
     if (_rest.empty()) return;
     const PendingDownload d = _rest.front();
     _rest.erase(_rest.begin());

@@ -189,6 +189,7 @@ void GuiApp::shutdown() {
     _sfm.cancel();
     _colmap.wait();
     _sfm.wait();
+    poll_dataset_recovery();
     reset_dataset_preview();
     _download.cancel();
     _geom_download.cancel();
@@ -2862,9 +2863,12 @@ void GuiApp::start_dataset_job() {
     if ((redo_masks || (int)restart <= (int)Stage::Masks) &&
             mask_model_missing() ||
         (redo_model || (int)restart <= (int)Stage::Matching) &&
-            feature_model_missing() ||
-        geometry_model_missing())
+            feature_model_missing())
         return;
+    if (geometry_will_run() && geometry_model_missing()) {
+        _resume_error = dmsg::geom_model_first.get();
+        return;
+    }
     app::set_crash_note("building dataset " + _workspace);
     _dataset_recovery_suppressed = false;
     sync_dataset_jobs();
@@ -3863,6 +3867,34 @@ bool GuiApp::geometry_model_missing() const {
     return !geometry_model_cached(_geometry.model);
 }
 
+bool GuiApp::geometry_will_run() {
+    if (!_geometry.enable ||
+        (!_geometry.want_normal && !_geometry.want_depth))
+        return false;
+    GeometryJob check = _geometry;
+    check.overwrite = check.overwrite || _redo_geometry;
+    if (check.overwrite) return true;
+
+    const WorkspaceState& prior = workspace_state();
+    if (!prior.geometry) return true;
+    const std::string images =
+        planned_image_dir(_sources, _workspace, _photo_import);
+    std::string key = _workspace + '\n' + images;
+    key += (check.want_normal ? "N" : "-");
+    key += (check.want_depth ? "D" : "-");
+    key += (check.normal_jpg ? "J" : "P");
+    const double now = ImGui::GetTime();
+    if (key != _geometry_output_probe_key ||
+        _geometry_output_probed_at < 0.0 ||
+        now - _geometry_output_probed_at > 1.0) {
+        _geometry_output_probe_key = key;
+        _geometry_output_probed_at = now;
+        _geometry_outputs_complete =
+            geometry_outputs_complete(check, _workspace, images);
+    }
+    return !_geometry_outputs_complete;
+}
+
 void GuiApp::request_geometry_download() {
     _geom_download.start(geometry_model_downloads(_geometry.model));
 }
@@ -4300,11 +4332,12 @@ void GuiApp::draw_dataset_rerun(const WorkspaceState& prior) {
     ImGui::Indent();
     ui::TextDisabledWrapped(dmsg::rerun_section_help);
 
-    // Each button starts a run of its own, so each is behind exactly the
-    // checkpoints its steps read -- a missing geometry model must not stop a
-    // rerun of the masks.
+    // Each button starts a run of its own. A geometry checkpoint is needed
+    // only when that run would actually invoke the geometry child.
     const bool need_mask_model = mask_model_missing();
     const bool need_feat_model = feature_model_missing();
+    const bool need_geom_model =
+        geometry_model_missing() && geometry_will_run();
 
     bool go = false;
     if (prior.frames) {
@@ -4339,7 +4372,9 @@ void GuiApp::draw_dataset_rerun(const WorkspaceState& prior) {
     // off the finished dataset and nothing downstream of them exists.
     if (prior.geometry) {
         ImGui::SameLine();
-        const bool need_geom_model = geometry_model_missing();
+        const bool need_geom_model =
+            geometry_model_missing() &&
+            (_geometry.want_normal || _geometry.want_depth);
         ImGui::BeginDisabled(!_geometry.enable || need_geom_model);
         if (ui::Button(dmsg::rerun_geometry)) {
             _redo_geometry = go = true;
@@ -4953,7 +4988,8 @@ void GuiApp::draw_dataset_form(float height, bool running) {
         const bool need_feat_model =
             (redo_model || (int)restart <= (int)Stage::Matching) &&
             feature_model_missing();
-        const bool need_geom_model = geometry_model_missing();
+        const bool need_geom_model =
+            geometry_model_missing() && geometry_will_run();
         const bool need_model = need_mask_model || need_feat_model ||
                                 need_geom_model;
         // The button names what pressing it does: a folder that already holds

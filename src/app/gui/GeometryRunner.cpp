@@ -5,6 +5,8 @@
 #include "app/FrameMask.h"
 #include "app/AppPaths.h"
 #include "app/gui/Subprocess.h"
+#include "data/DatasetParser.h"
+#include "data/ImageProbe.h"
 #include "i18n/Locale.h"
 #include "i18n/catalog/Dataset.h"
 #include "i18n/catalog/Geometry.h"
@@ -206,16 +208,66 @@ std::string geometry_availability() {
     return "";
 #endif
 }
+bool geometry_outputs_complete(const GeometryJob& job,
+                               const std::string& dataset,
+                               const std::string& images) {
+    if (!job.want_depth && !job.want_normal) return true;
+    if (job.overwrite) return false;
+    try {
+        DatasetParserConfig cfg;
+        cfg.require_image_files = false;
+        cfg.image_dir = images.empty() ? "images" : images;
+        cfg.probe_image_size = probe_image_size;
+        const ParsedDataset ds = parse_dataset(dataset, cfg, "");
+        if (ds.image_filenames.empty()) return false;
+
+        const fs::path root(dataset);
+        const fs::path image_root = root / cfg.image_dir;
+        const fs::path normal_dir = root / cfg.normal_dir;
+        const fs::path depth_dir = root / cfg.depth_dir;
+        auto output_path = [&](const fs::path& dir,
+                               const std::string& image,
+                               const char* ext) {
+            std::error_code ec;
+            fs::path rel = fs::relative(fs::path(image), image_root, ec);
+            if (ec || rel.empty() || rel.native()[0] == '.')
+                rel = fs::path(image).filename();
+            rel.replace_extension(ext);
+            return dir / rel;
+        };
+        for (const std::string& image : ds.image_filenames) {
+            if (job.want_normal) {
+                std::error_code ec;
+                if (!fs::is_regular_file(
+                        output_path(normal_dir, image,
+                                   job.normal_jpg ? ".jpg" : ".png"),
+                        ec))
+                    return false;
+            }
+            if (job.want_depth) {
+                std::error_code ec;
+                if (!fs::is_regular_file(output_path(depth_dir, image, ".png"),
+                                         ec))
+                    return false;
+            }
+        }
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 
 bool run_geometry_step(const GeometryJob& job, const std::string& dataset,
                        const std::string& images, RunProgress& prog,
                        FilmReel* reel, const std::atomic<bool>& cancel,
                        std::string& error) {
+    if (!job.want_depth && !job.want_normal) return true;
+    if (geometry_outputs_complete(job, dataset, images)) return true;
     if (std::string why = geometry_availability(); !why.empty()) {
         error = why;
         return false;
     }
-    if (!job.want_depth && !job.want_normal) return true;
 
     prog.enter(Stage::Geometry, lmsg::stage_geometry.get());
     auto log = [&](const std::string& s, bool detail) { prog.note(s, detail); };
