@@ -810,14 +810,17 @@ bool GuiApp::open_dataset_recovery(const dataset_recovery::State& state) {
     _resume_error.clear();
     const bool builtin = state.engine == 0;
     if (state.engine != 0 && state.engine != 1) {
-        _resume_error = "dataset recovery record has an unknown engine";
+        _resume_error =
+            i18n::format(dmsg::failed, {"unknown recovery engine"});
         return false;
     }
     if (builtin) {
         if (!builtin_sfm_available()) {
             _resume_error = SfmRunner::availability();
             if (_resume_error.empty())
-                _resume_error = "built-in reconstruction is unavailable";
+                _resume_error =
+                    i18n::format(dmsg::failed, {
+                        "built-in reconstruction is unavailable"});
             return false;
         }
         _sfm_job = state.sfm;
@@ -827,7 +830,9 @@ bool GuiApp::open_dataset_recovery(const dataset_recovery::State& state) {
         _colmap_job = state.colmap;
         _colmap_exe = _colmap_job.colmap_exe;
         if (!colmap_available()) {
-            _resume_error = "COLMAP executable is unavailable: " + _colmap_exe;
+            _resume_error = i18n::format(
+                dmsg::failed,
+                {"COLMAP executable is unavailable: " + _colmap_exe});
             return false;
         }
         _sources = _colmap_job.inputs;
@@ -2774,7 +2779,7 @@ bool GuiApp::persist_dataset_recovery(bool force) {
     }
     std::string error;
     if (!dataset_recovery::save(next, error)) {
-        _resume_error = "cannot persist dataset recovery: " + error;
+        _resume_error = i18n::format(dmsg::failed, {error});
         return false;
     }
     _dataset_recovery = std::move(next);
@@ -2853,7 +2858,7 @@ void GuiApp::start_dataset_job() {
     _dataset_recovery_redo_geometry = _redo_geometry;
     std::string recovery_error;
     if (!dataset_recovery::save(recovery, recovery_error)) {
-        _resume_error = "cannot persist dataset recovery: " + recovery_error;
+        _resume_error = i18n::format(dmsg::failed, {recovery_error});
         return;
     }
     _dataset_recovery = std::move(recovery);
