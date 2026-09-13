@@ -238,7 +238,7 @@ bool geometry_outputs_complete(const GeometryJob& job,
         for (const std::string& image : ds.image_filenames) {
             if (job.want_normal) {
                 std::error_code ec;
-                if (!fs::is_regular_file(
+                if (!fs::exists(
                         output_path(normal_dir, image,
                                    job.normal_jpg ? ".jpg" : ".png"),
                         ec))
@@ -246,8 +246,7 @@ bool geometry_outputs_complete(const GeometryJob& job,
             }
             if (job.want_depth) {
                 std::error_code ec;
-                if (!fs::is_regular_file(output_path(depth_dir, image, ".png"),
-                                         ec))
+                if (!fs::exists(output_path(depth_dir, image, ".png"), ec))
                     return false;
             }
         }
