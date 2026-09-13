@@ -75,7 +75,7 @@ void printBaHelp(FILE* out) {
         {"--vram-budget MB", "", &H::ba_opt_vram_budget},
         {"--ply PREFIX", "", &H::ba_opt_ply},
         {"-o, --output DIR", "", &H::ba_opt_output},
-        {"--device N", "", &H::ba_opt_device},
+        {"--device <index|name|auto|-1|uuid:hex>", "", &H::ba_opt_device},
         {"--validate", "", &H::ba_opt_validate},
         {"--profile", "", &H::ba_opt_profile},
         {"--quiet", "", &H::ba_opt_quiet},
