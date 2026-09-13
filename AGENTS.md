@@ -290,9 +290,9 @@ Run the layer's scoped validation before committing or pushing.
 before committing. For an already committed or rebased tree, use
 `python tools/check_comment_length.py --all` and report standing debt
 separately. That audits the whole tree, not a PR range. A range-scoped audit
-requires a separate invocation supplying the base to the existing checker;
-the script has no `--base` or `--range` option. A clean-tree incremental result
-is never evidence that committed changes passed.
+requires a separate range-aware wrapper or temporary materialized diff;
+neither is provided by this script. A clean-tree incremental result is never
+evidence that committed changes passed.
 
 ## Codegen — the invariants that bite
 
