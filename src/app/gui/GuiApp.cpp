@@ -2851,6 +2851,7 @@ void GuiApp::update_dataset_job() {
 
 void GuiApp::start_dataset_job() {
     app::set_crash_note("building dataset " + _workspace);
+    _dataset_recovery_suppressed = false;
     sync_dataset_jobs();
     const int engine = effective_engine() == Engine::BuiltIn ? 0 : 1;
     auto same_inputs = [](const std::vector<PrepInput>& a,
@@ -4419,6 +4420,7 @@ void GuiApp::draw_clear_project_modal() {
         }
         dataset_recovery::clear();
         _dataset_recovery.reset();
+        _dataset_recovery_suppressed = false;
         _dataset_recovery_resume = false;
         log(i18n::format(dmsg::clear_project_done, {_workspace}));
         _clear_targets.clear();
@@ -4920,10 +4922,18 @@ void GuiApp::draw_dataset_form(float height, bool running) {
     if (!running) {
         bool ready = !_sources.empty() && !_workspace.empty();
         for (const PrepInput& s : _sources) ready = ready && !s.path.empty();
-        const bool need_mask_model = mask_model_missing();
-        const bool need_feat_model = feature_model_missing();
-        const bool need_geom_model = geometry_model_missing();
-        const bool need_model = need_mask_model || need_feat_model || need_geom_model;
+        const Stage restart =
+            _dataset_recovery_resume && _dataset_recovery
+                ? recovery_boundary(*_dataset_recovery)
+                : Stage::Frames;
+        const bool need_mask_model =
+            (int)restart <= (int)Stage::Masks && mask_model_missing();
+        const bool need_feat_model =
+            (int)restart <= (int)Stage::Mapping && feature_model_missing();
+        const bool need_geom_model =
+            (int)restart <= (int)Stage::Geometry && geometry_model_missing();
+        const bool need_model = need_mask_model || need_feat_model ||
+                                need_geom_model;
         // The button names what pressing it does: a folder that already holds
         // a reconstruction is added to, not built.
         const bool adding = workspace_state().model && !_redo_model;
