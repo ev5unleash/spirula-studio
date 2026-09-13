@@ -8,6 +8,7 @@
 #include "config/TrainConfig.h"
 #include "app/gui/BatchTrain.h"
 #include "app/gui/ColmapRunner.h"
+#include "app/gui/DatasetRecovery.h"
 #include "app/gui/CompareView.h"
 #include "app/gui/Fonts.h"
 #include "app/gui/ConfigUI.h"
@@ -121,6 +122,7 @@ private:
     // Route for user-initiated opens: confirms first when training.
     void request_open_dataset(std::string dir);
     bool open_training_run(std::string path);
+    bool open_dataset_recovery(const dataset_recovery::State& state);
     void clear_training_resume();
 
     // The viewer screen: a splat file (or a checkpoint / run directory) opened
@@ -207,6 +209,8 @@ private:
     // Push edits made while a job runs into the runner, which takes each half
     // as it reaches it (SfmRunner::update).
     void update_dataset_job();
+    void poll_dataset_recovery();
+    bool persist_dataset_recovery(bool force);
     // Copies the panel-level state into whichever job struct will run.
     void sync_dataset_jobs();
     // Path of the selected checkpoint, or "" when it is not downloaded yet.
@@ -387,7 +391,17 @@ private:
     bool _data_error_shown = false;  // unreadable-file modal currently open
     std::string _recovery_run;       // startup marker path, if any
     bool _recovery_shown = false;    // startup modal currently expected open
-    bool _recovery_suppressed = false; // Later/dismissal: next launch asks again
+    bool _recovery_suppressed = false; // training modal dismissed this launch
+    std::optional<dataset_recovery::State> _dataset_recovery;
+    bool _dataset_recovery_active = false;
+    bool _dataset_recovery_resume = false;
+    bool _dataset_recovery_bootstrap = false;
+    bool _dataset_recovery_suppressed = false;
+    bool _dataset_recovery_redo_frames = false;
+    bool _dataset_recovery_redo_masks = false;
+    bool _dataset_recovery_redo_model = false;
+    bool _dataset_recovery_redo_geometry = false;
+    double _dataset_recovery_saved_at = -1.0;
     // Training is paused for as long as the modal is up -- deciding should not
     // cost GPU time. This is what it goes back to if the user keeps training.
     bool _confirm_was_paused = false;
@@ -548,9 +562,8 @@ private:
     // remembered "could not tell", so nothing is probed twice.
     std::map<std::string, std::pair<int, int>> _input_size;
 
-    // The segmentation checkpoint in use. Not persisted -- neither is any
-    // other masking or geometry setting, so a fresh session never runs a
-    // model the last one happened to pick.
+    // The segmentation checkpoint in use. Ordinary GUI settings are not
+    // persisted; an interrupted dataset snapshots the settings used by its run.
     std::string _model_id = "sam3-q4_0";
     ModelDownload _download;
 
