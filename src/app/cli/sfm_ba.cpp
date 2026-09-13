@@ -191,11 +191,12 @@ int cmdBa(int argc, char** argv) {
         }
         else if (a == "--device") {
             const std::string v = next();
+            const std::string request = v.empty() ? "auto" : v;
             // Retain the integer spelling at the input boundary; the canonical
             // UUID is what the solver carries.
-            const spirula::vkselect::Request req = spirula::vkselect::parseRequest(v);
+            const spirula::vkselect::Request req = spirula::vkselect::parseRequest(request);
             if (req.kind == spirula::vkselect::Request::Kind::Malformed) {
-                fprintf(stderr, "spirula-sfm ba: error: --device %s: %s\n", v.c_str(),
+                fprintf(stderr, "spirula-sfm ba: error: --device %s: %s\n", request.c_str(),
                         req.error.c_str());
                 return 1;
             }
@@ -203,7 +204,7 @@ int cmdBa(int argc, char** argv) {
             // Keep the spelling for every non-ordinal request, Auto included:
             // an explicit `auto` must resolve as Auto rather than fall through
             // to the environment.
-            else opt.device_selector = v;
+            else opt.device_selector = request;
         }
         else if (a == "--validate") opt.validate = true;
         else if (a == "--profile") opt.profile = true;
