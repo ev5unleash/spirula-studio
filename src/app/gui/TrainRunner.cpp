@@ -1,13 +1,17 @@
 // TrainRunner.cpp -- see TrainRunner.h.
 
-#include "app/gui/TrainRunner.h"
-
-#include "i18n/catalog/Log.h"
 #include "app/AppPaths.h"
+#include "app/gui/TrainRunner.h"
+#include "i18n/catalog/Log.h"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
-#include <algorithm>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -17,11 +21,49 @@ fs::path recovery_marker_path() {
     return fs::path(app::config_dir()) / "training-recovery.marker";
 }
 
-void write_recovery_marker(const std::string& path) noexcept {
+void remove_file(const fs::path& path) noexcept {
     try {
-        std::ofstream f(recovery_marker_path(), std::ios::trunc);
-        if (f) f << path << '\n';
+        std::error_code ec;
+        fs::remove(path, ec);
     } catch (...) {
+    }
+}
+
+bool write_recovery_marker(const fs::path& out_dir) noexcept {
+    fs::path tmp;
+    try {
+        std::error_code ec;
+        fs::path run = fs::absolute(out_dir, ec);
+        if (ec) return false;
+        run = run.lexically_normal();
+
+        const fs::path marker = recovery_marker_path();
+        tmp = marker.string() + ".tmp";
+        std::ofstream f(tmp, std::ios::trunc);
+        if (!f) {
+            remove_file(tmp);
+            return false;
+        }
+        f << run.string() << '\n';
+        f.close();
+        if (f.fail()) {
+            remove_file(tmp);
+            return false;
+        }
+
+#ifdef _WIN32
+        const bool published = MoveFileExW(
+            tmp.c_str(), marker.c_str(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+        fs::rename(tmp, marker, ec);
+        const bool published = !ec;
+#endif
+        if (!published) remove_file(tmp);
+        return published;
+    } catch (...) {
+        if (!tmp.empty()) remove_file(tmp);
+        return false;
     }
 }
 
@@ -33,17 +75,23 @@ using spirula::TrainerSession;
 
 std::optional<std::string> TrainRunner::pending_recovery_run() {
     try {
-        std::ifstream f(recovery_marker_path());
+        const fs::path marker = recovery_marker_path();
+        std::ifstream f(marker);
+        if (!f) return std::nullopt;
         std::string path;
-        if (!f || !std::getline(f, path)) return std::nullopt;
-        if (!path.empty() && path.back() == '\r') path.pop_back();
-        if (path.find_first_not_of(" \t\r\n") == std::string::npos ||
-            path.find('\0') != std::string::npos)
-            return std::nullopt;
+        bool invalid = !std::getline(f, path);
+        if (!invalid && !path.empty() && path.back() == '\r') path.pop_back();
+        invalid = invalid ||
+                  path.find_first_not_of(" \t\r\n") == std::string::npos ||
+                  path.find('\0') != std::string::npos;
         std::string extra;
-        while (std::getline(f, extra))
-            if (!extra.empty() && extra != "\r")
-                return std::nullopt;
+        while (!invalid && std::getline(f, extra))
+            invalid = !extra.empty() && extra != "\r";
+        f.close();
+        if (invalid) {
+            remove_file(marker);
+            return std::nullopt;
+        }
         return path;
     } catch (...) {
         return std::nullopt;
@@ -167,10 +215,8 @@ void TrainRunner::note_engine_taken() {
 }
 
 void TrainRunner::cleanup_failed_engine() {
-    // Only a failed run owes cleanup; calling it mid-run would join a live
-    // worker and hang the caller. One-shot: the first caller does the work,
-    // later ones (and calls after a run that never touched the engine) are
-    // no-ops.
+    // Joining a live worker would hang; only TrainError owes cleanup.
+    // The exchange below makes repeated cleanup harmless.
     if (_phase.load() != Phase::TrainError) return;
     if (!_engine_dirty.exchange(false)) return;
 
@@ -243,12 +289,7 @@ void TrainRunner::start_training(const TrainConfig& cfg, const std::string& pres
             // failure owes cleanup_failed_engine() a call.
             _engine_dirty = true;
             s->setup_engine();
-            _recovery_marker_armed = true;
-            try {
-                write_recovery_marker(
-                    fs::absolute(s->out_dir).lexically_normal().string());
-            } catch (...) {
-            }
+            _recovery_marker_armed = write_recovery_marker(s->out_dir);
 
             {
                 std::lock_guard<std::mutex> lk(_mu);
@@ -298,10 +339,8 @@ void TrainRunner::start_training(const TrainConfig& cfg, const std::string& pres
             _phase = Phase::Done;
         } catch (const backend::BudgetError& e) {
             clear_armed_recovery_marker();
-            // A GPU memory refusal carries structured fields the GUI localizes;
-            // error() keeps the English what() as the fallback text. The engine
-            // is deliberately NOT reset here -- the GUI calls
-            // cleanup_failed_engine() once its render consumers have detached.
+            // Preserve structured refusal fields for localization; error()
+            // remains the fallback. The GUI resets after renderers detach.
             std::lock_guard<std::mutex> lk(_mu);
             _error = e.what();
             _memory_failure = e.failure;

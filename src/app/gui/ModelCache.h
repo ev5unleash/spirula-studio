@@ -136,6 +136,7 @@ public:
     FileDownload& current() { return _dl; }
 
 private:
+    void pump(bool replacing);
     FileDownload _dl;
     std::vector<PendingDownload> _rest;
 };

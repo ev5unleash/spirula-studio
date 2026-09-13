@@ -183,7 +183,7 @@ public:
     // never taken from here.
     void update(const SfmJob& job);
     void cancel();
-
+    void wait();
     State state() const { return _state.load(); }
     // Which step the run is on, how far through, and its lines -- everything
     // the dataset screen draws.

@@ -59,6 +59,10 @@ std::vector<PendingDownload> geometry_model_downloads(const std::string& id);
 
 // "" when this build can estimate geometry, otherwise why it cannot.
 std::string geometry_availability();
+// True when every requested geometry map already exists and overwrite is off.
+bool geometry_outputs_complete(const GeometryJob& job,
+                               const std::string& dataset,
+                               const std::string& images);
 
 // Run the step over `dataset`, reporting into `prog` and showing what it
 // writes on `reel` (null for no screen). `images` is where the frames are,

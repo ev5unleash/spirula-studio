@@ -285,14 +285,35 @@ void image_layouts(const TempDir& tmp) {
     check(estimate_training_memory(pano, faces(6, 256), cfg,
           false, false, false, 1000, 0).accounted_bytes > split(6), "unsplit faces missing from working set");
 
-    const auto mapped = dataset({{15520, 7760}}, {png(tmp.path, "panonormal.png", 1064, 532)});
-    const auto mapped_large = dataset({{15520, 7760}}, {png(tmp.path, "panonormal2.png", 2128, 1064)});
-    const auto post = faces(6, 4482);
+    const auto mapped = dataset({{15520, 7760}},
+                                {png(tmp.path, "panonormal.png", 1064, 532)});
+    const auto mapped_large = dataset({{15520, 7760}},
+                                      {png(tmp.path, "panonormal2.png", 2128, 1064)});
+    const auto mapped_post = faces(6, 4482);
     auto mapped_bytes = [&](const ParsedDataset& ds) {
-        return estimate_training_memory(ds, post, cfg, false, false, true, 1000, 1).accounted_bytes;
+        return estimate_training_memory(
+            ds, mapped_post, cfg, false, false, true, 1000, 1).accounted_bytes;
     };
-    equal(mapped_bytes(mapped_large) - mapped_bytes(mapped), 12ull * (615 * 615 - 307 * 307),
+    equal(mapped_bytes(mapped_large) - mapped_bytes(mapped),
+          12ull * (615 * 615 - 307 * 307),
           "normal warp must use original RGB dimensions and nearest per-axis rounding");
+
+    const std::string rotated_normal =
+        png(tmp.path, "normal-cw1.png", 1064, 532);
+    const std::string reference_normal =
+        png(tmp.path, "normal-reference.png", 532, 1064);
+    auto rotated = dataset({{15520, 7760}}, {rotated_normal});
+    rotated.exif_quarter_turns = {1};
+    const auto reference = dataset({{15520, 7760}}, {reference_normal});
+    const auto rotated_post = faces(6, 4482);
+    auto normal_bytes = [&](const ParsedDataset& ds) {
+        return estimate_training_memory(
+            ds, rotated_post, cfg, false, false, true, 1000, 1).accounted_bytes;
+    };
+    check(normal_bytes(rotated) >= normal_bytes(reference),
+          "rotated normal preflight undercounts warped normal");
+    equal(normal_bytes(rotated), normal_bytes(reference),
+          "rotated normal preflight must match oriented warp extent");
 }
 int profile(const char* path) {
     const auto root = json_parse_file(path);

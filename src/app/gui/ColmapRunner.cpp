@@ -208,6 +208,10 @@ void write_unregistered_list(const fs::path& ws, const std::string& images_dir) 
 
 ColmapRunner::~ColmapRunner() {
     cancel();
+    wait();
+}
+
+void ColmapRunner::wait() {
     if (_worker.joinable()) _worker.join();
 }
 

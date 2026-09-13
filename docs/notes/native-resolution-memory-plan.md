@@ -1,6 +1,6 @@
 # Native-resolution training memory plan
 
-Status: implemented; Vulkan verified, CUDA verification awaits a CUDA toolkit and device.
+Status: implemented and Vulkan-verified. CUDA validation was not performed; a CUDA 13.4 build attempt stopped at the repository's existing CCCL 3 incompatibility in `IntersectTile.cu`.
 
 ## Goal and boundaries
 

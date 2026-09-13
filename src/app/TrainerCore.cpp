@@ -16,6 +16,8 @@
 #include "data/Knn.h"
 #include "sfm/core/Exif.h"
 #include "engine/EngineState.h"
+#include "core/ImageOrient.h"
+
 #include "external/stb_image.h"
 
 #ifndef _WIN32
@@ -855,10 +857,10 @@ DatasetParserConfig parser_config(const TrainConfig& cfg, bool eval) {
     pcfg.eval_mode = cfg.eval_mode;
     pcfg.eval_interval = cfg.eval_interval;
     pcfg.train_split_fraction = cfg.train_split_fraction;
-    pcfg.outlier_threshold    = cfg.outlier_threshold;
-    pcfg.center_mode          = cfg.scene_center;
-    pcfg.exif_orientation     = cfg.exif_orientation;
-    pcfg.probe_image_size        = probe_image_size;
+    pcfg.outlier_threshold = cfg.outlier_threshold;
+    pcfg.center_mode = cfg.scene_center;
+    pcfg.exif_orientation = cfg.exif_orientation;
+    pcfg.probe_image_size = probe_image_size;
     pcfg.train_resolution_divisor = cfg.train_resolution_divisor;
     pcfg.downscale_rounding_mode = cfg.downscale_rounding_mode;
     pcfg.metashape_xml = cfg.metashape_xml;
@@ -1002,11 +1004,13 @@ struct MemoryExtent {
     }
 };
 
-MemoryExtent modality_extent(const std::vector<std::string>& files, size_t i) {
+MemoryExtent modality_extent(const std::vector<std::string>& files, size_t i,
+                             int turns_cw) {
     if (files.empty() || files[i].empty()) return {};
     int w = 0, h = 0;
     if (!probe_image_size(files[i].c_str(), &w, &h))
         throw std::runtime_error("Failed to probe training image '" + files[i] + "'");
+    oriented_size(turns_cw, w, h);
     return {w, h};
 }
 
@@ -1045,17 +1049,19 @@ std::map<std::vector<int32_t>, MemoryGroup> memory_groups(
             group.passes = build_face_passes(widths.data(), heights.data(), K, face_cap);
         }
         const std::string path = ds.image_filenames.empty() ? std::string() : ds.image_filenames[i];
+        const int turns = i >= 0 && (size_t)i < ds.exif_quarter_turns.size()
+            ? (int)ds.exif_quarter_turns[(size_t)i] : 0;
         if (!exr::is_exr(path)) {
             if (!path.empty() && stbi_is_16_bit(path.c_str())) group.rgb_u16 = true;
             else group.rgb_u8 = true;
         }
         if (mask) {
-            auto extent = modality_extent(ds.mask_filenames, i);
+            auto extent = modality_extent(ds.mask_filenames, i, turns);
             if (extent.pixels() == 0) extent = group.rgb;
             if (extent.pixels() > 1) group.mask.merge(extent);
         }
-        if (depth) group.depth.merge(modality_extent(ds.depth_filenames, i));
-        if (normal) group.normal.merge(modality_extent(ds.normal_filenames, i));
+        if (depth) group.depth.merge(modality_extent(ds.depth_filenames, i, turns));
+        if (normal) group.normal.merge(modality_extent(ds.normal_filenames, i, turns));
     }
     for (auto& [key, group] : groups) {
         if (mask && group.mask.pixels() == 0) group.mask = {1, 1};

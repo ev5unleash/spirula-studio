@@ -1,19 +1,9 @@
 #pragma once
 
-// TrainRunner -- runs a spirula::TrainerSession on a worker thread for the
-// GUI: async dataset preview, the full train pipeline (check -> parse ->
-// engine setup -> step loop), pause/stop controls, metric history for the
-// plots, and an optional web-viewer server (so a GUI run can still be
-// monitored from a browser / another machine).
-//
-// Lifetime rules the GUI must follow:
-//  - session() stays valid until the next load_dataset()/start_training()
-//    call; anything holding hooks into it (the viewport's RenderWorker)
-//    must detach first (GuiApp does this).
-//  - engine_ready() flips true after engine setup; only then may a
-//    RenderWorker attach.
-//  - A run that failed after engine setup (Phase::TrainError) needs
-//    cleanup_failed_engine() once every render consumer has detached.
+// Runs TrainerSession on a GUI worker with progress and optional web viewing.
+// session() remains valid until the next load/start; detach its consumers first.
+// Attach renderers only after engine_ready(); after TrainError, detach them
+// before cleanup_failed_engine().
 
 #include "app/TrainerCore.h"
 #include "app/webviewer/Viewer.h"
@@ -95,15 +85,9 @@ public:
     };
     std::optional<MemoryStatus> memory_status();
 
-    // ---- Failed-engine cleanup --------------------------------------------
-    //
-    // A run that failed before/inside engine setup can leave the process-global
-    // engine holding that session's state. Call this ONCE the GUI's native
-    // render consumers have detached (viewport, image compare, model viewer --
-    // nothing may hold hooks into session() any more). It stops the web viewer
-    // outside _mu, joins the worker without holding engine_mutex, then resets
-    // the engine. Repeated calls, or a call after a successful run, are
-    // harmless no-ops. The last checkpoint on disk is never touched.
+    // After TrainError, call once after native render consumers detach.
+    // Stops the viewer, joins the worker, then resets the engine.
+    // Repeated calls are no-ops; the last checkpoint remains untouched.
     void cleanup_failed_engine();
 
     // Valid between load_dataset()/start_training() calls; see lifetime
