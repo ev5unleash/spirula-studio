@@ -32,6 +32,7 @@
 
 #include <deque>
 #include <fstream>
+#include <future>
 #include <map>
 #include <string>
 #include <utility>
@@ -518,6 +519,9 @@ private:
     // to skip. Separate from GeometryJob::overwrite so pressing the button
     // does not leave the option ticked for every run after it.
     bool _redo_geometry = false;
+    // Output completeness is parsed asynchronously; the UI consumes only the
+    // last completed answer.
+    std::future<bool> _geometry_output_probe;
     std::string _geometry_output_probe_key;
     double _geometry_output_probed_at = -1.0;
     bool _geometry_outputs_complete = false;

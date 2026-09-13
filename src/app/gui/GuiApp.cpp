@@ -3888,17 +3888,50 @@ bool GuiApp::geometry_will_run() {
     key += (check.want_depth ? "D" : "-");
     key += (check.normal_jpg ? "J" : "P");
     const double now = ImGui::GetTime();
-    if (key != _geometry_output_probe_key ||
-        _geometry_output_probed_at < 0.0 ||
-        now - _geometry_output_probed_at > 1.0) {
+    if (key != _geometry_output_probe_key) {
+        if (_geometry_output_probe.valid()) {
+            if (_geometry_output_probe.wait_for(std::chrono::milliseconds(0)) !=
+                std::future_status::ready)
+                return true;
+            try {
+                (void)_geometry_output_probe.get();
+            } catch (...) {
+            }
+        }
         _geometry_output_probe_key = key;
+        _geometry_output_probed_at = -1.0;
+    }
+    if (_geometry_output_probe.valid()) {
+        if (_geometry_output_probe.wait_for(std::chrono::milliseconds(0)) !=
+            std::future_status::ready)
+            return true;
+        try {
+            _geometry_outputs_complete = _geometry_output_probe.get();
+        } catch (...) {
+            _geometry_outputs_complete = false;
+        }
         _geometry_output_probed_at = now;
-        _geometry_outputs_complete =
-            geometry_outputs_complete(check, _workspace, images);
+    }
+    if (_geometry_output_probed_at < 0.0 ||
+        now - _geometry_output_probed_at > 1.0) {
+        const GeometryJob probe_job = check;
+        const std::string dataset = _workspace;
+        try {
+            _geometry_output_probe = std::async(
+                std::launch::async,
+                [probe_job, dataset, images] {
+                    return geometry_outputs_complete(probe_job, dataset,
+                                                      images);
+                });
+        } catch (...) {
+            _geometry_output_probed_at = now;
+            _geometry_outputs_complete = false;
+        }
+        return true;
     }
     return !_geometry_outputs_complete;
-}
 
+}
 void GuiApp::request_geometry_download() {
     _geom_download.start(geometry_model_downloads(_geometry.model));
 }
