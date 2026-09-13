@@ -5167,7 +5167,8 @@ void GuiApp::draw_dataset_form(float height, bool running) {
         if (!ready) {
             ImGui::SameLine();
             ui::TextDisabled(dmsg::pick_input_first);
-        } else if (need_model && !geometry_probe_busy) {
+        } else if (need_mask_model || need_feat_model ||
+                   (need_geom_model && !geometry_probe_busy)) {
             // The options above carry the same buttons, but they are a scroll
             // away by the time somebody is reaching for this one. One missing
             // checkpoint at a time; the next takes its place once this lands.
