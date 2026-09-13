@@ -285,10 +285,14 @@ be opened there immediately with the parent branch as its base. Every agent
 handoff must name the child branch, its parent branch and PR, and whether the
 next submission is the fork-only draft or the final upstream PR.
 
-Run the layer's scoped validation before committing or pushing. Checks that
-inspect only uncommitted work -- `tools/check_comment_length.py`, a linter over
-the current diff -- are not evidence for a range that is already committed or
-has just been rebased; re-run them over the final commits.
+Run the layer's scoped validation before committing or pushing.
+`python tools/check_comment_length.py` checks only uncommitted work; run it
+before committing. For an already committed or rebased tree, use
+`python tools/check_comment_length.py --all` and report standing debt
+separately. That audits the whole tree, not a PR range. A range-scoped audit
+requires a separate invocation supplying the base to the existing checker;
+the script has no `--base` or `--range` option. A clean-tree incremental result
+is never evidence that committed changes passed.
 
 ## Codegen — the invariants that bite
 
