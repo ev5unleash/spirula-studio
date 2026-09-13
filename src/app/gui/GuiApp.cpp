@@ -5137,12 +5137,16 @@ void GuiApp::draw_dataset_form(float height, bool running) {
             feature_model_missing();
         const bool need_geom_model =
             geometry_model_missing() && geometry_will_run();
+        const bool geometry_probe_busy =
+            _geometry.enable &&
+            (_geometry.want_normal || _geometry.want_depth) &&
+            _geometry_output_probe->busy();
         const bool need_model = need_mask_model || need_feat_model ||
                                 need_geom_model;
         // The button names what pressing it does: a folder that already holds
         // a reconstruction is added to, not built.
         const bool adding = workspace_state().model && !_redo_model;
-        ImGui::BeginDisabled(!ready || need_model);
+        ImGui::BeginDisabled(!ready || need_model || geometry_probe_busy);
         if (ui::Button(adding ? dmsg::update_dataset : dmsg::create_dataset,
                        ImVec2(px(200.0f), px(34.0f))))
             start_dataset_job();
