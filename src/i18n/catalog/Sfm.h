@@ -566,6 +566,44 @@ SS_MSG(extract_mask_aspect,
        "içeriğin üzerine gerileceği anlamına gelir. Bu boyut çifti için sonraki uyarılar "
        "gösterilmez."));
 
+// {0} is an image file name.
+SS_MSG(extract_exif_mirror_dropped,
+    EN("{0} and others ask to be mirrored as well as turned. Only the turn is "
+       "applied: no camera pose fits a mirrored picture, so the reconstruction "
+       "would be the mirror image of the real one."),
+    JA("{0} などは回転に加えて左右反転も指定しています。適用するのは回転だけです。"
+       "反転した画像に合うカメラ姿勢は存在せず、復元結果が実物の鏡像になってしまいます。"),
+    ZH_HANS("{0} 等图像除了旋转还要求左右镜像。这里只做旋转：镜像后的画面没有与之相符的"
+            "相机位姿，重建结果会变成真实场景的镜像。"),
+    ZH_HANT("{0} 等影像除了旋轉還要求左右鏡像。這裡只做旋轉：鏡像後的畫面沒有與之相符的"
+            "相機姿態，重建結果會變成真實場景的鏡像。"),
+    KO("{0} 등은 회전뿐 아니라 좌우 반전도 요구합니다. 회전만 적용합니다. 반전된 그림에 "
+       "맞는 카메라 자세는 없어서, 복원 결과가 실제의 거울상이 되어 버립니다."),
+    DE("{0} und weitere verlangen neben der Drehung auch eine Spiegelung. Nur die "
+       "Drehung wird angewandt: zu einem gespiegelten Bild passt keine Kamerapose, "
+       "die Rekonstruktion wäre das Spiegelbild der Wirklichkeit."),
+    FR("{0} et d'autres demandent un miroir en plus de la rotation. Seule la rotation "
+       "est appliquée : aucune pose de caméra ne correspond à une image miroir, et la "
+       "reconstruction serait l'image inversée de la réalité."),
+    ES("{0} y otras piden un espejado además del giro. Solo se aplica el giro: ninguna "
+       "pose de cámara encaja con una imagen espejada, y la reconstrucción saldría "
+       "como el reflejo de la realidad."),
+    PT("{0} e outras pedem espelhamento além da rotação. Só a rotação é aplicada: "
+       "nenhuma pose de câmara corresponde a uma imagem espelhada, e a reconstrução "
+       "sairia como o reflexo da realidade."),
+    IT("{0} e altre chiedono una specchiatura oltre alla rotazione. Si applica solo la "
+       "rotazione: nessuna posa di camera corrisponde a un'immagine specchiata, e la "
+       "ricostruzione verrebbe come il riflesso della realtà."),
+    NL("{0} en andere vragen naast de draaiing ook om spiegeling. Alleen de draaiing "
+       "wordt toegepast: bij een gespiegeld beeld past geen camerapositie, en de "
+       "reconstructie zou het spiegelbeeld van de werkelijkheid zijn."),
+    RU("{0} и другие требуют не только поворота, но и зеркального отражения. "
+       "Применяется только поворот: зеркальному изображению не соответствует ни одна "
+       "поза камеры, и реконструкция вышла бы зеркальной."),
+    TR("{0} ve diğerleri döndürmenin yanı sıra aynalanmayı da istiyor. Yalnızca "
+       "döndürme uygulanıyor: aynalanmış bir görüntüye uyan kamera duruşu yoktur, "
+       "yeniden oluşturma gerçeğin ayna görüntüsü olurdu."));
+
 SS_MSG(extract_mask_empty,
     EN("The mask {0} left no keypoints at all in {1}. Masks keep the white pixels "
        "and ignore the black ones, so an inverted mask masks out the whole image."),
@@ -594,6 +632,21 @@ SS_MSG(extract_mask_empty,
        "игнорируют чёрные, поэтому инвертированная маска убирает всё изображение."),
     TR("{0} maskesi {1} içinde tek bir anahtar nokta bırakmadı. Maskeler beyaz pikselleri "
        "tutar, siyahları yok sayar; ters çevrilmiş bir maske tüm görüntüyü eler."));
+
+SS_MSG(extract_reusing,
+    EN("Features an earlier run already wrote: {0}/{1} images -- keeping them."),
+    JA("前回の実行が書き出した特徴点: {0}/{1} 枚。そのまま使います。"),
+    ZH_HANS("上次运行已写出的特征：{0}/{1} 张图像，直接沿用。"),
+    ZH_HANT("上次執行已寫出的特徵：{0}/{1} 張影像，直接沿用。"),
+    KO("이전 실행이 이미 써 둔 특징점: {0}/{1} 장. 그대로 씁니다."),
+    DE("Von einem früheren Lauf geschriebene Merkmale: {0}/{1} Bilder -- sie werden behalten."),
+    FR("Points déjà écrits par une exécution précédente : {0}/{1} images -- conservés."),
+    ES("Rasgos ya escritos por una ejecución anterior: {0}/{1} imágenes; se conservan."),
+    PT("Pontos já escritos por uma execução anterior: {0}/{1} imagens -- mantidos."),
+    IT("Punti già scritti da un'esecuzione precedente: {0}/{1} immagini -- si conservano."),
+    NL("Kenmerken die een eerdere run al schreef: {0}/{1} afbeeldingen -- die blijven."),
+    RU("Признаков, записанных прошлым запуском: {0}/{1} изображений — используем их."),
+    TR("Önceki çalıştırmanın yazdığı öznitelik: {0}/{1} görüntü -- korunuyor."));
 
 SS_MSG(extract_masks_look_inverted,
     EN("Masks dropped {0}% of all keypoints. Unless this capture is a single object "
@@ -830,6 +883,66 @@ SS_MSG(match_progress,
     NL("{0}/{1} paren gekoppeld"),
     RU("Сопоставлено пар: {0}/{1}"),
     TR("{0}/{1} çift eşleştirildi"));
+
+SS_MSG(match_reusing_pairs,
+    EN("Image pairs chosen by an earlier run: {0} -- keeping them."),
+    JA("前回の実行が選んだ画像ペア: {0} 件。そのまま使います。"),
+    ZH_HANS("上次运行已选出的图像对：{0} 组，直接沿用。"),
+    ZH_HANT("上次執行已選出的影像對：{0} 組，直接沿用。"),
+    KO("이전 실행이 고른 이미지 쌍: {0} 개. 그대로 씁니다."),
+    DE("Von einem früheren Lauf gewählte Bildpaare: {0} -- sie werden behalten."),
+    FR("Paires d'images choisies par une exécution précédente : {0} -- conservées."),
+    ES("Pares de imágenes elegidos por una ejecución anterior: {0}; se conservan."),
+    PT("Pares de imagens escolhidos por uma execução anterior: {0} -- mantidos."),
+    IT("Coppie di immagini scelte da un'esecuzione precedente: {0} -- si conservano."),
+    NL("Beeldparen uit een eerdere run: {0} -- die blijven behouden."),
+    RU("Пар изображений, отобранных прошлым запуском: {0} — используем их."),
+    TR("Önceki çalıştırmanın seçtiği görüntü çifti: {0} -- korunuyor."));
+
+SS_MSG(match_resuming,
+    EN("Pairs an earlier run already verified: {0}/{1} -- continuing from there."),
+    JA("前回の実行が検証済みのペア: {0}/{1}。その続きから進めます。"),
+    ZH_HANS("上次运行已验证的像对：{0}/{1}，从这里接着做。"),
+    ZH_HANT("上次執行已驗證的影像對：{0}/{1}，從這裡接著做。"),
+    KO("이전 실행이 이미 검증한 쌍: {0}/{1}. 그다음부터 이어서 합니다."),
+    DE("Von einem früheren Lauf bereits geprüfte Paare: {0}/{1} -- es geht dort weiter."),
+    FR("Paires déjà vérifiées par une exécution précédente : {0}/{1} -- reprise à cet endroit."),
+    ES("Pares ya verificados por una ejecución anterior: {0}/{1}; se continúa desde ahí."),
+    PT("Pares já verificados por uma execução anterior: {0}/{1} -- seguindo daí."),
+    IT("Coppie già verificate da un'esecuzione precedente: {0}/{1} -- si riprende da lì."),
+    NL("Paren die een eerdere run al verifieerde: {0}/{1} -- daar gaat het verder."),
+    RU("Пар, уже проверенных прошлым запуском: {0}/{1} — продолжаем с этого места."),
+    TR("Önceki çalıştırmanın doğruladığı çift: {0}/{1} -- oradan devam ediliyor."));
+
+SS_MSG(match_reusing_matches,
+    EN("Matching is already done: pairs kept: {0}, from {1}"),
+    JA("照合は完了済みです。残っているペア: {0}（{1} から）"),
+    ZH_HANS("匹配已经完成：保留的像对 {0} 组（来自 {1}）"),
+    ZH_HANT("匹配已經完成：保留的影像對 {0} 組（來自 {1}）"),
+    KO("정합은 이미 끝나 있습니다. 남은 쌍: {0}（{1} 에서）"),
+    DE("Die Paarbildung ist bereits erledigt: behaltene Paare: {0}, aus {1}"),
+    FR("L'appariement est déjà fait : paires conservées : {0}, depuis {1}"),
+    ES("El emparejamiento ya está hecho: pares conservados: {0}, desde {1}"),
+    PT("O pareamento já está pronto: pares mantidos: {0}, de {1}"),
+    IT("L'accoppiamento è già fatto: coppie conservate: {0}, da {1}"),
+    NL("Koppelen is al gedaan: behouden paren: {0}, uit {1}"),
+    RU("Сопоставление уже выполнено: оставлено пар: {0}, из {1}"),
+    TR("Eşleme zaten tamam: tutulan çift: {0}, {1} içinden"));
+
+SS_MSG(match_reuse_failed,
+    EN("The matches an earlier run left could not be read ({0}); matching again."),
+    JA("前回の実行が残した照合結果を読めませんでした（{0}）。もう一度照合します。"),
+    ZH_HANS("读不出上次运行留下的匹配结果（{0}），重新匹配。"),
+    ZH_HANT("讀不出上次執行留下的匹配結果（{0}），重新匹配。"),
+    KO("이전 실행이 남긴 정합 결과를 읽지 못했습니다（{0}）. 다시 정합합니다."),
+    DE("Die Paare eines früheren Laufs waren nicht lesbar ({0}); es wird erneut gepaart."),
+    FR("Les appariements d'une exécution précédente sont illisibles ({0}) ; on recommence."),
+    ES("No se pudieron leer los emparejamientos de una ejecución anterior ({0}); se repiten."),
+    PT("Não foi possível ler os pareamentos de uma execução anterior ({0}); pareando de novo."),
+    IT("Non è stato possibile leggere gli abbinamenti precedenti ({0}); si riparte."),
+    NL("De koppelingen van een eerdere run waren onleesbaar ({0}); opnieuw koppelen."),
+    RU("Не удалось прочитать сопоставления прошлого запуска ({0}); сопоставляем заново."),
+    TR("Önceki çalıştırmanın eşlemeleri okunamadı ({0}); yeniden eşleniyor."));
 
 SS_MSG(match_need_two,
     EN("At least 2 feature files are needed in {0}."),
@@ -1091,6 +1204,109 @@ SS_MSG(map_registered,
     RU("Изображение {0} зарегистрировано (инлаеры PnP {1}/{2}); изображений в модели: {3}"),
     TR("{0} numaralı görüntü kaydedildi (PnP içerileri {1}/{2}); modeldeki görüntü: {3}"));
 
+SS_MSG(rig_table,
+    EN("Rig {0}: members {1}; {2} frames, {3} with every lens; extrinsics {4}"),
+    JA("リグ {0}: メンバー {1}、フレーム {2} 枚、全レンズ揃い {3} 枚、外部パラメータ {4}"),
+    ZH_HANS("装置 {0}: 成员 {1}; {2} 帧，其中 {3} 帧齐全; 外参{4}"),
+    ZH_HANT("裝置 {0}: 成員 {1}; {2} 幀，其中 {3} 幀齊全; 外參{4}"),
+    KO("리그 {0}: 멤버 {1}, 프레임 {2}개, 렌즈가 모두 있는 프레임 {3}개, 외부 파라미터 {4}"),
+    DE("Rig {0}: Mitglieder {1}; {2} Frames, {3} mit jedem Objektiv; Extrinsik {4}"),
+    FR("Rig {0} : membres {1} ; {2} images, {3} avec chaque objectif ; extrinsèques {4}"),
+    ES("Rig {0}: miembros {1}; {2} cuadros, {3} con todas las lentes; extrínsecos {4}"),
+    PT("Rig {0}: membros {1}; {2} quadros, {3} com todas as lentes; extrínsecos {4}"),
+    IT("Rig {0}: membri {1}; {2} fotogrammi, {3} con ogni obiettivo; estrinseci {4}"),
+    NL("Rig {0}: leden {1}; {2} frames, {3} met elke lens; extrinsieken {4}"),
+    RU("Риг {0}: элементы {1}; кадров {2}, из них {3} со всеми объективами; экстринсики {4}"),
+    TR("Rig {0}: üyeler {1}; {2} kare, {3} tanesinde tüm lensler var; dış parametreler {4}"));
+
+SS_MSG(rig_ext_given,
+    EN("given"), JA("指定済み"), ZH_HANS("已给定"), ZH_HANT("已給定"), KO("지정됨"),
+    DE("vorgegeben"), FR("fournis"), ES("dados"), PT("dados"), IT("dati"), NL("opgegeven"),
+    RU("заданы"), TR("verildi"));
+
+SS_MSG(rig_ext_estimated,
+    EN("estimated from the reconstruction"), JA("再構築から推定"), ZH_HANS("由重建估计"),
+    ZH_HANT("由重建估計"), KO("재구성에서 추정"), DE("aus der Rekonstruktion geschätzt"),
+    FR("estimés d'après la reconstruction"), ES("estimados a partir de la reconstrucción"),
+    PT("estimados a partir da reconstrução"), IT("stimati dalla ricostruzione"),
+    NL("geschat uit de reconstructie"), RU("оцениваются по реконструкции"),
+    TR("yeniden kurulumdan kestirilir"));
+
+SS_MSG(rig_bad,
+    EN("The rig definition cannot be applied: {0}"),
+    JA("リグ定義を適用できません: {0}"),
+    ZH_HANS("无法应用装置定义: {0}"),
+    ZH_HANT("無法套用裝置定義: {0}"),
+    KO("리그 정의를 적용할 수 없습니다: {0}"),
+    DE("Die Rig-Definition lässt sich nicht anwenden: {0}"),
+    FR("La définition du rig ne peut pas être appliquée : {0}"),
+    ES("La definición del rig no se puede aplicar: {0}"),
+    PT("A definição do rig não pode ser aplicada: {0}"),
+    IT("La definizione del rig non può essere applicata: {0}"),
+    NL("De rigdefinitie kan niet worden toegepast: {0}"),
+    RU("Определение рига не может быть применено: {0}"),
+    TR("Rig tanımı uygulanamıyor: {0}"));
+
+SS_MSG(map_free_rig_done,
+    EN("Final bundle adjustment with the rig released over {0} model(s): {1}"),
+    JA("リグ拘束を外した最終バンドル調整、モデル {0} 個: {1}"),
+    ZH_HANS("解除装置约束的最终光束法平差，{0} 个模型: {1}"),
+    ZH_HANT("解除裝置約束的最終光束法平差，{0} 個模型: {1}"),
+    KO("리그 제약을 푼 최종 번들 조정, 모델 {0}개: {1}"),
+    DE("Letzte Bündelausgleichung ohne Rig-Bindung über {0} Modell(e): {1}"),
+    FR("Ajustement de faisceaux final sans la contrainte du rig sur {0} modèle(s) : {1}"),
+    ES("Ajuste de haces final con el rig liberado sobre {0} modelo(s): {1}"),
+    PT("Ajuste de feixes final com o rig liberado sobre {0} modelo(s): {1}"),
+    IT("Bundle adjustment finale con il rig rilasciato su {0} modello/i: {1}"),
+    NL("Laatste bundelvereffening met het rig losgelaten over {0} model(len): {1}"),
+    RU("Финальное уравнивание связок без привязки рига по {0} модел(ям): {1}"),
+    TR("Rig serbest bırakılmış son demet ayarı, {0} model: {1}"));
+
+SS_MSG(map_rig_calibrated,
+    EN("Rig {0}: member {1} calibrated against {2} from {3}/{4} frames (spread {5} deg)"),
+    JA("リグ {0}: メンバー {1} を {2} 基準で {3}/{4} フレームから校正（ばらつき {5} 度）"),
+    ZH_HANS("装置 {0}: 成员 {1} 相对 {2} 由 {3}/{4} 帧标定（离散 {5} 度）"),
+    ZH_HANT("裝置 {0}: 成員 {1} 相對 {2} 由 {3}/{4} 幀標定（離散 {5} 度）"),
+    KO("리그 {0}: 멤버 {1}을(를) {2} 기준으로 {3}/{4} 프레임에서 보정(편차 {5}도)"),
+    DE("Rig {0}: Mitglied {1} gegen {2} aus {3}/{4} Frames kalibriert (Streuung {5} Grad)"),
+    FR("Rig {0} : membre {1} calibré par rapport à {2} sur {3}/{4} images (dispersion {5} deg)"),
+    ES("Rig {0}: miembro {1} calibrado respecto a {2} con {3}/{4} cuadros (dispersión {5} grados)"),
+    PT("Rig {0}: membro {1} calibrado em relação a {2} com {3}/{4} quadros (dispersão {5} graus)"),
+    IT("Rig {0}: membro {1} calibrato rispetto a {2} da {3}/{4} fotogrammi (dispersione {5} gradi)"),
+    NL("Rig {0}: lid {1} gekalibreerd ten opzichte van {2} uit {3}/{4} frames (spreiding {5} graden)"),
+    RU("Риг {0}: элемент {1} откалиброван относительно {2} по {3}/{4} кадрам (разброс {5} град)"),
+    TR("Rig {0}: {1} üyesi {2} referansıyla {3}/{4} kareden kalibre edildi (yayılım {5} derece)"));
+
+SS_MSG(map_rig_declined,
+    EN("Rig {0}: member {1} is not synchronized -- only {2}/{3} frames agree (spread {4} deg); its images register on their own"),
+    JA("リグ {0}: メンバー {1} は同期していません -- 一致するフレームは {2}/{3} のみ（ばらつき {4} 度）。その画像は単独で登録します"),
+    ZH_HANS("装置 {0}: 成员 {1} 未同步 -- 仅 {2}/{3} 帧一致（离散 {4} 度）; 其图像将独立配准"),
+    ZH_HANT("裝置 {0}: 成員 {1} 未同步 -- 僅 {2}/{3} 幀一致（離散 {4} 度）; 其影像將獨立註冊"),
+    KO("리그 {0}: 멤버 {1}이(가) 동기화되지 않음 -- {2}/{3} 프레임만 일치(편차 {4}도). 그 이미지는 개별 등록됩니다"),
+    DE("Rig {0}: Mitglied {1} ist nicht synchron -- nur {2}/{3} Frames stimmen überein (Streuung {4} Grad); seine Bilder registrieren sich einzeln"),
+    FR("Rig {0} : membre {1} non synchronisé -- seulement {2}/{3} images concordent (dispersion {4} deg) ; ses images s'enregistrent seules"),
+    ES("Rig {0}: miembro {1} no sincronizado -- solo {2}/{3} cuadros concuerdan (dispersión {4} grados); sus imágenes se registran por sí solas"),
+    PT("Rig {0}: membro {1} não sincronizado -- só {2}/{3} quadros concordam (dispersão {4} graus); suas imagens registram-se sozinhas"),
+    IT("Rig {0}: membro {1} non sincronizzato -- solo {2}/{3} fotogrammi concordano (dispersione {4} gradi); le sue immagini si registrano da sole"),
+    NL("Rig {0}: lid {1} loopt niet synchroon -- slechts {2}/{3} frames komen overeen (spreiding {4} graden); zijn beelden registreren op zichzelf"),
+    RU("Риг {0}: элемент {1} не синхронизирован -- согласуются лишь {2}/{3} кадров (разброс {4} град); его изображения регистрируются сами по себе"),
+    TR("Rig {0}: {1} üyesi eşzamanlı değil -- yalnızca {2}/{3} kare uyuşuyor (yayılım {4} derece); görüntüleri kendi başına kaydedilir"));
+
+SS_MSG(map_rig_summary,
+    EN("Images placed by the rig: {0}, of them on the rig's word alone: {1}"),
+    JA("リグにより配置した画像: {0}、うちリグの予測のみで配置した画像: {1}"),
+    ZH_HANS("由装置放置的图像: {0}，其中仅凭装置预测放置的: {1}"),
+    ZH_HANT("由裝置放置的影像: {0}，其中僅憑裝置預測放置的: {1}"),
+    KO("리그가 배치한 이미지: {0}, 그중 리그의 예측만으로 배치한 이미지: {1}"),
+    DE("Vom Rig platzierte Bilder: {0}, davon allein auf das Wort des Rigs: {1}"),
+    FR("Images placées par le rig : {0}, dont sur la seule parole du rig : {1}"),
+    ES("Imágenes colocadas por el rig: {0}, de ellas solo por la palabra del rig: {1}"),
+    PT("Imagens posicionadas pelo rig: {0}, das quais só pela palavra do rig: {1}"),
+    IT("Immagini posizionate dal rig: {0}, di cui sulla sola parola del rig: {1}"),
+    NL("Door het rig geplaatste beelden: {0}, waarvan alleen op het woord van het rig: {1}"),
+    RU("Изображений размещено ригом: {0}, из них только по предсказанию рига: {1}"),
+    TR("Rig tarafından yerleştirilen görüntü: {0}, bunlardan yalnızca rigin sözüyle: {1}"));
+
 SS_MSG(map_camera_focal,
     EN("Camera {0}: focal {1} -> {2} px (searched and refined, {3} inliers)"),
     JA("カメラ {0}: 焦点距離 {1} -> {2} px（探索と微調整、インライア {3}）"),
@@ -1240,34 +1456,34 @@ SS_MSG(map_pp_skipped,
     TR("Kamera grubu: {0} -- son ana nokta geçişi atlanıyor; grupları birbirinden uzaklaştırırdı"));
 
 SS_MSG(map_final_intrinsics,
-    EN("Final intrinsics refinement over {0} model(s): {1} s"),
-    JA("{0} 個のモデルに対する最後の内部パラメータ調整: {1} 秒"),
-    ZH_HANS("对 {0} 个模型做最后的内参优化: {1} 秒"),
-    ZH_HANT("對 {0} 個模型做最後的內參最佳化: {1} 秒"),
-    KO("모델 {0} 개에 대한 마지막 내부 파라미터 보정: {1} 초"),
-    DE("Abschließende Verfeinerung der inneren Orientierung über {0} Modell(e): {1} s"),
-    FR("Affinage final des paramètres internes sur {0} modèle(s) : {1} s"),
-    ES("Refinamiento final de los parámetros internos sobre {0} modelo(s): {1} s"),
-    PT("Refinamento final dos parâmetros internos em {0} modelo(s): {1} s"),
-    IT("Affinamento finale dei parametri interni su {0} modello/i: {1} s"),
-    NL("Laatste verfijning van de interne parameters over {0} model(len): {1} s"),
-    RU("Финальное уточнение внутренних параметров по {0} моделям: {1} с"),
-    TR("{0} model üzerinde son iç parametre iyileştirmesi: {1} s"));
+    EN("Final intrinsics refinement over {0} model(s): {1}"),
+    JA("{0} 個のモデルに対する最後の内部パラメータ調整: {1}"),
+    ZH_HANS("对 {0} 个模型做最后的内参优化: {1}"),
+    ZH_HANT("對 {0} 個模型做最後的內參最佳化: {1}"),
+    KO("모델 {0} 개에 대한 마지막 내부 파라미터 보정: {1}"),
+    DE("Abschließende Verfeinerung der inneren Orientierung über {0} Modell(e): {1}"),
+    FR("Affinage final des paramètres internes sur {0} modèle(s) : {1}"),
+    ES("Refinamiento final de los parámetros internos sobre {0} modelo(s): {1}"),
+    PT("Refinamento final dos parâmetros internos em {0} modelo(s): {1}"),
+    IT("Affinamento finale dei parametri interni su {0} modello/i: {1}"),
+    NL("Laatste verfijning van de interne parameters over {0} model(len): {1}"),
+    RU("Финальное уточнение внутренних параметров по {0} моделям: {1}"),
+    TR("{0} model üzerinde son iç parametre iyileştirmesi: {1}"));
 
 SS_MSG(map_per_image_done,
-    EN("Per-image intrinsics refinement over {0} model(s): {1} s"),
-    JA("{0} 個のモデルに対する画像ごとの内部パラメータ調整: {1} 秒"),
-    ZH_HANS("对 {0} 个模型做逐图像内参优化: {1} 秒"),
-    ZH_HANT("對 {0} 個模型做逐影像內參最佳化: {1} 秒"),
-    KO("모델 {0} 개에 대한 이미지별 내부 파라미터 보정: {1} 초"),
-    DE("Verfeinerung der inneren Orientierung je Bild über {0} Modell(e): {1} s"),
-    FR("Affinage des paramètres internes par image sur {0} modèle(s) : {1} s"),
-    ES("Refinamiento de los parámetros internos por imagen sobre {0} modelo(s): {1} s"),
-    PT("Refinamento dos parâmetros internos por imagem em {0} modelo(s): {1} s"),
-    IT("Affinamento dei parametri interni per immagine su {0} modello/i: {1} s"),
-    NL("Verfijning van de interne parameters per beeld over {0} model(len): {1} s"),
-    RU("Уточнение внутренних параметров по кадрам, по {0} моделям: {1} с"),
-    TR("{0} model üzerinde görüntü başına iç parametre iyileştirmesi: {1} s"));
+    EN("Per-image intrinsics refinement over {0} model(s): {1}"),
+    JA("{0} 個のモデルに対する画像ごとの内部パラメータ調整: {1}"),
+    ZH_HANS("对 {0} 个模型做逐图像内参优化: {1}"),
+    ZH_HANT("對 {0} 個模型做逐影像內參最佳化: {1}"),
+    KO("모델 {0} 개에 대한 이미지별 내부 파라미터 보정: {1}"),
+    DE("Verfeinerung der inneren Orientierung je Bild über {0} Modell(e): {1}"),
+    FR("Affinage des paramètres internes par image sur {0} modèle(s) : {1}"),
+    ES("Refinamiento de los parámetros internos por imagen sobre {0} modelo(s): {1}"),
+    PT("Refinamento dos parâmetros internos por imagem em {0} modelo(s): {1}"),
+    IT("Affinamento dei parametri interni per immagine su {0} modello/i: {1}"),
+    NL("Verfijning van de interne parameters per beeld over {0} model(len): {1}"),
+    RU("Уточнение внутренних параметров по кадрам, по {0} моделям: {1}"),
+    TR("{0} model üzerinde görüntü başına iç parametre iyileştirmesi: {1}"));
 
 SS_MSG(map_init_failed,
     EN("Initialization failed: {0} candidate pair(s) tried, best median triangulation "
@@ -1307,59 +1523,59 @@ SS_MSG(map_init_failed,
        "birbirine fazla benziyor olabilir."));
 
 SS_MSG(map_assembled,
-    EN("Assembly: {0} s   Models: {1} -> {2} over {3} level(s)   Merged: {4}   Refused: {5}   "
+    EN("Assembly: {0}   Models: {1} -> {2} over {3} level(s)   Merged: {4}   Refused: {5}   "
        "Grown: {6} image(s)   Coverage: {7} -> {8} images"),
-    JA("組み立て: {0} 秒   モデル: {1} -> {2}（{3} 段階）   統合: {4}   却下: {5}   "
+    JA("組み立て: {0}   モデル: {1} -> {2}（{3} 段階）   統合: {4}   却下: {5}   "
        "追加登録: {6} 枚   カバー: {7} -> {8} 枚"),
-    ZH_HANS("装配: {0} 秒   模型: {1} -> {2}（{3} 层）   合并: {4}   拒绝: {5}   "
+    ZH_HANS("装配: {0}   模型: {1} -> {2}（{3} 层）   合并: {4}   拒绝: {5}   "
             "补充注册: {6} 张   覆盖: {7} -> {8} 张"),
-    ZH_HANT("組裝: {0} 秒   模型: {1} -> {2}（{3} 層）   合併: {4}   拒絕: {5}   "
+    ZH_HANT("組裝: {0}   模型: {1} -> {2}（{3} 層）   合併: {4}   拒絕: {5}   "
             "補充註冊: {6} 張   涵蓋: {7} -> {8} 張"),
-    KO("조립: {0} 초   모델: {1} -> {2}({3} 단계)   병합: {4}   거부: {5}   "
+    KO("조립: {0}   모델: {1} -> {2}({3} 단계)   병합: {4}   거부: {5}   "
        "추가 등록: {6} 장   포함: {7} -> {8} 장"),
-    DE("Zusammenbau: {0} s   Modelle: {1} -> {2} über {3} Ebene(n)   Verschmolzen: {4}   "
+    DE("Zusammenbau: {0}   Modelle: {1} -> {2} über {3} Ebene(n)   Verschmolzen: {4}   "
        "Abgelehnt: {5}   Zugewachsen: {6} Bild(er)   Abdeckung: {7} -> {8} Bilder"),
-    FR("Assemblage : {0} s   Modèles : {1} -> {2} sur {3} niveau(x)   Fusionnés : {4}   "
+    FR("Assemblage : {0}   Modèles : {1} -> {2} sur {3} niveau(x)   Fusionnés : {4}   "
        "Refusés : {5}   Ajoutés : {6} image(s)   Couverture : {7} -> {8} images"),
-    ES("Ensamblaje: {0} s   Modelos: {1} -> {2} en {3} nivel(es)   Fusionados: {4}   "
+    ES("Ensamblaje: {0}   Modelos: {1} -> {2} en {3} nivel(es)   Fusionados: {4}   "
        "Rechazados: {5}   Añadidas: {6} imagen(es)   Cobertura: {7} -> {8} imágenes"),
-    PT("Montagem: {0} s   Modelos: {1} -> {2} em {3} nível(is)   Fundidos: {4}   "
+    PT("Montagem: {0}   Modelos: {1} -> {2} em {3} nível(is)   Fundidos: {4}   "
        "Recusados: {5}   Acrescentadas: {6} imagem(ns)   Cobertura: {7} -> {8} imagens"),
-    IT("Assemblaggio: {0} s   Modelli: {1} -> {2} su {3} livello/i   Fusi: {4}   "
+    IT("Assemblaggio: {0}   Modelli: {1} -> {2} su {3} livello/i   Fusi: {4}   "
        "Rifiutati: {5}   Aggiunte: {6} immagine/i   Copertura: {7} -> {8} immagini"),
-    NL("Assemblage: {0} s   Modellen: {1} -> {2} over {3} niveau(s)   Samengevoegd: {4}   "
+    NL("Assemblage: {0}   Modellen: {1} -> {2} over {3} niveau(s)   Samengevoegd: {4}   "
        "Geweigerd: {5}   Aangegroeid: {6} afbeelding(en)   Dekking: {7} -> {8} afbeeldingen"),
-    RU("Сборка: {0} с   Моделей: {1} -> {2} за уровней: {3}   Объединено: {4}   Отклонено: {5}   "
+    RU("Сборка: {0}   Моделей: {1} -> {2} за уровней: {3}   Объединено: {4}   Отклонено: {5}   "
        "Добавлено изображений: {6}   Охват: {7} -> {8} изображений"),
-    TR("Birleştirme: {0} s   Model: {1} -> {2}, {3} düzeyde   Kaynaşan: {4}   Reddedilen: {5}   "
+    TR("Birleştirme: {0}   Model: {1} -> {2}, {3} düzeyde   Kaynaşan: {4}   Reddedilen: {5}   "
        "Eklenen: {6} görüntü   Kapsama: {7} -> {8} görüntü"));
 
 SS_MSG(map_finishing,
-    EN("Finishing passes ({0} s): split {1}, folds cut {2}, reseeded {3}, dropped {4}, "
+    EN("Finishing passes ({0}): split {1}, folds cut {2}, reseeded {3}, dropped {4}, "
        "repaired by the audit {5}, dropped by the audit {6}"),
-    JA("仕上げ処理（{0} 秒）: 分割 {1}、折り返しの切断 {2}、再シード {3}、除外 {4}、"
+    JA("仕上げ処理（{0}）: 分割 {1}、折り返しの切断 {2}、再シード {3}、除外 {4}、"
        "監査で修復 {5}、監査で除外 {6}"),
-    ZH_HANS("收尾处理（{0} 秒）: 拆分 {1}，切开折叠 {2}，重新播种 {3}，丢弃 {4}，"
+    ZH_HANS("收尾处理（{0}）: 拆分 {1}，切开折叠 {2}，重新播种 {3}，丢弃 {4}，"
             "审查修复 {5}，审查丢弃 {6}"),
-    ZH_HANT("收尾處理（{0} 秒）: 拆分 {1}，切開折疊 {2}，重新播種 {3}，丟棄 {4}，"
+    ZH_HANT("收尾處理（{0}）: 拆分 {1}，切開折疊 {2}，重新播種 {3}，丟棄 {4}，"
             "稽核修復 {5}，稽核丟棄 {6}"),
-    KO("마무리 단계({0} 초): 분할 {1}, 접힘 절단 {2}, 재시드 {3}, 제외 {4}, "
+    KO("마무리 단계({0}): 분할 {1}, 접힘 절단 {2}, 재시드 {3}, 제외 {4}, "
        "감사로 복구 {5}, 감사로 제외 {6}"),
-    DE("Abschlussdurchgänge ({0} s): geteilt {1}, Faltungen getrennt {2}, neu gesät {3}, "
+    DE("Abschlussdurchgänge ({0}): geteilt {1}, Faltungen getrennt {2}, neu gesät {3}, "
        "verworfen {4}, von der Prüfung repariert {5}, von der Prüfung verworfen {6}"),
-    FR("Passes finales ({0} s) : scindés {1}, plis coupés {2}, réamorcés {3}, écartés {4}, "
+    FR("Passes finales ({0}) : scindés {1}, plis coupés {2}, réamorcés {3}, écartés {4}, "
        "réparés par l'audit {5}, écartés par l'audit {6}"),
-    ES("Pasadas finales ({0} s): divididos {1}, pliegues cortados {2}, resembrados {3}, "
+    ES("Pasadas finales ({0}): divididos {1}, pliegues cortados {2}, resembrados {3}, "
        "descartados {4}, reparados por la auditoría {5}, descartados por la auditoría {6}"),
-    PT("Passagens finais ({0} s): divididos {1}, dobras cortadas {2}, ressemeados {3}, "
+    PT("Passagens finais ({0}): divididos {1}, dobras cortadas {2}, ressemeados {3}, "
        "descartados {4}, reparados pela auditoria {5}, descartados pela auditoria {6}"),
-    IT("Passate finali ({0} s): divisi {1}, pieghe tagliate {2}, riseminati {3}, scartati {4}, "
+    IT("Passate finali ({0}): divisi {1}, pieghe tagliate {2}, riseminati {3}, scartati {4}, "
        "riparati dall'audit {5}, scartati dall'audit {6}"),
-    NL("Afrondende rondes ({0} s): gesplitst {1}, vouwen doorgesneden {2}, opnieuw gezaaid {3}, "
+    NL("Afrondende rondes ({0}): gesplitst {1}, vouwen doorgesneden {2}, opnieuw gezaaid {3}, "
        "afgevallen {4}, hersteld door de controle {5}, afgevallen door de controle {6}"),
-    RU("Завершающие проходы ({0} с): разделено {1}, складок разрезано {2}, пересеяно {3}, "
+    RU("Завершающие проходы ({0}): разделено {1}, складок разрезано {2}, пересеяно {3}, "
        "отброшено {4}, исправлено проверкой {5}, отброшено проверкой {6}"),
-    TR("Bitirme geçişleri ({0} s): bölünen {1}, kesilen katlanma {2}, yeniden tohumlanan {3}, "
+    TR("Bitirme geçişleri ({0}): bölünen {1}, kesilen katlanma {2}, yeniden tohumlanan {3}, "
        "elenen {4}, denetimle onarılan {5}, denetimle elenen {6}"));
 
 
@@ -1389,19 +1605,19 @@ SS_MSG(sum_header,
     TR("Özet"));
 
 SS_MSG(sum_extract,
-    EN("Extraction: {0} s   Images: {1}   Features: {2}"),
-    JA("抽出: {0} 秒   画像: {1}   特徴点: {2}"),
-    ZH_HANS("提取: {0} 秒   图像: {1}   特征点: {2}"),
-    ZH_HANT("擷取: {0} 秒   影像: {1}   特徵點: {2}"),
-    KO("추출: {0} 초   이미지: {1}   특징점: {2}"),
-    DE("Extraktion: {0} s   Bilder: {1}   Merkmale: {2}"),
-    FR("Extraction : {0} s   Images : {1}   Points : {2}"),
-    ES("Extracción: {0} s   Imágenes: {1}   Puntos: {2}"),
-    PT("Extração: {0} s   Imagens: {1}   Pontos: {2}"),
-    IT("Estrazione: {0} s   Immagini: {1}   Punti: {2}"),
-    NL("Extractie: {0} s   Afbeeldingen: {1}   Kenmerken: {2}"),
-    RU("Извлечение: {0} с   Изображений: {1}   Точек: {2}"),
-    TR("Çıkarım: {0} s   Görüntü: {1}   Öznitelik: {2}"));
+    EN("Extraction: {0}   Images: {1}   Features: {2}"),
+    JA("抽出: {0}   画像: {1}   特徴点: {2}"),
+    ZH_HANS("提取: {0}   图像: {1}   特征点: {2}"),
+    ZH_HANT("擷取: {0}   影像: {1}   特徵點: {2}"),
+    KO("추출: {0}   이미지: {1}   특징점: {2}"),
+    DE("Extraktion: {0}   Bilder: {1}   Merkmale: {2}"),
+    FR("Extraction : {0}   Images : {1}   Points : {2}"),
+    ES("Extracción: {0}   Imágenes: {1}   Puntos: {2}"),
+    PT("Extração: {0}   Imagens: {1}   Pontos: {2}"),
+    IT("Estrazione: {0}   Immagini: {1}   Punti: {2}"),
+    NL("Extractie: {0}   Afbeeldingen: {1}   Kenmerken: {2}"),
+    RU("Извлечение: {0}   Изображений: {1}   Точек: {2}"),
+    TR("Çıkarım: {0}   Görüntü: {1}   Öznitelik: {2}"));
 
 SS_MSG(sum_masks,
     EN("Masks: {0}/{1} images   Keypoints dropped: {2} ({3}%)"),
@@ -1419,49 +1635,68 @@ SS_MSG(sum_masks,
     TR("Maske: {0}/{1} görüntü   Elenen anahtar nokta: {2} (%{3})"));
 
 SS_MSG(sum_match,
-    EN("Matching: {0} s   Pairs kept: {1}/{2}   Inliers: {3}/{4}"),
-    JA("照合: {0} 秒   残ったペア: {1}/{2}   インライア: {3}/{4}"),
-    ZH_HANS("匹配: {0} 秒   保留的图像对: {1}/{2}   内点: {3}/{4}"),
-    ZH_HANT("匹配: {0} 秒   保留的影像對: {1}/{2}   內點: {3}/{4}"),
-    KO("정합: {0} 초   남은 쌍: {1}/{2}   인라이어: {3}/{4}"),
-    DE("Abgleich: {0} s   Behaltene Paare: {1}/{2}   Inlier: {3}/{4}"),
-    FR("Appariement : {0} s   Paires conservées : {1}/{2}   Inliers : {3}/{4}"),
-    ES("Emparejamiento: {0} s   Pares conservados: {1}/{2}   Inliers: {3}/{4}"),
-    PT("Pareamento: {0} s   Pares mantidos: {1}/{2}   Inliers: {3}/{4}"),
-    IT("Accoppiamento: {0} s   Coppie tenute: {1}/{2}   Inlier: {3}/{4}"),
-    NL("Koppelen: {0} s   Behouden paren: {1}/{2}   Inliers: {3}/{4}"),
-    RU("Сопоставление: {0} с   Оставлено пар: {1}/{2}   Инлаеров: {3}/{4}"),
-    TR("Eşleme: {0} s   Tutulan çift: {1}/{2}   İçeri: {3}/{4}"));
+    EN("Matching: {0}   Pairs kept: {1}/{2}   Inliers: {3}/{4}"),
+    JA("照合: {0}   残ったペア: {1}/{2}   インライア: {3}/{4}"),
+    ZH_HANS("匹配: {0}   保留的图像对: {1}/{2}   内点: {3}/{4}"),
+    ZH_HANT("匹配: {0}   保留的影像對: {1}/{2}   內點: {3}/{4}"),
+    KO("정합: {0}   남은 쌍: {1}/{2}   인라이어: {3}/{4}"),
+    DE("Abgleich: {0}   Behaltene Paare: {1}/{2}   Inlier: {3}/{4}"),
+    FR("Appariement : {0}   Paires conservées : {1}/{2}   Inliers : {3}/{4}"),
+    ES("Emparejamiento: {0}   Pares conservados: {1}/{2}   Inliers: {3}/{4}"),
+    PT("Pareamento: {0}   Pares mantidos: {1}/{2}   Inliers: {3}/{4}"),
+    IT("Accoppiamento: {0}   Coppie tenute: {1}/{2}   Inlier: {3}/{4}"),
+    NL("Koppelen: {0}   Behouden paren: {1}/{2}   Inliers: {3}/{4}"),
+    RU("Сопоставление: {0}   Оставлено пар: {1}/{2}   Инлаеров: {3}/{4}"),
+    TR("Eşleme: {0}   Tutulan çift: {1}/{2}   İçeri: {3}/{4}"));
+
+SS_MSG(sum_match_reused,
+    EN("Matching: reused an earlier run's   Pairs kept: {0}   Inliers: {1}"),
+    JA("照合: 前回の実行の結果を再利用   残ったペア: {0}   インライア: {1}"),
+    ZH_HANS("匹配: 沿用上次运行的结果   保留的图像对: {0}   内点: {1}"),
+    ZH_HANT("匹配: 沿用上次執行的結果   保留的影像對: {0}   內點: {1}"),
+    KO("정합: 이전 실행의 결과를 재사용   남은 쌍: {0}   인라이어: {1}"),
+    DE("Abgleich: aus einem früheren Lauf   Behaltene Paare: {0}   Inlier: {1}"),
+    FR("Appariement : repris d'une exécution précédente   Paires conservées : {0}   "
+       "Inliers : {1}"),
+    ES("Emparejamiento: reutilizado de una ejecución anterior   Pares conservados: {0}   "
+       "Inliers: {1}"),
+    PT("Pareamento: reaproveitado de uma execução anterior   Pares mantidos: {0}   "
+       "Inliers: {1}"),
+    IT("Accoppiamento: ripreso da un'esecuzione precedente   Coppie tenute: {0}   "
+       "Inlier: {1}"),
+    NL("Koppelen: hergebruikt uit een eerdere run   Behouden paren: {0}   Inliers: {1}"),
+    RU("Сопоставление: взято из прошлого запуска   Оставлено пар: {0}   Инлаеров: {1}"),
+    TR("Eşleme: önceki çalıştırmadan alındı   Tutulan çift: {0}   İçeri: {1}"));
 
 SS_MSG(sum_map,
-    EN("Mapping: {0} s   Registered: {1}/{2} images   Points: {3}   Cameras: {4}"),
-    JA("復元: {0} 秒   登録: 画像 {1}/{2}   点: {3}   カメラ: {4}"),
-    ZH_HANS("重建: {0} 秒   已配准: 图像 {1}/{2}   点: {3}   相机: {4}"),
-    ZH_HANT("重建: {0} 秒   已註冊: 影像 {1}/{2}   點: {3}   相機: {4}"),
-    KO("복원: {0} 초   등록: 이미지 {1}/{2}   점: {3}   카메라: {4}"),
-    DE("Kartierung: {0} s   Registriert: {1}/{2} Bilder   Punkte: {3}   Kameras: {4}"),
-    FR("Cartographie : {0} s   Enregistrées : {1}/{2} images   Points : {3}   Caméras : {4}"),
-    ES("Mapeo: {0} s   Registradas: {1}/{2} imágenes   Puntos: {3}   Cámaras: {4}"),
-    PT("Mapeamento: {0} s   Registradas: {1}/{2} imagens   Pontos: {3}   Câmeras: {4}"),
-    IT("Mappatura: {0} s   Registrate: {1}/{2} immagini   Punti: {3}   Fotocamere: {4}"),
-    NL("Kartering: {0} s   Geregistreerd: {1}/{2} afbeeldingen   Punten: {3}   Camera's: {4}"),
-    RU("Построение: {0} с   Зарегистрировано: {1}/{2} изображений   Точек: {3}   Камер: {4}"),
-    TR("Haritalama: {0} s   Kaydedilen: {1}/{2} görüntü   Nokta: {3}   Kamera: {4}"));
+    EN("Mapping: {0}   Registered: {1}/{2} images   Points: {3}   Cameras: {4}"),
+    JA("復元: {0}   登録: 画像 {1}/{2}   点: {3}   カメラ: {4}"),
+    ZH_HANS("重建: {0}   已配准: 图像 {1}/{2}   点: {3}   相机: {4}"),
+    ZH_HANT("重建: {0}   已註冊: 影像 {1}/{2}   點: {3}   相機: {4}"),
+    KO("복원: {0}   등록: 이미지 {1}/{2}   점: {3}   카메라: {4}"),
+    DE("Kartierung: {0}   Registriert: {1}/{2} Bilder   Punkte: {3}   Kameras: {4}"),
+    FR("Cartographie : {0}   Enregistrées : {1}/{2} images   Points : {3}   Caméras : {4}"),
+    ES("Mapeo: {0}   Registradas: {1}/{2} imágenes   Puntos: {3}   Cámaras: {4}"),
+    PT("Mapeamento: {0}   Registradas: {1}/{2} imagens   Pontos: {3}   Câmeras: {4}"),
+    IT("Mappatura: {0}   Registrate: {1}/{2} immagini   Punti: {3}   Fotocamere: {4}"),
+    NL("Kartering: {0}   Geregistreerd: {1}/{2} afbeeldingen   Punten: {3}   Camera's: {4}"),
+    RU("Построение: {0}   Зарегистрировано: {1}/{2} изображений   Точек: {3}   Камер: {4}"),
+    TR("Haritalama: {0}   Kaydedilen: {1}/{2} görüntü   Nokta: {3}   Kamera: {4}"));
 
 SS_MSG(sum_total,
-    EN("Total: {0} s"),
-    JA("合計: {0} 秒"),
-    ZH_HANS("合计: {0} 秒"),
-    ZH_HANT("合計: {0} 秒"),
-    KO("합계: {0} 초"),
-    DE("Gesamt: {0} s"),
-    FR("Total : {0} s"),
-    ES("Total: {0} s"),
-    PT("Total: {0} s"),
-    IT("Totale: {0} s"),
-    NL("Totaal: {0} s"),
-    RU("Всего: {0} с"),
-    TR("Toplam: {0} s"));
+    EN("Total: {0}"),
+    JA("合計: {0}"),
+    ZH_HANS("合计: {0}"),
+    ZH_HANT("合計: {0}"),
+    KO("합계: {0}"),
+    DE("Gesamt: {0}"),
+    FR("Total : {0}"),
+    ES("Total: {0}"),
+    PT("Total: {0}"),
+    IT("Totale: {0}"),
+    NL("Totaal: {0}"),
+    RU("Всего: {0}"),
+    TR("Toplam: {0}"));
 
 SS_MSG(sum_model_error,
     EN("Reprojection error: mean {0} px, median {1} px, over {2} observations"),
@@ -1790,55 +2025,55 @@ SS_MSG(match_pairs_scored,
     TR("puanlanan çift: {0}/{1}"));
 
 SS_MSG(match_prefilter_kept,
-    EN("pair selection kept: {0}/{1}; top features: {2}, neighbours: {3} ({4} s)"),
-    JA("ペア選択で残した数: {0}/{1}、上位特徴点: {2}、近傍: {3}（{4} 秒）"),
-    ZH_HANS("像对筛选保留：{0}/{1}；取前 {2} 个特征，近邻 {3}（{4} 秒）"),
-    ZH_HANT("影像對篩選保留：{0}/{1}；取前 {2} 個特徵，近鄰 {3}（{4} 秒）"),
-    KO("쌍 선택으로 남긴 수: {0}/{1}; 상위 특징점: {2}, 이웃: {3}({4}초)"),
-    DE("Paarauswahl behielt: {0}/{1}; beste Merkmale: {2}, Nachbarn: {3} ({4} s)"),
+    EN("pair selection kept: {0}/{1}; top features: {2}, neighbours: {3} ({4})"),
+    JA("ペア選択で残した数: {0}/{1}、上位特徴点: {2}、近傍: {3}（{4}）"),
+    ZH_HANS("像对筛选保留：{0}/{1}；取前 {2} 个特征，近邻 {3}（{4}）"),
+    ZH_HANT("影像對篩選保留：{0}/{1}；取前 {2} 個特徵，近鄰 {3}（{4}）"),
+    KO("쌍 선택으로 남긴 수: {0}/{1}; 상위 특징점: {2}, 이웃: {3}({4})"),
+    DE("Paarauswahl behielt: {0}/{1}; beste Merkmale: {2}, Nachbarn: {3} ({4})"),
     FR("la sélection de paires a gardé : {0}/{1} ; meilleurs points : {2}, "
-       "voisins : {3} ({4} s)"),
+       "voisins : {3} ({4})"),
     ES("la selección de pares conservó: {0}/{1}; mejores rasgos: {2}, "
-       "vecinos: {3} ({4} s)"),
+       "vecinos: {3} ({4})"),
     PT("a seleção de pares manteve: {0}/{1}; melhores traços: {2}, "
-       "vizinhos: {3} ({4} s)"),
+       "vizinhos: {3} ({4})"),
     IT("la selezione delle coppie ha tenuto: {0}/{1}; migliori punti: {2}, "
-       "vicini: {3} ({4} s)"),
-    NL("paarselectie hield: {0}/{1}; beste kenmerken: {2}, buren: {3} ({4} s)"),
-    RU("отбор пар оставил: {0}/{1}; лучших признаков: {2}, соседей: {3} ({4} с)"),
-    TR("çift seçimi tuttu: {0}/{1}; en iyi öznitelik: {2}, komşu: {3} ({4} sn)"));
+       "vicini: {3} ({4})"),
+    NL("paarselectie hield: {0}/{1}; beste kenmerken: {2}, buren: {3} ({4})"),
+    RU("отбор пар оставил: {0}/{1}; лучших признаков: {2}, соседей: {3} ({4})"),
+    TR("çift seçimi tuttu: {0}/{1}; en iyi öznitelik: {2}, komşu: {3} ({4})"));
 
 SS_MSG(match_loop_closure_added,
     EN("loop closure added pairs: {0}, on top of sequential pairs: {1} "
-       "(selected: {2}, {3} s). --no-loop-closure turns this off."),
-    JA("ループ閉じ込みで追加したペア: {0}、逐次ペア: {1}（選択: {2}、{3} 秒）。"
+       "(selected: {2}, {3}). --no-loop-closure turns this off."),
+    JA("ループ閉じ込みで追加したペア: {0}、逐次ペア: {1}（選択: {2}、{3}）。"
        "--no-loop-closure で無効にできます。"),
-    ZH_HANS("回环闭合新增的像对：{0}，此外还有顺序像对：{1}（选出：{2}，{3} 秒）。"
+    ZH_HANS("回环闭合新增的像对：{0}，此外还有顺序像对：{1}（选出：{2}，{3}）。"
             "用 --no-loop-closure 可关闭。"),
-    ZH_HANT("迴環閉合新增的影像對：{0}，此外還有順序影像對：{1}（選出：{2}，{3} 秒）。"
+    ZH_HANT("迴環閉合新增的影像對：{0}，此外還有順序影像對：{1}（選出：{2}，{3}）。"
             "用 --no-loop-closure 可關閉。"),
-    KO("루프 클로저로 더한 쌍: {0}, 순차 쌍: {1}(선택: {2}, {3}초). "
+    KO("루프 클로저로 더한 쌍: {0}, 순차 쌍: {1}(선택: {2}, {3}). "
        "--no-loop-closure 로 끌 수 있습니다."),
     DE("Schleifenschluss ergänzte Paare: {0}, zu sequenziellen Paaren: {1} "
-       "(ausgewählt: {2}, {3} s). --no-loop-closure schaltet das ab."),
+       "(ausgewählt: {2}, {3}). --no-loop-closure schaltet das ab."),
     FR("la fermeture de boucle a ajouté des paires : {0}, en plus des paires "
-       "séquentielles : {1} (sélectionnées : {2}, {3} s). --no-loop-closure "
+       "séquentielles : {1} (sélectionnées : {2}, {3}). --no-loop-closure "
        "désactive cela."),
     ES("el cierre de bucle añadió pares: {0}, además de los pares "
-       "secuenciales: {1} (seleccionados: {2}, {3} s). --no-loop-closure lo "
+       "secuenciales: {1} (seleccionados: {2}, {3}). --no-loop-closure lo "
        "desactiva."),
     PT("o fechamento de laço acrescentou pares: {0}, além dos pares "
-       "sequenciais: {1} (selecionados: {2}, {3} s). --no-loop-closure desliga "
+       "sequenciais: {1} (selecionados: {2}, {3}). --no-loop-closure desliga "
        "isso."),
     IT("la chiusura d'anello ha aggiunto coppie: {0}, oltre alle coppie "
-       "sequenziali: {1} (selezionate: {2}, {3} s). --no-loop-closure lo "
+       "sequenziali: {1} (selezionate: {2}, {3}). --no-loop-closure lo "
        "disattiva."),
     NL("lussluiting voegde paren toe: {0}, boven op sequentiële paren: {1} "
-       "(geselecteerd: {2}, {3} s). --no-loop-closure zet dit uit."),
+       "(geselecteerd: {2}, {3}). --no-loop-closure zet dit uit."),
     RU("замыкание петли добавило пар: {0}, к последовательным парам: {1} "
-       "(отобрано: {2}, {3} с). --no-loop-closure это отключает."),
+       "(отобрано: {2}, {3}). --no-loop-closure это отключает."),
     TR("döngü kapatma eklenen çift: {0}, sıralı çiftlere ek olarak: {1} "
-       "(seçilen: {2}, {3} sn). --no-loop-closure bunu kapatır."));
+       "(seçilen: {2}, {3}). --no-loop-closure bunu kapatır."));
 
 SS_MSG(match_prefilter_params,
     EN("pair selection -- top features: {0}, neighbours: {1}"),
@@ -1872,41 +2107,41 @@ SS_MSG(match_matcher_name,
     TR("eşleştirici: {0}"));
 
 SS_MSG(focal_epipolar_search,
-    EN("epipolar focal search: {0} s"),
-    JA("エピポーラによる焦点距離探索: {0} 秒"),
-    ZH_HANS("对极几何焦距搜索：{0} 秒"),
-    ZH_HANT("對極幾何焦距搜尋：{0} 秒"),
-    KO("에피폴라 초점 거리 탐색: {0}초"),
-    DE("epipolare Brennweitensuche: {0} s"),
-    FR("recherche épipolaire de focale : {0} s"),
-    ES("búsqueda epipolar de la focal: {0} s"),
-    PT("busca epipolar da focal: {0} s"),
-    IT("ricerca epipolare della focale: {0} s"),
-    NL("epipolaire brandpuntszoektocht: {0} s"),
-    RU("эпиполярный поиск фокуса: {0} с"),
-    TR("epipolar odak arayışı: {0} sn"));
+    EN("epipolar focal search: {0}"),
+    JA("エピポーラによる焦点距離探索: {0}"),
+    ZH_HANS("对极几何焦距搜索：{0}"),
+    ZH_HANT("對極幾何焦距搜尋：{0}"),
+    KO("에피폴라 초점 거리 탐색: {0}"),
+    DE("epipolare Brennweitensuche: {0}"),
+    FR("recherche épipolaire de focale : {0}"),
+    ES("búsqueda epipolar de la focal: {0}"),
+    PT("busca epipolar da focal: {0}"),
+    IT("ricerca epipolare della focale: {0}"),
+    NL("epipolaire brandpuntszoektocht: {0}"),
+    RU("эпиполярный поиск фокуса: {0}"),
+    TR("epipolar odak arayışı: {0}"));
 
 // {2} is a list the caller built ("cam 0: 520.4, cam 1: 519.8"): identifiers
 // and numbers, so it is passed through as it is.
 SS_MSG(match_bearings,
-    EN("calibrated verification on bearings ({0} s, {1} MB); focal lengths: {2}"),
-    JA("方位ベクトルでの校正済み検証（{0} 秒、{1} MB）、焦点距離: {2}"),
-    ZH_HANS("在方向向量上做标定后验证（{0} 秒，{1} MB）；焦距：{2}"),
-    ZH_HANT("在方向向量上做標定後驗證（{0} 秒，{1} MB）；焦距：{2}"),
-    KO("방향 벡터에서 보정된 검증({0}초, {1} MB); 초점 거리: {2}"),
-    DE("kalibrierte Prüfung auf Richtungsvektoren ({0} s, {1} MB); "
+    EN("calibrated verification on bearings ({0}, {1} MB); focal lengths: {2}"),
+    JA("方位ベクトルでの校正済み検証（{0}、{1} MB）、焦点距離: {2}"),
+    ZH_HANS("在方向向量上做标定后验证（{0}，{1} MB）；焦距：{2}"),
+    ZH_HANT("在方向向量上做標定後驗證（{0}，{1} MB）；焦距：{2}"),
+    KO("방향 벡터에서 보정된 검증({0}, {1} MB); 초점 거리: {2}"),
+    DE("kalibrierte Prüfung auf Richtungsvektoren ({0}, {1} MB); "
        "Brennweiten: {2}"),
-    FR("vérification calibrée sur les directions ({0} s, {1} Mo) ; "
+    FR("vérification calibrée sur les directions ({0}, {1} Mo) ; "
        "focales : {2}"),
-    ES("verificación calibrada sobre las direcciones ({0} s, {1} MB); "
+    ES("verificación calibrada sobre las direcciones ({0}, {1} MB); "
        "focales: {2}"),
-    PT("verificação calibrada sobre as direções ({0} s, {1} MB); focais: {2}"),
-    IT("verifica calibrata sulle direzioni ({0} s, {1} MB); focali: {2}"),
-    NL("gekalibreerde verificatie op richtingen ({0} s, {1} MB); "
+    PT("verificação calibrada sobre as direções ({0}, {1} MB); focais: {2}"),
+    IT("verifica calibrata sulle direzioni ({0}, {1} MB); focali: {2}"),
+    NL("gekalibreerde verificatie op richtingen ({0}, {1} MB); "
        "brandpuntsafstanden: {2}"),
-    RU("калиброванная проверка по направлениям ({0} с, {1} МБ); "
+    RU("калиброванная проверка по направлениям ({0}, {1} МБ); "
        "фокусные расстояния: {2}"),
-    TR("yön vektörlerinde kalibre doğrulama ({0} sn, {1} MB); odak "
+    TR("yön vektörlerinde kalibre doğrulama ({0}, {1} MB); odak "
        "uzaklıkları: {2}"));
 
 SS_MSG(match_no_mask_for,
@@ -2206,38 +2441,38 @@ SS_MSG(merge_metric_only,
     TR("tek model: birleştirilecek bir şey yok, yalnızca metrik çerçeve belirlenir"));
 
 SS_MSG(merge_summary,
-    EN("merged {0} models into {1} in {2} s (merges: {3}, refused: {4})"),
-    JA("{0} 個のモデルを {1} 個に統合しました（{2} 秒、統合: {3}、拒否: {4}）"),
-    ZH_HANS("已把 {0} 个模型合并为 {1} 个（{2} 秒，合并：{3}，拒绝：{4}）"),
-    ZH_HANT("已把 {0} 個模型合併為 {1} 個（{2} 秒，合併：{3}，拒絕：{4}）"),
-    KO("모델 {0}개를 {1}개로 병합했습니다({2}초, 병합: {3}, 거절: {4})"),
-    DE("{0} Modelle in {1} zusammengeführt, in {2} s (Zusammenführungen: {3}, "
+    EN("merged {0} models into {1} in {2} (merges: {3}, refused: {4})"),
+    JA("{0} 個のモデルを {1} 個に統合しました（{2}、統合: {3}、拒否: {4}）"),
+    ZH_HANS("已把 {0} 个模型合并为 {1} 个（{2}，合并：{3}，拒绝：{4}）"),
+    ZH_HANT("已把 {0} 個模型合併為 {1} 個（{2}，合併：{3}，拒絕：{4}）"),
+    KO("모델 {0}개를 {1}개로 병합했습니다({2}, 병합: {3}, 거절: {4})"),
+    DE("{0} Modelle in {1} zusammengeführt, in {2} (Zusammenführungen: {3}, "
        "abgelehnt: {4})"),
-    FR("{0} modèles fusionnés en {1} en {2} s (fusions : {3}, refus : {4})"),
-    ES("se fusionaron {0} modelos en {1} en {2} s (fusiones: {3}, "
+    FR("{0} modèles fusionnés en {1} en {2} (fusions : {3}, refus : {4})"),
+    ES("se fusionaron {0} modelos en {1} en {2} (fusiones: {3}, "
        "rechazadas: {4})"),
-    PT("{0} modelos fundidos em {1} em {2} s (fusões: {3}, recusadas: {4})"),
-    IT("{0} modelli fusi in {1} in {2} s (fusioni: {3}, rifiutate: {4})"),
-    NL("{0} modellen samengevoegd tot {1} in {2} s (samenvoegingen: {3}, "
+    PT("{0} modelos fundidos em {1} em {2} (fusões: {3}, recusadas: {4})"),
+    IT("{0} modelli fusi in {1} in {2} (fusioni: {3}, rifiutate: {4})"),
+    NL("{0} modellen samengevoegd tot {1} in {2} (samenvoegingen: {3}, "
        "geweigerd: {4})"),
-    RU("{0} моделей слито в {1} за {2} с (слияний: {3}, отклонено: {4})"),
-    TR("{0} model {1} tanesine birleştirildi, {2} sn (birleştirme: {3}, "
+    RU("{0} моделей слито в {1} за {2} (слияний: {3}, отклонено: {4})"),
+    TR("{0} model {1} tanesine birleştirildi, {2} (birleştirme: {3}, "
        "reddedilen: {4})"));
 
 SS_MSG(merge_ba_seconds,
-    EN("bundle adjustment: {0} s"),
-    JA("バンドル調整: {0} 秒"),
-    ZH_HANS("光束法平差：{0} 秒"),
-    ZH_HANT("光束法平差：{0} 秒"),
-    KO("번들 조정: {0}초"),
-    DE("Bündelausgleich: {0} s"),
-    FR("ajustement de faisceaux : {0} s"),
-    ES("ajuste de haces: {0} s"),
-    PT("ajuste de feixes: {0} s"),
-    IT("bundle adjustment: {0} s"),
-    NL("bundelaanpassing: {0} s"),
-    RU("уравнивание блока: {0} с"),
-    TR("demet dengelemesi: {0} sn"));
+    EN("bundle adjustment: {0}"),
+    JA("バンドル調整: {0}"),
+    ZH_HANS("光束法平差：{0}"),
+    ZH_HANT("光束法平差：{0}"),
+    KO("번들 조정: {0}"),
+    DE("Bündelausgleich: {0}"),
+    FR("ajustement de faisceaux : {0}"),
+    ES("ajuste de haces: {0}"),
+    PT("ajuste de feixes: {0}"),
+    IT("bundle adjustment: {0}"),
+    NL("bundelaanpassing: {0}"),
+    RU("уравнивание блока: {0}"),
+    TR("demet dengelemesi: {0}"));
 
 SS_MSG(merge_model_line,
     EN("model {0} -- images: {1}, points: {2}, mean error: {3} px (median {4}, "

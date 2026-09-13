@@ -19,6 +19,7 @@
 
 #include "sfm/core/Camera.h"
 #include "sfm/core/Pose.h"
+#include "sfm/core/Rig.h"
 #include "sfm/geometry/LinAlg.h"
 
 namespace sfm {
@@ -43,6 +44,10 @@ struct Image {
     std::string name;
     Pose pose;                 // world -> camera
     bool registered = false;
+    // The file's EXIF Orientation (sfm/core/Exif.h), 1 when it has none or the
+    // pixels already carry it. Only the gauge fix reads it, and only a model
+    // built from features has it -- one read back from disk does not.
+    uint8_t exif_orientation = 1;
     std::vector<Vec2> points2D;              // keypoint coords (all features)
     std::vector<uint64_t> point3D_ids;       // parallel; kInvalidPoint3D if none
 
@@ -62,6 +67,12 @@ struct Reconstruction {
     std::map<uint32_t, Image> images;
     std::map<uint64_t, Point3D> points3D;
     uint64_t next_point3D_id = 1;
+    // Per rig of the run's RigTable, the extrinsics this model has settled on;
+    // empty until a rig's frames register. In this model's units (sfm/core/Rig.h).
+    std::vector<RigCalib> rigs;
+    // Images left outside their frame, with a pose of their own. The mapper
+    // keeps frames whole and never fills it; the solvers and the merge honour it.
+    std::set<uint32_t> rig_detached;
 
     uint32_t numRegistered() const {
         uint32_t n = 0;

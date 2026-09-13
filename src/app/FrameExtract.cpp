@@ -8,6 +8,7 @@
 
 #include "app/WriterPool.h"
 #include "i18n/catalog/Data.h"
+#include "i18n/catalog/Log.h"
 #include "nn/core/Log.h"
 #include "nn/io/Image.h"
 #include "sam/Sam.h"
@@ -19,6 +20,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <deque>
+#include <functional>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -213,34 +215,25 @@ bool extract_track(const FrameExtractJob& o, const FrameExtractSinks& sinks,
     return true;
 }
 
-// One decoded frame from each track, warped into every view. The two tracks
-// are one camera: they are decoded in lockstep and selected together, so a
-// window keeps whichever frame is sharpest over the whole sphere.
-bool extract_pair(const FrameExtractJob& o, const FrameExtractSinks& sinks,
-                  const fs::path& image_dir, WriterPool& pool,
-                  FrameExtractStats& t, std::string& error) {
-    video::VideoPipeline pipe[2];
-    for (int k = 0; k < 2; k++)
-        if (!pipe[k].open(o.input, k, std::max(o.keep, 1), error)) return false;
-    for (int k = 0; k < 2; k++) {
-        if (pipe[k].format().width == o.eac.track_w &&
-            pipe[k].format().height == o.eac.track_h)
-            continue;
-        error = "track " + std::to_string(k) + " is not the size the 360 layout"
-                " was detected at";
-        return false;
-    }
+// Several tracks decoded in lockstep under one sharpness window (the score is
+// summed over the tracks); `on_frame` gets the chosen instant's pictures, one
+// per track, and writes whatever the caller wants out of them.
+using LockstepSink = std::function<bool(std::vector<nn::Image>& imgs, int64_t index,
+                                        std::string& err)>;
 
-    std::vector<Pano360Remap> maps(o.views.size());
-    for (size_t i = 0; i < o.views.size(); i++) {
-        pano360_remap(o.eac, o.views[i], maps[i]);
-        fs::create_directories(image_dir / o.views[i].dir);
+bool extract_lockstep(const FrameExtractJob& o, const FrameExtractSinks& sinks,
+                      const std::vector<int>& tracks, const video::ConvertOpts& conv,
+                      FrameExtractStats& t, std::string& error, const LockstepSink& on_frame) {
+    const size_t n = tracks.size();
+    std::vector<std::unique_ptr<video::VideoPipeline>> pipe;
+    for (size_t k = 0; k < n; k++) {
+        pipe.push_back(std::make_unique<video::VideoPipeline>());
+        if (!pipe[k]->open(o.input, tracks[k], std::max(o.keep, 1), error)) return false;
     }
-    std::vector<uint8_t> canvas((size_t)o.eac.canvasW() * o.eac.canvasH() * 3);
 
     struct Buffered {
-        video::FrameHandle h[2];
-        int64_t index;
+        std::vector<video::FrameHandle> h;
+        int64_t index = 0;
     };
     std::deque<Buffered> window;
     const int keep = o.keep;
@@ -249,7 +242,7 @@ bool extract_pair(const FrameExtractJob& o, const FrameExtractSinks& sinks,
     bool measured_pending = false;
 
     auto release = [&](Buffered& b) {
-        for (int k = 0; k < 2; k++) pipe[k].release(b.h[k]);
+        for (size_t k = 0; k < n; k++) pipe[k]->release(b.h[k]);
     };
     auto drain = [&]() {
         for (auto& b : window) release(b);
@@ -261,7 +254,7 @@ bool extract_pair(const FrameExtractJob& o, const FrameExtractSinks& sinks,
         if (write) {
             if (measured_pending) {
                 const double t0 = nn::now_ms();
-                for (int k = 0; k < 2; k++) pipe[k].flushSharpness();
+                for (size_t k = 0; k < n; k++) pipe[k]->flushSharpness();
                 t.sharpness += nn::now_ms() - t0;
                 measured_pending = false;
             }
@@ -269,9 +262,10 @@ bool extract_pair(const FrameExtractJob& o, const FrameExtractSinks& sinks,
             if (keep != 0) {
                 float best_score = -1.0f;
                 for (size_t i = 0; i < window.size(); ++i) {
-                    // Half the sphere each, so the sum is the whole capture's.
-                    const float s = pipe[0].sharpness(window[i].h[0]) +
-                                    pipe[1].sharpness(window[i].h[1]);
+                    // Each track sees its share of the scene; the sum is the
+                    // whole capture's.
+                    float s = 0;
+                    for (size_t k = 0; k < n; k++) s += pipe[k]->sharpness(window[i].h[k]);
                     if (s > best_score) {
                         best_score = s;
                         best = i;
@@ -281,47 +275,16 @@ bool extract_pair(const FrameExtractJob& o, const FrameExtractSinks& sinks,
             const Buffered& chosen = window[best];
 
             double t0 = nn::now_ms();
-            nn::Image track[2];
+            std::vector<nn::Image> imgs(n);
             std::string err;
             bool ok = true;
-            for (int k = 0; k < 2 && ok; k++)
-                ok = pipe[k].toImage(chosen.h[k], video::ConvertOpts{}, track[k], err);
+            for (size_t k = 0; k < n && ok; k++)
+                ok = pipe[k]->toImage(chosen.h[k], conv, imgs[k], err);
+            t.convert += nn::now_ms() - t0;
+            if (ok) ok = on_frame(imgs, chosen.index, err);
             if (!ok) {
                 log_line(sinks, "frame " + std::to_string(chosen.index) + ": " + err);
             } else {
-                pano360_canvas(o.eac, track[0].data.data(), track[1].data.data(),
-                               canvas.data());
-                t.convert += nn::now_ms() - t0;
-
-                char stem[64];
-                std::snprintf(stem, sizeof(stem), "%05lld", (long long)chosen.index);
-                const bool jpeg = o.quality >= 0 && o.quality <= 100;
-                for (size_t i = 0; i < o.views.size(); i++) {
-                    t0 = nn::now_ms();
-                    WriteJob job;
-                    job.image.width = maps[i].width;
-                    job.image.height = maps[i].height;
-                    job.image.channels = 3;
-                    job.image.data.resize((size_t)maps[i].width * maps[i].height * 3);
-                    pano360_apply(maps[i], canvas.data(), o.eac.canvasW(),
-                                  o.eac.canvasH(), 0, job.image.data.data());
-                    t.convert += nn::now_ms() - t0;
-                    job.path = (image_dir / o.views[i].dir /
-                                (std::string(stem) + (jpeg ? ".jpg" : ".png"))).string();
-                    job.quality = o.quality;
-                    // The reel shows the first view; the others are the same
-                    // instant seen the other way, and six thumbnails a frame is
-                    // not what the slider is for.
-                    if (i == 0 && sinks.preview)
-                        sinks.preview(job.image.data.data(), job.image.width,
-                                      job.image.height, job.path);
-                    t0 = nn::now_ms();
-                    pool.submit(std::move(job));
-                    t.submit += nn::now_ms() - t0;
-                    // Per view, not per frame: the count is what the progress
-                    // bar is scaled against, and a plan writes six files here.
-                    ++t.written;
-                }
                 ++written;
                 if (sinks.progress) sinks.progress(t.written, t.decoded);
             }
@@ -335,17 +298,17 @@ bool extract_pair(const FrameExtractJob& o, const FrameExtractSinks& sinks,
             drain();
             return false;
         }
-        Buffered b{};
+        Buffered b;
+        b.h.resize(n);
         const double t0 = nn::now_ms();
         bool got = true;
-        for (int k = 0; k < 2 && got; k++) got = pipe[k].next(b.h[k], error);
+        for (size_t k = 0; k < n && got; k++) got = pipe[k]->next(b.h[k], error);
         t.decode += nn::now_ms() - t0;
         if (!got) {
-            // One track ending first leaves the other's picture held; the pool
-            // is about to go out of scope either way, but release it anyway so
-            // a future caller can reopen without a full pool.
-            for (int k = 0; k < 2; k++)
-                if (b.h[k].valid()) pipe[k].release(b.h[k]);
+            // One track ending first leaves the others' pictures held; release
+            // them so a future caller can reopen without a full pool.
+            for (size_t k = 0; k < n; k++)
+                if (b.h[k].valid()) pipe[k]->release(b.h[k]);
             drain();
             return error.empty();   // end of stream
         }
@@ -359,12 +322,12 @@ bool extract_pair(const FrameExtractJob& o, const FrameExtractSinks& sinks,
         }
         if (keep != 0) {
             const double t1 = nn::now_ms();
-            for (int k = 0; k < 2; k++) pipe[k].queueSharpness(b.h[k]);
+            for (size_t k = 0; k < n; k++) pipe[k]->queueSharpness(b.h[k]);
             t.sharpness += nn::now_ms() - t1;
             measured_pending = true;
             ++t.measured;
         }
-        window.push_back(b);
+        window.push_back(std::move(b));
         if ((int)window.size() > std::max(keep, 1)) {
             release(window.front());
             window.pop_front();
@@ -373,6 +336,102 @@ bool extract_pair(const FrameExtractJob& o, const FrameExtractSinks& sinks,
     }
     flush_window(false);
     return true;
+}
+
+// The two tracks of a 360 file, stitched into the EAC canvas and resampled
+// into every view.
+bool extract_pair(const FrameExtractJob& o, const FrameExtractSinks& sinks,
+                  const fs::path& image_dir, WriterPool& pool,
+                  FrameExtractStats& t, std::string& error) {
+    {
+        std::vector<std::pair<int, int>> sizes = video_track_sizes(o.input, error);
+        for (size_t k = 0; k < 2; k++) {
+            if (k < sizes.size() && sizes[k].first == o.eac.track_w &&
+                sizes[k].second == o.eac.track_h)
+                continue;
+            error = "track " + std::to_string(k) + " is not the size the 360 layout"
+                    " was detected at";
+            return false;
+        }
+    }
+    std::vector<Pano360Remap> maps(o.views.size());
+    for (size_t i = 0; i < o.views.size(); i++) {
+        pano360_remap(o.eac, o.views[i], maps[i]);
+        fs::create_directories(image_dir / o.views[i].dir);
+    }
+    std::vector<uint8_t> canvas((size_t)o.eac.canvasW() * o.eac.canvasH() * 3);
+    const bool jpeg = o.quality >= 0 && o.quality <= 100;
+
+    auto on_frame = [&](std::vector<nn::Image>& track, int64_t index, std::string&) {
+        double t0 = nn::now_ms();
+        pano360_canvas(o.eac, track[0].data.data(), track[1].data.data(), canvas.data());
+        t.convert += nn::now_ms() - t0;
+        char stem[64];
+        std::snprintf(stem, sizeof(stem), "%05lld", (long long)index);
+        for (size_t i = 0; i < o.views.size(); i++) {
+            t0 = nn::now_ms();
+            WriteJob job;
+            job.image.width = maps[i].width;
+            job.image.height = maps[i].height;
+            job.image.channels = 3;
+            job.image.data.resize((size_t)maps[i].width * maps[i].height * 3);
+            pano360_apply(maps[i], canvas.data(), o.eac.canvasW(), o.eac.canvasH(), 0,
+                          job.image.data.data());
+            t.convert += nn::now_ms() - t0;
+            job.path = (image_dir / o.views[i].dir /
+                        (std::string(stem) + (jpeg ? ".jpg" : ".png"))).string();
+            job.quality = o.quality;
+            // The reel shows the first view; the others are the same instant
+            // seen the other way, and six thumbnails a frame is not what the
+            // slider is for.
+            if (i == 0 && sinks.preview)
+                sinks.preview(job.image.data.data(), job.image.width, job.image.height,
+                              job.path);
+            t0 = nn::now_ms();
+            pool.submit(std::move(job));
+            t.submit += nn::now_ms() - t0;
+            // Per view, not per frame: the count is what the progress bar is
+            // scaled against, and a plan writes six files here.
+            ++t.written;
+        }
+        return true;
+    };
+    return extract_lockstep(o, sinks, {0, 1}, video::ConvertOpts{}, t, error, on_frame);
+}
+
+// Every track of a multi-lens file at the same instants, one folder per
+// track: the rig the frames of one stem form is then a rig in fact.
+bool extract_synced(const FrameExtractJob& o, const FrameExtractSinks& sinks,
+                    const std::vector<int>& tracks, const fs::path& base, WriterPool& pool,
+                    FrameExtractStats& t, std::string& error) {
+    std::vector<fs::path> dirs;
+    for (size_t k = 0; k < tracks.size(); k++) {
+        dirs.push_back(base / ("cam" + std::to_string(k)));
+        fs::create_directories(dirs.back());
+        log_line(sinks, "track " + std::to_string(tracks[k]) + " -> " + dirs.back().string());
+    }
+    video::ConvertOpts conv;
+    conv.scale = o.scale;
+    conv.rotate = o.rotate;
+    const bool jpeg = o.quality >= 0 && o.quality <= 100;
+    auto on_frame = [&](std::vector<nn::Image>& imgs, int64_t index, std::string&) {
+        char stem[64];
+        std::snprintf(stem, sizeof(stem), "%05lld", (long long)index);
+        for (size_t k = 0; k < imgs.size(); k++) {
+            WriteJob job;
+            job.path = (dirs[k] / (std::string(stem) + (jpeg ? ".jpg" : ".png"))).string();
+            if (k == 0 && sinks.preview && imgs[k].channels == 3)
+                sinks.preview(imgs[k].data.data(), imgs[k].width, imgs[k].height, job.path);
+            job.quality = o.quality;
+            job.image = std::move(imgs[k]);
+            const double t0 = nn::now_ms();
+            pool.submit(std::move(job));
+            t.submit += nn::now_ms() - t0;
+            ++t.written;
+        }
+        return true;
+    };
+    return extract_lockstep(o, sinks, tracks, conv, t, error, on_frame);
 }
 
 }  // namespace
@@ -401,6 +460,28 @@ std::vector<std::pair<int, int>> video_track_sizes(const std::string& path,
     for (const video::TrackInfo& t : demux->tracks())
         out.emplace_back(t.width, t.height);
     return out;
+}
+
+std::vector<sfm::ExifTransform> video_track_turns(const std::string& path,
+                                                  std::string& error) {
+    std::vector<sfm::ExifTransform> out;
+    auto demux = video::open_demuxer(path, error);
+    if (!demux) return out;
+    for (const video::TrackInfo& t : demux->tracks())
+        out.push_back({((t.rotate % 360) + 360) % 360 / 90, t.mirror});
+    return out;
+}
+
+sfm::ExifTransform fold_auto_rotate(const std::string& path,
+                                    const std::vector<int>& tracks,
+                                    FrameLook& look, bool& mixed) {
+    mixed = false;
+    if (!look.auto_rotate || look.pano()) return {};
+    std::string probe_error;
+    const sfm::ExifTransform t =
+        merge_turns(video_track_turns(path, probe_error), tracks, mixed);
+    look.rotate = (look.rotate + 90 * t.turns_cw) % 360;
+    return t;
 }
 
 bool extract_frames(const FrameExtractJob& job_in, const FrameExtractSinks& sinks,
@@ -433,6 +514,11 @@ bool extract_frames(const FrameExtractJob& job_in, const FrameExtractSinks& sink
             return false;
         }
     }
+    if (job.sync_tracks && !job.mask.model.empty()) {
+        error = "masking during extraction does not support synchronized tracks;"
+                " mask the extracted frames instead";
+        return false;
+    }
 
     std::vector<int> tracks;
     if (job.track >= 0) {
@@ -446,6 +532,20 @@ bool extract_frames(const FrameExtractJob& job_in, const FrameExtractSinks& sink
         for (int i = 0; i < n; ++i) tracks.push_back(i);
     }
     stats.tracks = (int)tracks.size();
+
+    {
+        namespace lmsg = spirula::i18n::msg::log;
+        bool mixed = false;
+        const sfm::ExifTransform turn =
+            fold_auto_rotate(job.input, tracks, job, mixed);
+        if (turn.turns_cw > 0) {
+            log_line(sinks, spirula::i18n::format(
+                                lmsg::video_autorotate,
+                                {(long long)(90 * turn.turns_cw)}));
+            if (mixed) log_line(sinks, lmsg::video_autorotate_mixed.get());
+        }
+        if (turn.mirror) log_line(sinks, lmsg::video_autorotate_mirror.get());
+    }
 
     std::unique_ptr<sam::Masker> masker;
     if (!job.mask.model.empty()) {
@@ -464,11 +564,14 @@ bool extract_frames(const FrameExtractJob& job_in, const FrameExtractSinks& sink
 
     const double t_start = nn::now_ms();
     bool ok = true;
+    const bool synced = !pano && job.sync_tracks && tracks.size() > 1;
     if (pano) {
         stats.tracks = 2;
         ok = extract_pair(job, sinks, base, pool, stats, error);
+    } else if (synced) {
+        ok = extract_synced(job, sinks, tracks, base, pool, stats, error);
     }
-    for (size_t ti = 0; ti < tracks.size() && ok && !pano; ++ti) {
+    for (size_t ti = 0; ti < tracks.size() && ok && !pano && !synced; ++ti) {
         // A multi-track file (an Insta360 .insv carries two fisheye streams)
         // becomes cam0/, cam1/, ... -- one camera per folder downstream.
         const bool multi = tracks.size() > 1;
@@ -489,6 +592,171 @@ bool extract_frames(const FrameExtractJob& job_in, const FrameExtractSinks& sink
     stats.encode_cpu = pool.busyMs();
     stats.write_failures = pool.failures();
     return ok;
+}
+
+bool extract_frames_at(const std::string& input, const FrameLook& look_in,
+                       const std::vector<int64_t>& indices, int folder,
+                       const FrameAtSink& on_frame,
+                       const std::atomic<bool>* cancel, std::string& error) {
+    error = video_decode_availability();
+    if (!error.empty()) return false;
+
+    const int n = video_track_count(input, error);
+    if (n <= 0) {
+        if (error.empty()) error = "no video track in " + input;
+        return false;
+    }
+    std::vector<int64_t> want;
+    for (int64_t i : indices) want.push_back(std::max<int64_t>(i, 0));
+    std::sort(want.begin(), want.end());
+    want.erase(std::unique(want.begin(), want.end()), want.end());
+    if (want.empty()) return true;
+
+    std::vector<int> tracks;
+    for (int i = 0; i < n; i++) tracks.push_back(i);
+    FrameLook look = look_in;
+    bool mixed = false;
+    fold_auto_rotate(input, tracks, look, mixed);
+    if (look.rotate % 90 != 0) {
+        error = "rotation must be a multiple of 90 degrees";
+        return false;
+    }
+    const bool pano = look.pano();
+    if (pano && n < 2) {
+        error = "a 360 capture needs two video tracks";
+        return false;
+    }
+
+    video::ConvertOpts conv;
+    if (!pano) {
+        conv.scale = look.scale;
+        conv.rotate = look.rotate;
+    }
+    const size_t np = pano ? 2 : 1;
+    std::vector<std::unique_ptr<video::VideoPipeline>> pipe(np);
+    for (size_t k = 0; k < np; k++) {
+        pipe[k] = std::make_unique<video::VideoPipeline>();
+        const int t = pano ? (int)k : std::min(std::max(folder, 0), n - 1);
+        // Two: the frame being looked at, and the one after it, so the last
+        // picture decoded is still held when the stream ends.
+        if (!pipe[k]->open(input, t, 2, error)) return false;
+    }
+
+    Pano360Remap map;
+    std::vector<uint8_t> canvas;
+    if (pano) {
+        const size_t view =
+            std::min((size_t)std::max(folder, 0), look.views.size() - 1);
+        pano360_remap(look.eac, look.views[view], map);
+        canvas.resize((size_t)look.eac.canvasW() * look.eac.canvasH() * 3);
+    }
+
+    // Straight to the keyframe that covers the first index wanted. Without it
+    // the last frame of a fifteen-minute capture is a fifteen-minute decode,
+    // and twice that for the two tracks of a 360 file.
+    int64_t floor_index = 0;
+    for (size_t k = 0; k < np; k++) {
+        int64_t landed = 0;
+        std::string seek_error;
+        if (pipe[k]->seek(want.front(), landed, seek_error))
+            floor_index = std::max(floor_index, landed);
+    }
+
+    std::vector<video::FrameHandle> held(np);
+    auto release = [&](std::vector<video::FrameHandle>& h) {
+        for (size_t k = 0; k < np; k++)
+            if (h[k].valid()) pipe[k]->release(h[k]);
+    };
+    auto emit = [&](int64_t index) {
+        std::vector<nn::Image> img(np);
+        for (size_t k = 0; k < np; k++)
+            if (!pipe[k]->toImage(held[k], conv, img[k], error)) return false;
+        if (!pano) {
+            on_frame(img[0], index);
+            return true;
+        }
+        for (size_t k = 0; k < 2; k++)
+            if (img[k].width != look.eac.track_w ||
+                img[k].height != look.eac.track_h) {
+                error = "track " + std::to_string(k) + " is not the size the"
+                        " 360 layout was detected at";
+                return false;
+            }
+        pano360_canvas(look.eac, img[0].data.data(), img[1].data.data(),
+                       canvas.data());
+        nn::Image out;
+        out.width = map.width;
+        out.height = map.height;
+        out.channels = 3;
+        out.data.resize((size_t)map.width * map.height * 3);
+        pano360_apply(map, canvas.data(), look.eac.canvasW(),
+                      look.eac.canvasH(), 0, out.data.data());
+        on_frame(out, index);
+        return true;
+    };
+
+    size_t next = 0;
+    bool ended = false;
+    while (next < want.size() && !ended) {
+        if (cancel && cancel->load()) {
+            release(held);
+            error = "cancelled";
+            return false;
+        }
+        // Every track brought up to `floor_index` -- and no further, or a
+        // track that landed on a later keyframe than another could never be
+        // caught up with. A frame already there is left where it is.
+        for (size_t k = 0; k < np && !ended; k++) {
+            while (!held[k].valid() || held[k].index < floor_index) {
+                video::FrameHandle h;
+                if (!pipe[k]->next(h, error)) {
+                    ended = true;
+                    break;
+                }
+                if (held[k].valid()) pipe[k]->release(held[k]);
+                held[k] = h;
+            }
+        }
+        if (ended) break;
+        // Presentation order from the decoder, which is what extraction names
+        // its files after -- not a count of how many have gone by.
+        int64_t index = held[0].index;
+        bool aligned = true;
+        for (size_t k = 1; k < np; k++) {
+            index = std::max(index, held[k].index);
+            aligned = aligned && held[k].index == held[0].index;
+        }
+        floor_index = index;
+        if (!aligned) continue;   // a track is behind; pull it up next round
+        ++floor_index;
+        while (next < want.size() && want[next] < index) ++next;
+        if (next < want.size() && want[next] == index) {
+            if (!emit(index)) {
+                release(held);
+                return false;
+            }
+            ++next;
+        }
+    }
+    bool ok = error.empty();
+    if (ok && next < want.size() && held[0].valid()) ok = emit(want[next]);
+    release(held);
+    return ok;
+}
+
+bool extract_one_frame(const std::string& input, const FrameLook& look,
+                       int64_t index, int folder, nn::Image& out,
+                       const std::atomic<bool>* cancel, std::string& error) {
+    bool got = false;
+    const bool ok = extract_frames_at(
+        input, look, {index}, folder,
+        [&](nn::Image& img, int64_t) {
+            out = std::move(img);
+            got = true;
+        },
+        cancel, error);
+    if (ok && !got && error.empty()) error = "no frame could be decoded";
+    return ok && got;
 }
 
 std::string format_extract_stats(const FrameExtractStats& s,

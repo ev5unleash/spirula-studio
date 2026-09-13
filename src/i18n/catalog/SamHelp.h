@@ -872,6 +872,21 @@ SS_MSG(xh_rotate,
     RU("0, 90, 180 или 270 по часовой стрелке"),
     TR("0, 90, 180 ya da 270, saat yönünde"));
 
+SS_MSG(xh_no_autorotate,
+    EN("do not turn frames by the rotation the capture asks for"),
+    JA("撮影が指定する回転をフレームに適用しない"),
+    ZH_HANS("不按素材要求的角度旋转帧"),
+    ZH_HANT("不按素材要求的角度旋轉影格"),
+    KO("촬영본이 요구하는 회전을 프레임에 적용하지 않음"),
+    DE("Einzelbilder nicht um die von der Aufnahme verlangte Drehung drehen"),
+    FR("ne pas tourner les images selon la rotation demandée par la capture"),
+    ES("no girar los fotogramas según el giro que pide la captura"),
+    PT("não girar os fotogramas pela rotação que a captura pede"),
+    IT("non ruotare i fotogrammi secondo la rotazione chiesta dalla ripresa"),
+    NL("beelden niet draaien volgens de door de opname gevraagde rotatie"),
+    RU("не поворачивать кадры на угол, который требует съёмка"),
+    TR("kareleri çekimin istediği açıyla döndürme"));
+
 SS_MSG(xh_scale,
     EN("resize factor, at most 1"),
     JA("リサイズ倍率。1 以下"),
@@ -886,6 +901,38 @@ SS_MSG(xh_scale,
     NL("schaalfactor, hoogstens 1"),
     RU("коэффициент масштабирования, не больше 1"),
     TR("yeniden boyutlandırma katsayısı, en çok 1"));
+
+SS_MSG(xh_sync,
+    EN("decode a multi-track file in lockstep so every track keeps the same instants "
+       "(one sharpness window over all of them); the frames of one stem are then a rig"),
+    JA("複数トラックのファイルを同期して読み、全トラックで同じ瞬間を残します（シャープさの判定窓は"
+       "全トラック共通）。同じステムのフレームがリグになります"),
+    ZH_HANS("多轨道文件同步解码，让每条轨道保留相同时刻（清晰度窗口对所有轨道共用）；同一文件名的帧"
+            "就构成装置"),
+    ZH_HANT("多軌道檔案同步解碼，讓每條軌道保留相同時刻（清晰度視窗對所有軌道共用）；同一檔名的幀"
+            "就構成裝置"),
+    KO("다중 트랙 파일을 맞물려 디코딩해 모든 트랙이 같은 순간을 남기게 합니다(선명도 창은 전체 "
+       "트랙에 하나). 같은 이름의 프레임이 리그가 됩니다"),
+    DE("eine Mehrspur-Datei im Gleichschritt lesen, sodass jede Spur dieselben Augenblicke "
+       "behält (ein Schärfefenster über alle); die Bilder eines Stamms sind dann ein Rig"),
+    FR("décoder un fichier multipiste en synchronisme pour que chaque piste garde les mêmes "
+       "instants (une fenêtre de netteté sur toutes) ; les images d'un même nom forment "
+       "alors un rig"),
+    ES("decodificar un archivo multipista al unísono para que cada pista conserve los mismos "
+       "instantes (una ventana de nitidez sobre todas); los fotogramas de un mismo nombre "
+       "forman entonces un rig"),
+    PT("decodificar um ficheiro multipista em sincronia para que cada pista guarde os mesmos "
+       "instantes (uma janela de nitidez sobre todas); os quadros de um mesmo nome formam "
+       "então um rig"),
+    IT("decodificare un file multitraccia in sincronia perché ogni traccia tenga gli stessi "
+       "istanti (una finestra di nitidezza su tutte); i fotogrammi di uno stesso nome sono "
+       "allora un rig"),
+    NL("een meersporenbestand gelijkop decoderen zodat elk spoor dezelfde momenten houdt (één "
+       "scherptevenster over alle); de beelden van één naam vormen dan een rig"),
+    RU("декодировать многодорожечный файл синхронно, чтобы каждая дорожка сохраняла те же "
+       "мгновения (одно окно резкости на все); кадры с одним именем тогда образуют риг"),
+    TR("çok izli bir dosyayı adım adım birlikte çözerek her izin aynı anları tutmasını sağla "
+       "(tüm izler için tek keskinlik penceresi); aynı adlı kareler böylece bir rig olur"));
 
 SS_MSG(xh_track,
     EN("video track to read; default is every track, written to <out>/cam0, "

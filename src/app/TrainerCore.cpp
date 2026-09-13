@@ -828,18 +828,6 @@ std::string train_config_unsupported(const TrainConfig& c) {
     return {};
 }
 
-std::string format_duration(double seconds) {
-    if (seconds < 0) return "--:--";
-    int t = (int)(seconds + 0.5);
-    char buf[32];
-    if (t >= 3600)
-        std::snprintf(buf, sizeof buf, "%d:%02d:%02d", t / 3600, (t / 60) % 60,
-                      t % 60);
-    else
-        std::snprintf(buf, sizeof buf, "%d:%02d", t / 60, t % 60);
-    return buf;
-}
-
 // Unported-feature guards: fail early rather than ignore a flag.
 void TrainerSession::check_config() {
     if (std::string what = train_config_unsupported(cfg); !what.empty())
@@ -867,9 +855,10 @@ DatasetParserConfig parser_config(const TrainConfig& cfg, bool eval) {
     pcfg.eval_mode = cfg.eval_mode;
     pcfg.eval_interval = cfg.eval_interval;
     pcfg.train_split_fraction = cfg.train_split_fraction;
-    pcfg.outlier_threshold = cfg.outlier_threshold;
-    pcfg.center_mode = cfg.scene_center;
-    pcfg.probe_image_size = probe_image_size;
+    pcfg.outlier_threshold    = cfg.outlier_threshold;
+    pcfg.center_mode          = cfg.scene_center;
+    pcfg.exif_orientation     = cfg.exif_orientation;
+    pcfg.probe_image_size        = probe_image_size;
     pcfg.train_resolution_divisor = cfg.train_resolution_divisor;
     pcfg.downscale_rounding_mode = cfg.downscale_rounding_mode;
     pcfg.metashape_xml = cfg.metashape_xml;
@@ -1795,6 +1784,7 @@ void TrainerSession::setup_engine() {
     dm.max_faces_per_pass = max_faces_per_pass;
     dm.flip_mask = cfg.flip_mask;
     dm.mask_boundary_offset = cfg.mask_boundary_offset;
+    dm.exif_quarter_turns = ds.exif_quarter_turns;
     engine_setup_data_manager(
         dm, ds.camera_models, ds.camera_distortions,
         ds.image_filenames,
@@ -2312,6 +2302,7 @@ void TrainerSession::eval() {
     dm.max_faces_per_pass = 1;
     dm.flip_mask = cfg.flip_mask;
     dm.mask_boundary_offset = cfg.mask_boundary_offset;
+    dm.exif_quarter_turns = eds.exif_quarter_turns;
     std::vector<int32_t> all_idx((size_t)eds.num_cameras);
     std::iota(all_idx.begin(), all_idx.end(), 0);
 

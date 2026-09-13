@@ -79,8 +79,10 @@ void usage() {
     help_row("-n, --max-frames <n>", H::xh_max_frames);
     help_row("-q, --quality <0..100>", H::xh_quality);
     help_row("-r, --rotate <deg>", H::xh_rotate);
+    help_row("    --no-autorotate", H::xh_no_autorotate);
     help_row("    --scale <f>", H::xh_scale);
     help_row("    --track <i>", H::xh_track);
+    help_row("    --sync", H::xh_sync);
     help_row("    --threads <n>", H::xh_threads);
 
     std::fprintf(stderr, "\n%s\n", H::xh_360_section.get());
@@ -112,8 +114,10 @@ struct Options {
     std::string out_dir, mask_dir;
     int    skip = 1, keep = -1, max_frames = 0;
     int    quality = 95, rotate = 0;
+    bool   auto_rotate = true;
     float  scale = 1.0f;
     int    track = -1;
+    bool   sync = false;
     int    threads = 0;
 
     std::string pano_mode = "faces";
@@ -148,8 +152,11 @@ bool parse_args(int argc, char** argv, Options& o) {
         else if (a == "-n" || a == "--max-frames") o.max_frames = std::atoi(next("--max-frames"));
         else if (a == "-q" || a == "--quality") o.quality = std::atoi(next("--quality"));
         else if (a == "-r" || a == "--rotate") o.rotate = std::atoi(next("--rotate"));
+        else if (a == "--no-autorotate") o.auto_rotate = false;
+        else if (a == "--autorotate") o.auto_rotate = true;
         else if (a == "--scale") o.scale = std::strtof(next("--scale"), nullptr);
         else if (a == "--track") o.track = std::atoi(next("--track"));
+        else if (a == "--sync") o.sync = true;
         else if (a == "--threads") o.threads = std::atoi(next("--threads"));
         else if (a == "--360") o.pano_mode = next("--360");
         else if (a == "--360-size") o.pano.size = std::atoi(next("--360-size"));
@@ -241,8 +248,10 @@ int sam_cli_extract(int argc, char** argv) {
     job.max_frames = o.max_frames;
     job.quality = o.quality;
     job.rotate = o.rotate;
+    job.auto_rotate = o.auto_rotate;
     job.scale = o.scale;
     job.track = o.track;
+    job.sync_tracks = o.sync;
     job.threads = o.threads;
     job.write_overlay = o.overlay;
     // A 360 file is recognised by its packing, not by its name, and only then

@@ -56,6 +56,7 @@
 #include "sfm/map/SensorGauge.h"
 #include "sfm/map/Merge.h"
 
+#include "i18n/TimeFormat.h"
 #include "i18n/catalog/Sfm.h"
 
 namespace fs = std::filesystem;
@@ -65,6 +66,7 @@ namespace sfm {
 namespace L = sfm::slog;
 namespace M = spirula::i18n::msg::sfm;
 using sfm::slog::Tag;
+using spirula::i18n::format_duration;
 
 bool isImageExt(const std::string& e) {
     std::string s;
@@ -162,6 +164,7 @@ void finishFeatures(FeatureSet& fs, const GrayImage& img) {
     scaleKeypoints(fs, img.orig_width, img.orig_height);
     fs.exif_focal = exifFocalPx(img.exif, fs.width, fs.height);
     fs.exif_camera = exifCameraKey(img.exif, fs.width, fs.height);
+    fs.exif_orientation = (uint8_t)img.exif.orientation;
 }
 
 // Why a metric fit was refused, with the numbers, so one line is a complete
@@ -344,6 +347,10 @@ bool fixGauge(std::vector<Reconstruction>& models, const SfmConfig& cfg,
     const bool gps = cfg.metric_gps != "none";
     const bool flat = cfg.metric_gps == "horizontal";
     const bool file = !cfg.metric_positions.empty();
+    // A portrait capture's up is 90 degrees off its images'; `apply` already
+    // turned the pixels, so only `orient` corrects anything. The tags arrive on
+    // the models; a caller that read them off disk calls fillExifOrientations.
+    const bool exif_up = cfg.exif_orientation == "orient";
 
     // `gauge[i]` is the state, not just the record: `oriented` and `metric` say
     // what a source has already settled, and every source below reads them
@@ -359,6 +366,7 @@ bool fixGauge(std::vector<Reconstruction>& models, const SfmConfig& cfg,
         opt.mode = cfg.sensor_gauge == "up" ? SensorMode::Up : SensorMode::Auto;
         opt.gps_full = cfg.metric_gps == "full";
         opt.gps_max_error = gps ? cfg.metric_max_error : 5.0;
+        opt.gps_max_error_frac = cfg.metric_max_error_frac;
         opt.verbose = verbose;
         for (size_t i = 0; i < models.size(); i++) {
             const SensorGaugeResult r = fitSensorGauge(models[i], caps, opt);
@@ -406,11 +414,13 @@ bool fixGauge(std::vector<Reconstruction>& models, const SfmConfig& cfg,
         // Horizontal mode takes the tilt from the caller's up axis, so its fit
         // -- scale, heading and place -- runs in an upright frame. Where a
         // sensor already levelled the model, that frame is the one it is in.
-        const Sim3 pre = flat && !gauge[i].oriented ? uprightTransform(models[i]) : Sim3{};
+        const Sim3 pre =
+            flat && !gauge[i].oriented ? uprightTransform(models[i], exif_up) : Sim3{};
         for (Vec3& c : ref.centres) c = transformPoint(pre, c);
         const MetricFit fit =
             fitMetricGauge(ref, cfg.metric_max_error,
-                           flat ? MetricAxes::Horizontal : MetricAxes::Full);
+                           flat ? MetricAxes::Horizontal : MetricAxes::Full,
+                           cfg.metric_max_error_frac);
         // A refused fit leaves the model in the frame it came in with -- the
         // sensors', or the normalized one the fallback below writes. Applying
         // the identity it returns would still claim the metre.
@@ -464,8 +474,8 @@ bool fixGauge(std::vector<Reconstruction>& models, const SfmConfig& cfg,
     if (cfg.orient)
         for (size_t i = 0; i < models.size(); i++) {
             if (gauge[i].oriented || gauge[i].metric) continue;
-            const Sim3 T = orientModel(models[i]);
-            gauge[i].up = "cameras";
+            const Sim3 T = orientModel(models[i], exif_up);
+            gauge[i].up = exif_up ? "cameras+exif" : "cameras";
             if (verbose) L::err(Tag::Orient, M::orient_done, {(long long)i, L::num(T.scale, 4)});
         }
     return true;
@@ -581,16 +591,43 @@ void writeGauge(const fs::path& dir, const ModelGauge& g) {
     if (g.scale_sigma > 0) f << "scale_sigma " << g.scale_sigma << "\n";
 }
 
+// rigs.txt beside a model that used one: each member's cam_from_rig as the
+// run settled it, in the model's own units -- what a later run could be
+// handed back as a manifest's `rotation` / `translation`.
+void writeRigs(const fs::path& dir, const Reconstruction& m, const RigTable* rigs) {
+    if (!rigs || m.rigs.empty()) return;
+    std::ofstream f(dir / "rigs.txt", std::ios::trunc);
+    if (!f) return;
+    f << "# Rig calibration from spirula sfm, cam_from_rig per member as\n"
+         "# rig member reference qw qx qy qz tx ty tz frames spread_deg, in this model's units.\n";
+    f.precision(12);
+    for (size_t r = 0; r < rigs->rigs.size() && r < m.rigs.size(); r++) {
+        const RigSpec& spec = rigs->rigs[r];
+        const RigCalib& c = m.rigs[r];
+        if (c.ref < 0) continue;
+        for (size_t k = 0; k < spec.members.size() && k < c.cam_from_rig.size(); k++) {
+            if (!c.established[k]) continue;
+            const Quat q = rotationToQuaternion(c.cam_from_rig[k].R);
+            const Vec3& t = c.cam_from_rig[k].t;
+            f << spec.name << ' ' << spec.members[k].prefix << ' '
+              << spec.members[(size_t)c.ref].prefix << ' ' << q[0] << ' ' << q[1] << ' ' << q[2]
+              << ' ' << q[3] << ' ' << t.x << ' ' << t.y << ' ' << t.z << ' ' << c.support[k]
+              << ' ' << c.spread_deg[k] << "\n";
+        }
+    }
+}
+
 // Every reconstruction as <dir>/0, <dir>/1, ... (D41) -- COLMAP's layout for a
 // view graph that is not connected. `sparse/0` has the most 3D points, so a
 // single-model dataset still writes exactly `sparse/0`.
 void writeModels(const std::vector<Reconstruction>& models, const fs::path& dir,
-                 bool verbose, const std::vector<ModelGauge>& gauge) {
+                 bool verbose, const std::vector<ModelGauge>& gauge, const RigTable* rigs) {
     for (size_t i = 0; i < models.size(); i++) {
         fs::path p = dir / std::to_string(i);
         fs::create_directories(p);
         models[i].writeBinary(p.string());
         if (i < gauge.size()) writeGauge(p, gauge[i]);
+        writeRigs(p, models[i], rigs);
         if (verbose)
             L::err(Tag::Map, M::map_wrote_model,
                    {(long long)i, (long long)models[i].numRegistered(),
@@ -725,20 +762,44 @@ void printAssembly(const AssembleStats& ast, size_t models, Tag tag) {
     if (!ast.models_in) return;
     const ManagerStats& f = ast.finish;
     L::out(tag, M::map_assembled,
-           {L::num(ast.t_merge + ast.t_ba + ast.t_grow + ast.finishSecs(), 2),
+           {format_duration(ast.t_merge + ast.t_ba + ast.t_grow + ast.finishSecs()),
             (long long)ast.models_in,
             (long long)models, (long long)ast.rounds, (long long)ast.merges,
             (long long)ast.merges_refused, (long long)ast.grown_images,
             (long long)f.covered_before, (long long)f.covered_after});
     L::out(tag, M::map_finishing,
-           {L::num(ast.finishSecs(), 1), (long long)f.splits, (long long)f.duplicate_splits,
-            (long long)f.reseeded_models, (long long)f.dropped_redundant,
-            (long long)f.audited_repaired, (long long)f.audited_out});
+           {format_duration(ast.finishSecs()), (long long)f.splits,
+            (long long)f.duplicate_splits, (long long)f.reseeded_models,
+            (long long)f.dropped_redundant, (long long)f.audited_repaired,
+            (long long)f.audited_out});
 }
 
 // Flat or bottom-up, per --mapper; flat is the default and what the
 // measurements are on. Either way the same schedule assembles the models (D63,
 // sfm/map/Assemble.h) -- there is no separate manage stage.
+RigTable buildRigs(const MatchesDatabase& db, const SfmConfig& cfg, bool verbose) {
+    std::vector<std::string> names;
+    names.reserve(db.images.size());
+    for (const ImageEntry& im : db.images) names.push_back(im.name);
+    RigTable rigs = buildRigTable(names, cfg.rigs);
+    if (!verbose) return rigs;
+    for (const RigSpec& r : rigs.rigs) {
+        size_t full = 0;
+        for (const auto& fr : r.frames) {
+            bool all = true;
+            for (uint32_t img : fr) all = all && img != kNoImage;
+            full += all ? 1 : 0;
+        }
+        std::string members;
+        for (const RigMemberDef& m : r.members)
+            members += (members.empty() ? "" : ", ") + m.prefix;
+        L::out(Tag::Map, M::rig_table,
+               {r.name, members, (long long)r.frames.size(), (long long)full,
+                r.anyKnownExt() ? M::rig_ext_given.get() : M::rig_ext_estimated.get()});
+    }
+    return rigs;
+}
+
 std::vector<Reconstruction> runMapper(Mapper& mapper, const MatchesDatabase& db,
                                       const std::vector<FeatureSet>& feats, SfmConfig& cfg,
                                       AssembleStats& ast) {
@@ -780,7 +841,7 @@ std::vector<Reconstruction> finishModels(Mapper& mapper,
                 m = mapper.polish(m, cfg.final_principal_point, cfg.final_extra_params);
         if (verbose)
             L::err(Tag::Map, M::map_final_intrinsics,
-                   {(long long)models.size(), L::num(now() - t0, 1)});
+                   {(long long)models.size(), format_duration(now() - t0)});
     }
     if (cfg.final_per_image_intrinsics) {
         const double t1 = now();
@@ -788,7 +849,14 @@ std::vector<Reconstruction> finishModels(Mapper& mapper,
             m = mapper.perImageIntrinsics(m, cfg.final_extra_params);
         if (verbose)
             L::err(Tag::Map, M::map_per_image_done,
-                   {(long long)models.size(), L::num(now() - t1, 1)});
+                   {(long long)models.size(), format_duration(now() - t1)});
+    }
+    if (cfg.final_free_rig && mapper.rigs()) {
+        const double t1 = now();
+        for (Reconstruction& m : models) m = mapper.releaseRigs(m);
+        if (verbose)
+            L::err(Tag::Map, M::map_free_rig_done,
+                   {(long long)models.size(), format_duration(now() - t1)});
     }
     secs = now() - t0;
     return models;
@@ -865,15 +933,69 @@ void checkMaskShape(const std::string& mask_path, const Mask& m,
 // warning, not a flip -- an object-centric capture masks away all but the
 // object, and only the user knows which they have.
 void warnIfMasksLookInverted(const ExtractStats& st) {
-    const uint64_t before = st.features + st.masked_out;
+    // Over the images this run extracted: a resumed one cannot know what a
+    // mask took out of a feature file somebody else wrote.
+    const uint64_t before = st.features_new + st.masked_out;
     if (!st.masked_images || before == 0) return;
     const double dropped = (double)st.masked_out / (double)before;
     if (dropped < 0.7) return;
     L::warn(Tag::Extract, M::extract_masks_look_inverted, {(long long)(100.0 * dropped)});
 }
 
+namespace {
+
+// The feature files as matching indexes them -- name, size and write time --
+// folded into one token, since its leftovers are indices into this set. The
+// write time is what sees a RE-extracted image: its size is the same budget.
+std::string featureDirDigest(const fs::path& featdir) {
+    std::vector<std::string> rows;
+    std::error_code walk, ec;
+    for (auto it = fs::recursive_directory_iterator(featdir, walk);
+         !walk && it != fs::recursive_directory_iterator(); it.increment(walk))
+        if (it->is_regular_file(ec))
+            rows.push_back(
+                it->path().generic_string() + ":" +
+                std::to_string((uint64_t)fs::file_size(it->path(), ec)) + ":" +
+                std::to_string((int64_t)fs::last_write_time(it->path(), ec)
+                                   .time_since_epoch()
+                                   .count()));
+    std::sort(rows.begin(), rows.end());
+    uint64_t h = 1469598103934665603ull;   // FNV-1a
+    for (const std::string& s : rows)
+        for (unsigned char c : s) { h ^= c; h *= 1099511628211ull; }
+    char buf[24];
+    std::snprintf(buf, sizeof buf, "%016llx.%zu", (unsigned long long)h, rows.size());
+    return buf;
+}
+
+// Anything under `outdir` that is not one of `live`: matching reads every .bin
+// in the tree, and one left for an image this run no longer has joins it as a
+// phantom view.
+void sweepStaleFeatures(const fs::path& outdir, const std::set<fs::path>& live) {
+    std::error_code walk, ec;
+    std::vector<fs::path> dead;
+    for (auto it = fs::recursive_directory_iterator(outdir, walk);
+         !walk && it != fs::recursive_directory_iterator(); it.increment(walk))
+        if (it->is_regular_file(ec) && !live.count(it->path())) dead.push_back(it->path());
+    for (const fs::path& p : dead) fs::remove(p, ec);
+}
+
+// Is `feat` a whole feature file that describes `img` as it stands now? An
+// mtime comparison, because a re-run that regenerated the frames or the masks
+// leaves everything else about the settings identical.
+bool featuresAreCurrent(const fs::path& feat, const fs::path& img,
+                        const std::string& mask, uint32_t& count) {
+    std::error_code fe, ie, me;
+    const auto t = fs::last_write_time(feat, fe);
+    if (fe || t < fs::last_write_time(img, ie) || ie) return false;
+    if (!mask.empty() && t < fs::last_write_time(mask, me) && !me) return false;
+    return peekFeatures(feat.string(), count);
+}
+
+}  // namespace
+
 int extractDirectory(const std::string& imagedir, const fs::path& outdir,
-                     const SfmConfig& cfg, ExtractStats& stats) {
+                     const SfmConfig& cfg, ExtractStats& stats, bool reuse) {
     const SiftOptions& opt = cfg.sift;
     const std::string& maskdir = cfg.mask_dir;
     // Recursive: per-folder intrinsics (ppisp) keep images in images/<camera>/
@@ -941,6 +1063,7 @@ int extractDirectory(const std::string& imagedir, const fs::path& outdir,
     lopt.gamut = cfg.image_gamut;
     lopt.is_linear = cfg.image_is_linear;
     lopt.flip_mask = cfg.flip_mask;
+    lopt.apply_exif_orientation = cfg.exif_orientation == "apply";
     if (cfg.decode_budget_mb > 0)
         lopt.memory_budget_bytes = (size_t)cfg.decode_budget_mb << 20;
 
@@ -973,6 +1096,66 @@ int extractDirectory(const std::string& imagedir, const fs::path& outdir,
             L::warn(Tag::Extract, M::extract_some_unmasked,
                     {(long long)stats.unmasked_images, stats.first_unmasked});
     }
+
+    // Where each image's features belong, and what a previous run already put
+    // there. The total the bar counts is the capture, not the work left.
+    const size_t n_all = paths.size();
+    std::vector<fs::path> outs(n_all);
+    std::set<fs::path> live;
+    for (size_t k = 0; k < n_all; k++) {
+        outs[k] = outdir / relativeTo(paths[k], imagedir);
+        outs[k].replace_extension(".bin");
+        live.insert(outs[k]);
+    }
+    sweepStaleFeatures(outdir, live);
+
+    events::stage_begin(Stage::Extract, (int64_t)n_all);
+    if (reuse) {
+        std::vector<size_t> todo;
+        for (size_t k = 0; k < n_all; k++) {
+            uint32_t count = 0;
+            const std::string mask =
+                k < lopt.mask_paths.size() ? lopt.mask_paths[k] : std::string();
+            if (!featuresAreCurrent(outs[k], paths[k], mask, count)) {
+                todo.push_back(k);
+                continue;
+            }
+            stats.reused++;
+            stats.features += count;
+            stats.images++;
+            Event ev;
+            ev.kind = Event::Kind::ImageExtracted;
+            ev.stage = Stage::Extract;
+            ev.done = (int64_t)stats.images;
+            ev.total = (int64_t)n_all;
+            ev.name = fs::path(paths[k]).filename().string();
+            ev.width = sorted_dims[k].first;
+            ev.height = sorted_dims[k].second;
+            ev.features = count;
+            events::emit(ev);
+        }
+        if (stats.reused) {
+            L::out(Tag::Extract, M::extract_reusing,
+                   {(long long)stats.reused, (long long)n_all});
+            for (size_t i = 0; i < todo.size(); i++) {
+                const size_t k = todo[i];
+                if (k == i) continue;   // self-move empties a std::string
+                paths[i] = std::move(paths[k]);
+                sorted_dims[i] = sorted_dims[k];
+                outs[i] = std::move(outs[k]);
+                if (!lopt.mask_paths.empty()) lopt.mask_paths[i] = std::move(lopt.mask_paths[k]);
+            }
+            paths.resize(todo.size());
+            sorted_dims.resize(todo.size());
+            outs.resize(todo.size());
+            if (!lopt.mask_paths.empty()) lopt.mask_paths.resize(todo.size());
+        }
+    }
+    if (paths.empty()) {
+        events::stage_end(Stage::Extract);
+        return 0;
+    }
+
     ImageLoadPlan plan = planImageLoad(sorted_dims, lopt);
     if (opt.verbose)
         L::err(Tag::Extract, M::extract_plan,
@@ -981,7 +1164,6 @@ int extractDirectory(const std::string& imagedir, const fs::path& outdir,
                 (long long)(((size_t)plan.num_threads * plan.decode_peak_bytes +
                              (size_t)plan.window * plan.held_bytes) >> 20)});
 
-    events::stage_begin(Stage::Extract, (int64_t)paths.size());
     std::unique_ptr<IFeatureExtractor> ext =
         createFeatureExtractor(cfg.features, opt, cfg.aliked, cfg.loma);
     if (opt.verbose) L::err(Tag::Extract, M::extract_frontend, {ext->name()});
@@ -989,6 +1171,11 @@ int extractDirectory(const std::string& imagedir, const fs::path& outdir,
         paths, plan, lopt,
         [&](size_t k, GrayImage& img) {
             cancel::check();
+            if (img.exif_mirror_dropped && !stats.warned_exif_mirror) {
+                stats.warned_exif_mirror = true;
+                L::warn(Tag::Extract, M::extract_exif_mirror_dropped,
+                        {fs::path(paths[k]).filename().string()});
+            }
             FeatureSet f = ext->extract(img);
             sampleFeatureColors(f, img);
             uint32_t dropped = 0;
@@ -999,7 +1186,9 @@ int extractDirectory(const std::string& imagedir, const fs::path& outdir,
                             {lopt.mask_paths[k],
                              fs::path(paths[k]).filename().string()});
                 } else {
-                    checkMaskShape(lopt.mask_paths[k], img.mask, sorted_dims[k]);
+                    // img's own size, not the probed one: `apply` turned both.
+                    checkMaskShape(lopt.mask_paths[k], img.mask,
+                                   {img.orig_width, img.orig_height});
                     const uint32_t before = f.count();
                     dropped = applyMask(f, img.mask);
                     stats.masked_out += dropped;
@@ -1018,21 +1207,19 @@ int extractDirectory(const std::string& imagedir, const fs::path& outdir,
             // describes the user's images and not the working copy. Everything
             // reading a keypoint against the decoded image has already run.
             finishFeatures(f, img);
-            fs::path rel = relativeTo(paths[k], imagedir);
-            fs::path out = outdir / rel;
-            out.replace_extension(".bin");
-            fs::create_directories(out.parent_path());
-            writeFeatures(out.string(), f);
+            fs::create_directories(outs[k].parent_path());
+            writeFeatures(outs[k].string(), f);
             stats.features += f.count();
+            stats.features_new += f.count();
             stats.images++;
             Event ev;
             ev.kind = Event::Kind::ImageExtracted;
             ev.stage = Stage::Extract;
             ev.done = stats.images;
-            ev.total = (int64_t)paths.size();
+            ev.total = (int64_t)n_all;
             ev.name = fs::path(paths[k]).filename().string();
-            ev.width = sorted_dims[k].first;
-            ev.height = sorted_dims[k].second;
+            ev.width = img.orig_width;
+            ev.height = img.orig_height;
             ev.features = f.count();
             ev.masked = dropped;
             events::emit(ev);
@@ -1055,21 +1242,18 @@ int extractDirectory(const std::string& imagedir, const fs::path& outdir,
 
 
 
-int matchFeatureDir(const std::string& featdir, const SfmConfig& cfg, PairMode mode,
-                    bool verify, std::vector<FeatureSet>& feats, MatchesDatabase& db,
-                    MatchStats& stats, VerifyCalibration* calib) {
-    const MatchOptions& opt = cfg.match;
-    const PairSelectionOptions& popt = cfg.prefilter;
-    const TwoViewOptions& tvopt = cfg.twoview;
-    const bool verbose = !cfg.quiet;
-    // Load every features.bin under the directory (recursively -- the tree
-    // mirrors the image tree), sorted by name for stable indices. The image
-    // name is the relative path without ".bin", which is also COLMAP's
-    // convention for `images.bin` names.
+int loadFeatureDir(const std::string& featdir, const SfmConfig& cfg, bool with_descriptors,
+                   std::vector<FeatureSet>& feats, MatchesDatabase& db) {
+    // Recursively -- the tree mirrors the image tree -- sorted by name for
+    // stable indices. The image name is the relative path without ".bin",
+    // which is also COLMAP's convention for `images.bin` names.
     std::vector<fs::path> files;
-    for (const auto& e : fs::recursive_directory_iterator(featdir))
-        if (e.is_regular_file() && e.path().extension() == ".bin" && !isSidecar(e.path()))
-            files.push_back(e.path());
+    std::error_code walk, ec;
+    for (auto it = fs::recursive_directory_iterator(featdir, walk);
+         !walk && it != fs::recursive_directory_iterator(); it.increment(walk))
+        if (it->is_regular_file(ec) && it->path().extension() == ".bin" &&
+            !isSidecar(it->path()))
+            files.push_back(it->path());
     std::sort(files.begin(), files.end());
     if (files.size() < 2) {
         L::fail(Tag::Match, M::match_need_two, {featdir});
@@ -1081,26 +1265,32 @@ int matchFeatureDir(const std::string& featdir, const SfmConfig& cfg, PairMode m
     // so the image order is the sorted file order either way.
     feats.assign(files.size(), FeatureSet());
     db.images.resize(files.size());
+    events::stage_begin(Stage::Load, (int64_t)files.size());
     {
         const unsigned hc = std::thread::hardware_concurrency();
         int nt = cfg.threads > 0 ? cfg.threads : (hc > 0 ? (int)hc : 1);
         nt = std::max(1, std::min<int>(nt, (int)files.size()));
-        std::atomic<size_t> next{0};
+        std::atomic<size_t> next{0}, done{0};
         std::mutex err_mtx;
         std::string first_error;  // a bad file must still report itself, not terminate
         std::vector<std::thread> pool;
+        const size_t step = std::max<size_t>(1, files.size() / 200);
         for (int t = 0; t < nt; t++)
             pool.emplace_back([&] {
                 for (size_t i = next++; i < files.size(); i = next++) {
                     try {
-                        feats[i] = readFeatures(files[i].string());
+                        feats[i] = readFeatures(files[i].string(), with_descriptors);
                     } catch (const std::exception& e) {
                         std::lock_guard<std::mutex> lk(err_mtx);
                         if (first_error.empty()) first_error = e.what();
                     }
+                    const size_t n = ++done;
+                    if (n % step == 0 || n == files.size())
+                        events::progress(Stage::Load, (int64_t)n, (int64_t)files.size());
                 }
             });
         for (std::thread& t : pool) t.join();
+        events::stage_end(Stage::Load);
         if (!first_error.empty()) {
             L::err_raw(Tag::Match, first_error);
             return 1;
@@ -1111,41 +1301,68 @@ int matchFeatureDir(const std::string& featdir, const SfmConfig& cfg, PairMode m
         rel.replace_extension();
         db.images[i] = {rel.generic_string(), feats[i].count()};
     }
-    stats.images = files.size();
+    return 0;
+}
+
+int matchFeatureDir(const std::string& featdir, const SfmConfig& cfg, PairMode mode,
+                    bool verify, std::vector<FeatureSet>& feats, MatchesDatabase& db,
+                    MatchStats& stats, VerifyCalibration* calib,
+                    const MatchResume* res) {
+    const MatchOptions& opt = cfg.match;
+    const PairSelectionOptions& popt = cfg.prefilter;
+    const TwoViewOptions& tvopt = cfg.twoview;
+    const bool verbose = !cfg.quiet;
+    if (int rc = loadFeatureDir(featdir, cfg, /*with_descriptors=*/true, feats, db)) return rc;
+    const size_t n_images = feats.size();
+    stats.images = n_images;
 
     std::vector<std::pair<uint32_t, uint32_t>> pairs;
-    std::function<void(size_t, size_t)> sp;
-    if (verbose)
-        sp = [&](size_t done, size_t total) {
-            // Redrawn in place, so it carries the tag itself rather than
-            // going through L::err(), which always ends its line.
-            fprintf(stderr, "\r%s%s", L::prefix(Tag::Match).c_str(),
-                    spirula::i18n::format(M::match_pairs_scored,
-                                 {(long long)done, (long long)total}).c_str());
-        };
-    if (mode == PairMode::Prefilter) {
-        stats.scored = files.size() * (files.size() - 1) / 2;
+    // Pair selection is minutes on a large capture and used to look like a
+    // frozen program between the two stages that have a bar; it reports through
+    // the same event stream everything else does.
+    std::function<void(size_t, size_t)> sp = [&](size_t done, size_t total) {
+        events::progress(Stage::Select, (int64_t)done, (int64_t)total);
+        if (!verbose) return;
+        // Redrawn in place, so it carries the tag itself rather than
+        // going through L::err(), which always ends its line.
+        fprintf(stderr, "\r%s%s", L::prefix(Tag::Match).c_str(),
+                spirula::i18n::format(M::match_pairs_scored,
+                             {(long long)done, (long long)total}).c_str());
+    };
+    // A pair list an interrupted run already chose. Selecting it again is a
+    // fraction of matching, but not a small one, and it has to produce the same
+    // list for the journal below to line up with it.
+    const bool reused_pairs =
+        res && resume::readPairs(res->dir / "pairs.bin", res->signature, pairs);
+    if (reused_pairs) {
+        L::out(Tag::Match, M::match_reusing_pairs, {(long long)pairs.size()});
+    } else if (mode == PairMode::Prefilter) {
+        stats.scored = n_images * (n_images - 1) / 2;
         double t0 = now();
+        events::stage_begin(Stage::Select, (int64_t)(n_images * (n_images - 1)));
         pairs = prefilterPairs(feats, popt, sp);
+        events::stage_end(Stage::Select);
         stats.select_seconds = now() - t0;
         if (verbose)
             fprintf(stderr, "\n");
             L::err(Tag::Match, M::match_prefilter_kept,
                    {(long long)pairs.size(), (long long)stats.scored,
                     popt.num_features, popt.num_neighbors,
-                    L::num(stats.select_seconds, 1)});
+                    format_duration(stats.select_seconds)});
     } else {
-        pairs = generatePairs((uint32_t)files.size(), mode, cfg.overlap);
+        pairs = generatePairs((uint32_t)n_images, mode, cfg.overlap);
         // Loop closure. A sequential chain has no link between the start and
         // end of a walk that comes back on itself, so one weak step splits the
         // reconstruction; the pair-selection shortlist supplies the missing
         // links from image content, the way COLMAP's loop_detection does from a
         // vocabulary tree. Exhaustive already has every pair.
-        if (mode == PairMode::Sequential && cfg.loop_closure && files.size() > 2) {
+        if (mode == PairMode::Sequential && cfg.loop_closure && n_images > 2) {
             const size_t seq = pairs.size();
-            stats.scored = files.size() * (files.size() - 1) / 2;
+            stats.scored = n_images * (n_images - 1) / 2;
             double t0 = now();
+            events::stage_begin(Stage::Select, (int64_t)(n_images * (n_images - 1)));
             std::vector<std::pair<uint32_t, uint32_t>> extra = prefilterPairs(feats, popt, sp);
+            events::stage_end(Stage::Select);
             stats.select_seconds = now() - t0;
             pairs.insert(pairs.end(), extra.begin(), extra.end());
             std::sort(pairs.begin(), pairs.end());
@@ -1155,13 +1372,14 @@ int matchFeatureDir(const std::string& featdir, const SfmConfig& cfg, PairMode m
                 L::err(Tag::Match, M::match_loop_closure_added,
                        {(long long)(pairs.size() - seq), (long long)seq,
                         (long long)extra.size(),
-                        L::num(stats.select_seconds, 1)});
+                        format_duration(stats.select_seconds)});
         }
     }
+    if (res && !reused_pairs) resume::writePairs(res->dir / "pairs.bin", res->signature, pairs);
     stats.pairs = pairs.size();
     if (verbose)
         L::err(Tag::Match, M::match_plan,
-               {(long long)files.size(), (long long)pairs.size(),
+               {(long long)n_images, (long long)pairs.size(),
                 mode == PairMode::Exhaustive ? "exhaustive"
                 : mode == PairMode::Sequential
                     ? (cfg.loop_closure ? "sequential + loop closure" : "sequential")
@@ -1170,12 +1388,33 @@ int matchFeatureDir(const std::string& featdir, const SfmConfig& cfg, PairMode m
         L::err(Tag::Match, M::match_prefilter_params,
                {popt.num_features, popt.num_neighbors});
 
+    // What an interrupted verification already finished, and so the subset this
+    // run has left. Keyed on the image pair rather than on its position: the
+    // workers finish out of order, so the journal is not in the list's order.
+    std::unordered_map<uint64_t, TwoViewMatches> done_kept;
+    std::vector<uint64_t> done_keys;
+    const fs::path journal_path = res ? res->dir / "matches.part" : fs::path();
+    const bool resumed_verify =
+        res && verify &&
+        resume::readJournal(journal_path, res->signature, db.images, done_kept, done_keys,
+                            stats.putative);
+    std::set<uint64_t> done_set(done_keys.begin(), done_keys.end());
+    std::vector<std::pair<uint32_t, uint32_t>> todo;
+    if (resumed_verify && !done_set.empty()) {
+        for (const auto& p : pairs)
+            if (!done_set.count(resume::pairKey(p.first, p.second))) todo.push_back(p);
+        L::out(Tag::Match, M::match_resuming,
+               {(long long)(pairs.size() - todo.size()), (long long)pairs.size()});
+    } else {
+        todo = pairs;
+    }
+
     std::unique_ptr<IFeatureMatcher> matcher =
         createFeatureMatcher(cfg.matcher, opt, cfg.lightglue, cfg.loma_match);
     if (verbose && cfg.matcher != "bruteforce")
         L::err(Tag::Match, M::match_matcher_name, {matcher->name()});
     auto matchFn = [&](size_t b, size_t e, std::vector<std::vector<FeatureMatch>>& mout) {
-        matcher->matchBatch(feats, pairs, b, e, mout);
+        matcher->matchBatch(feats, todo, b, e, mout);
     };
     // Rate-limiting the printed line lives in the CLI's event sink, which is
     // the only thing that prints it; verifyPairs emits the fraction either way.
@@ -1225,7 +1464,7 @@ int matchFeatureDir(const std::string& featdir, const SfmConfig& cfg, PairMode m
                                            cfg.threads, verbose);
                 if (verbose && !cs.focal_measured.empty())
                     L::err(Tag::Match, M::focal_epipolar_search,
-                           {L::num(now() - t_f, 1)});
+                           {format_duration(now() - t_f)});
             }
             if (cs.anyWide()) {
                 bootstrapGroupFocals(feats, cs.ids, sample, sm, cs.cameras, cs.focal_given,
@@ -1252,7 +1491,7 @@ int matchFeatureDir(const std::string& featdir, const SfmConfig& cfg, PairMode m
                                   L::num(kv.second.focal(), 1);
                     }
                     L::err(Tag::Match, M::match_bearings,
-                           {L::num(now() - t_b, 1),
+                           {format_duration(now() - t_b),
                             L::num(bc.bytes() / 1048576.0, 0), focals});
                 }
             }
@@ -1286,26 +1525,65 @@ int matchFeatureDir(const std::string& featdir, const SfmConfig& cfg, PairMode m
             }
             sfm::progress::live_matches_begin(names, nfeat);
         }
+        // The pairs the journal carries are not re-verified, so nothing else
+        // will report them: without this the match map draws a resumed run's
+        // first half as "not reached yet" for the rest of the stage.
+        for (uint64_t key : done_keys) {
+            const auto it = done_kept.find(key);
+            sfm::progress::pair((uint32_t)(key >> 32), (uint32_t)key,
+                                it == done_kept.end() ? 0u
+                                                      : (uint32_t)it->second.matches.size());
+        }
+        resume::MatchJournal journal;
+        if (res) journal.open(journal_path, res->signature, resumed_verify);
+        vopt.journal = &journal;
+        vopt.progress_done_base = pairs.size() - todo.size();
+        vopt.progress_total = pairs.size();
         events::stage_begin(Stage::Match, (int64_t)pairs.size());
-        db.pairs = verifyPairs(feats, pairs, matchFn, vopt, &stats.putative, progress);
+        // Added, not assigned: the journal already counted what an earlier run
+        // offered the verifier, and verifyPairs writes its own total.
+        uint64_t putative = 0;
+        std::vector<TwoViewMatches> fresh =
+            verifyPairs(feats, todo, matchFn, vopt, &putative, progress);
+        stats.putative += putative;
+        journal.close();
         sfm::progress::flush();
         events::stage_end(Stage::Match);
+        // Back into the pair list's order, whichever run produced each entry:
+        // the mapper's seed ranking breaks ties on it, so a resumed run must
+        // hand it over in the order a single run would have.
+        if (done_kept.empty()) {
+            db.pairs = std::move(fresh);
+        } else {
+            std::unordered_map<uint64_t, size_t> at;
+            at.reserve(fresh.size() * 2);
+            for (size_t i = 0; i < fresh.size(); i++)
+                at[resume::pairKey(fresh[i].image1, fresh[i].image2)] = i;
+            db.pairs.reserve(done_kept.size() + fresh.size());
+            for (const auto& p : pairs) {
+                const uint64_t key = resume::pairKey(p.first, p.second);
+                const auto old = done_kept.find(key);
+                if (old != done_kept.end()) db.pairs.push_back(std::move(old->second));
+                else if (const auto n = at.find(key); n != at.end())
+                    db.pairs.push_back(std::move(fresh[n->second]));
+            }
+        }
         for (const TwoViewMatches& tvm : db.pairs) stats.inliers += tvm.matches.size();
     } else {
         const size_t batch = std::max(1, opt.batch_pairs);
         std::vector<std::vector<FeatureMatch>> mout;
-        for (size_t b = 0; b < pairs.size(); b += batch) {
-            size_t e = std::min(b + batch, pairs.size());
+        for (size_t b = 0; b < todo.size(); b += batch) {
+            size_t e = std::min(b + batch, todo.size());
             matchFn(b, e, mout);
             for (size_t p = b; p < e; p++) {
-                uint32_t i = pairs[p].first, j = pairs[p].second;
+                uint32_t i = todo[p].first, j = todo[p].second;
                 std::vector<FeatureMatch>& m = mout[p - b];
                 stats.putative += m.size();
                 if (!m.empty()) {
                     stats.inliers += m.size();
                     db.pairs.push_back({i, j, 0, std::move(m)});
                 }
-                if (progress) progress(p + 1, pairs.size());
+                if (progress) progress(p + 1, todo.size());
             }
         }
     }
@@ -1366,10 +1644,31 @@ AutoResult run_auto(SfmConfig& cfg, const AutoInputs& in) {
     for (const PresetChange& p : in.preset_changes)
         L::out(Tag::Run, M::run_preset_moved, {"--" + p.flag, p.to, p.from});
 
+    // ---- what an interrupted run left, and whether it is still ours ----
+    // The signature is stored BEFORE the stage rather than after it, so that a
+    // run interrupted half way through leaves files the next one may reuse.
+    const fs::path rdir = resume::dir(_workspace);
+    const std::string extract_sig =
+        stageSignature(cfg, CMD_EXTRACT) + "images=" + _imagedir + "\n";
+    std::error_code rm_ec;
+    bool reuse = cfg.reuse;
+    if (!reuse || resume::recorded(rdir / "extract.sig") != extract_sig) {
+        // The pair list and the journal index the feature files, so they go
+        // wherever those go.
+        reuse = false;
+        resume::clear(_workspace);
+        fs::remove_all(featdir, rm_ec);
+        fs::remove(matchpath, rm_ec);
+    }
+    if (cfg.reuse) resume::store(rdir / "extract.sig", extract_sig);
+
     // ---- 1. extract ----
     double t0 = now();
     ExtractStats est;
-    if (int rc = extractDirectory(_imagedir, featdir, cfg, est)) { r.exit_code = rc; return r; }
+    if (int rc = extractDirectory(_imagedir, featdir, cfg, est, reuse)) {
+        r.exit_code = rc;
+        return r;
+    }
     double t_extract = now() - t0;
     if (est.images < 2) {
         L::fail(Tag::Run, M::run_too_few_images, {(long long)est.images});
@@ -1408,11 +1707,56 @@ AutoResult run_auto(SfmConfig& cfg, const AutoInputs& in) {
     MatchStats mstats;
     VerifyCalibration calib;
     calib.setup = cfg.camera;
-    if (int rc = matchFeatureDir(featdir.string(), cfg, mode, /*verify=*/true, feats, db, mstats,
-                                 &calib))
-        { r.exit_code = rc; return r; }
+    // What this stage's output depends on: its own settings, the extraction
+    // that produced its input, and the feature files themselves -- the pair
+    // lists and the journal are indices into a particular set of those.
+    MatchResume mres;
+    mres.dir = rdir;
+    mres.signature = extract_sig + stageSignature(cfg, CMD_MATCH) +
+                     "pairs-resolved=" + std::to_string((int)mode) + "\n" +
+                     "features=" + featureDirDigest(featdir) + "\n";
+    // A finished matches.bin is the whole of this stage; the mapper wants
+    // keypoints and colours, so the descriptors are never read at all.
+    bool reused_matches = false;
+    if (cfg.reuse && fs::exists(matchpath, rm_ec) &&
+        resume::recorded(rdir / "match.sig") == mres.signature) {
+        try {
+            MatchesDatabase disk = readMatches(matchpath.string());
+            if (loadFeatureDir(featdir.string(), cfg, /*with_descriptors=*/false, feats, db) == 0) {
+                db.pairs = std::move(disk.pairs);
+                db.cameras = std::move(disk.cameras);
+                db.camera_ids = std::move(disk.camera_ids);
+                db.focal_prior = std::move(disk.focal_prior);
+                db.focal_measured = std::move(disk.focal_measured);
+                loadCameraSetup(db, calib.cameras);
+                mstats.images = feats.size();
+                mstats.kept = mstats.pairs = db.pairs.size();
+                for (const TwoViewMatches& tvm : db.pairs) mstats.inliers += tvm.matches.size();
+                reused_matches = true;
+            }
+        } catch (const std::exception& e) {
+            L::warn(Tag::Match, M::match_reuse_failed, {e.what()});
+            feats.clear();
+            db = MatchesDatabase();
+        }
+    }
+    if (reused_matches) {
+        L::out(Tag::Match, M::match_reusing_matches,
+               {(long long)mstats.kept, matchpath.string()});
+    } else if (int rc = matchFeatureDir(featdir.string(), cfg, mode, /*verify=*/true, feats, db,
+                                        mstats, &calib, cfg.reuse ? &mres : nullptr)) {
+        r.exit_code = rc;
+        return r;
+    }
     double t_match = now() - t0;
-    writeMatches(matchpath.string(), db);
+    if (!reused_matches) {
+        writeMatches(matchpath.string(), db);
+        // matches.bin says everything the journal and the pair list did, and
+        // the journal is the same size again.
+        resume::forget(rdir / "matches.part");
+        resume::forget(rdir / "pairs.bin");
+        if (cfg.reuse) resume::store(rdir / "match.sig", mres.signature);
+    }
     // Nothing past this point reads a descriptor -- the mapper works on
     // keypoints, the correspondence graph and the per-keypoint colors -- and on
     // a large capture they are the biggest thing in the process: 8k features
@@ -1448,15 +1792,27 @@ AutoResult run_auto(SfmConfig& cfg, const AutoInputs& in) {
     t0 = now();
     events::stage_begin(Stage::Map, (int64_t)db.images.size());
     events::map_begin(db.images.size());
-    Mapper mapper(db, feats, mapopt, cs.ids);
+    RigTable rigs;
+    try {
+        rigs = buildRigs(db, cfg, verbose);
+    } catch (const std::runtime_error& e) {
+        L::fail(Tag::Map, M::rig_bad, {e.what()});
+        r.exit_code = 2;
+        return r;
+    }
+    Mapper mapper(db, feats, mapopt, cs.ids, &rigs);
     AssembleStats ast;
     std::vector<Reconstruction> models = runMapper(mapper, db, feats, cfg, ast);
     double t_map = now() - t0;
 
     {
+        // A global solve per model, and up to two more passes over them: minutes
+        // on a large capture, with the last image long since placed.
+        events::stage_begin(Stage::Refine);
         double t_finish = 0;
         models = finishModels(mapper, std::move(models), cfg, verbose, t_finish);
         t_map += t_finish;
+        events::stage_end(Stage::Refine);
     }
     events::stage_end(Stage::Map);
 
@@ -1473,7 +1829,7 @@ AutoResult run_auto(SfmConfig& cfg, const AutoInputs& in) {
     // one camera per frame size is not that.
     const size_t n_cameras = models.empty() ? 0 : models.front().cameras.size();
     splitCamerasBySize(models, feats);
-    writeModels(models, sparsedir, verbose, gauge);
+    writeModels(models, sparsedir, verbose, gauge, &rigs);
 
     // The mapper reports its own breakdown when `run()` returns; the passes
     // that assemble its models accumulate into the same counters.
@@ -1487,24 +1843,32 @@ AutoResult run_auto(SfmConfig& cfg, const AutoInputs& in) {
     const uint32_t reg = rec.numRegistered();
     L::out(Tag::Run, M::sum_header);
     L::out(Tag::Run, M::sum_extract,
-           {L::num(t_extract, 2), (long long)est.images, (long long)est.features});
+           {format_duration(t_extract), (long long)est.images,
+            (long long)est.features});
     if (est.masked_images) {
-        const uint64_t before = est.features + est.masked_out;
+        // Over what this run extracted, like the warning above: a reused
+        // feature file does not say what a mask took out of it.
+        const uint64_t before = est.features_new + est.masked_out;
         L::out(Tag::Run, M::sum_masks,
                {(long long)est.masked_images, (long long)est.images,
                 (long long)est.masked_out,
                 L::num(before ? 100.0 * est.masked_out / before : 0.0, 1)});
     }
-    L::out(Tag::Run, M::sum_match,
-           {L::num(t_match, 2), (long long)mstats.kept, (long long)mstats.pairs,
-            (long long)mstats.inliers, (long long)mstats.putative});
+    if (reused_matches)
+        L::out(Tag::Run, M::sum_match_reused,
+               {(long long)mstats.kept, (long long)mstats.inliers});
+    else
+        L::out(Tag::Run, M::sum_match,
+               {format_duration(t_match), (long long)mstats.kept, (long long)mstats.pairs,
+                (long long)mstats.inliers, (long long)mstats.putative});
     L::out(Tag::Run, M::sum_map,
-           {L::num(t_map, 2), (long long)reg, (long long)est.images,
+           {format_duration(t_map), (long long)reg, (long long)est.images,
             (long long)rec.points3D.size(), (long long)n_cameras});
     printAssembly(ast, models.size(), Tag::Run);
     printFolderCoverage(models, db);
     writeUnregisteredList(models, db, _imagedir);
-    L::out(Tag::Run, M::sum_total, {L::num(t_extract + t_match + t_map, 2)});
+    L::out(Tag::Run, M::sum_total,
+           {format_duration(t_extract + t_match + t_map)});
     L::out(Tag::Run, M::sum_model_error,
            {L::num(mean, 3), L::num(median, 3), (long long)nobs});
     if (models.size() > 1) {
@@ -1656,6 +2020,13 @@ std::string parse_auto_args(const std::vector<std::string>& args, AutoRequest& o
         if (a == "--manifest") {
             if (i + 1 >= argc) return "--manifest: missing value";
             manifest_path = args[(size_t)++i];
+            continue;
+        }
+        if (a == "--rig") {
+            if (i + 1 >= argc) return "--rig: missing value";
+            RigDef d;
+            if (std::string err = parseRigArg(args[(size_t)++i], d); !err.empty()) return err;
+            cfg.rigs.push_back(std::move(d));
             continue;
         }
         if (a == "--progress-dir") {

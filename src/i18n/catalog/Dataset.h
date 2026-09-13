@@ -2487,43 +2487,6 @@ SS_MSG(frames_per_second_help,
        "için 1-3 uygundur; daha fazlası yalnızca kamera hızlı hareket ettiyse "
        "işe yarar. Listedeki bütün videolara uygulanır."));
 
-SS_MSG(pano360_clicks_warning,
-    EN("Clicks are drawn on the camera's own frame, which the 360 unwrap "
-       "reshapes: on a 360 capture they land somewhere else. Prompt it with "
-       "text instead."),
-    JA("クリックはカメラ本来のフレーム上に打たれますが、360 の展開はその形を変えます。"
-       "360 撮影ではクリック位置がずれるので、テキストで指示してください。"),
-    ZH_HANS("点击是打在相机原始帧上的，而 360 展开会改变画面形状：在 360 素材上点击"
-            "会落到别处。请改用文字提示。"),
-    ZH_HANT("點擊是打在相機原始影格上的，而 360 展開會改變畫面形狀：在 360 素材上點擊"
-            "會落到別處。請改用文字提示。"),
-    KO("클릭은 카메라 원본 프레임에 찍히지만 360 펼치기가 그 모양을 바꿉니다. 360 "
-       "촬영에서는 클릭이 엉뚱한 곳에 놓이니 텍스트로 지시하세요."),
-    DE("Klicks werden auf dem Originalbild der Kamera gesetzt, das die "
-       "360-Entfaltung umformt: Bei einer 360-Aufnahme landen sie woanders. "
-       "Nimm stattdessen einen Textprompt."),
-    FR("Les clics sont posés sur l'image d'origine de la caméra, que le "
-       "dépliage 360 remodèle : sur une prise 360 ils tombent ailleurs. "
-       "Utilisez plutôt une invite textuelle."),
-    ES("Los clics se ponen sobre el fotograma propio de la cámara, que el "
-       "desplegado 360 reconfigura: en una toma 360 caen en otro sitio. Usa "
-       "mejor una indicación de texto."),
-    PT("Os cliques são dados no quadro original da câmera, que o desdobramento "
-       "360 remodela: numa captura 360 eles caem em outro lugar. Use antes uma "
-       "instrução de texto."),
-    IT("I clic vengono posti sul fotogramma originale della fotocamera, che lo "
-       "sviluppo 360 rimodella: su una ripresa 360 finiscono altrove. Usa "
-       "piuttosto un prompt testuale."),
-    NL("Kliks worden op het eigen beeld van de camera gezet, dat het "
-       "360-uitvouwen hervormt: bij een 360-opname komen ze ergens anders "
-       "terecht. Gebruik in plaats daarvan een tekstprompt."),
-    RU("Клики ставятся на собственный кадр камеры, который развёртка 360 "
-       "перекраивает: на съёмке 360 они попадут не туда. Задайте подсказку "
-       "текстом."),
-    TR("Tıklamalar kameranın kendi karesine konur, ama 360 açımı o kareyi "
-       "yeniden biçimlendirir: bir 360 çekiminde başka yere düşerler. Bunun "
-       "yerine metinle yönlendirin."));
-
 SS_MSG(pano360_output,
     EN("Unwrap into (360 video)"),
     JA("展開先（360 動画）"),
@@ -5838,6 +5801,56 @@ SS_MSG(preview_frame_help,
        "düzeltmek için buraya tıklayın: çizdikleriniz bu kareden itibaren "
        "geçerlidir."));
 
+SS_MSG(preview_camera,
+    EN("Which camera"),  JA("どのカメラ"),    ZH_HANS("哪台相机"),  ZH_HANT("哪台相機"),
+    KO("어느 카메라"),     DE("Welche Kamera"), FR("Quelle caméra"), ES("Qué cámara"),
+    PT("Qual câmera"),   IT("Quale camera"),  NL("Welke camera"),  RU("Какая камера"),
+    TR("Hangi kamera"));
+
+SS_MSG(preview_camera_help,
+    EN("This capture becomes several folders of images -- the lenses of the "
+       "camera, or the views a 360 file is unwrapped into. Each is its own "
+       "picture, so a prompt drawn on one says nothing about the others."),
+    JA("この撮影は複数の画像フォルダーになります。カメラの各レンズ、または 360 "
+       "ファイルを展開した各ビューです。それぞれ別の画像なので、片方に描いた指示は"
+       "もう片方には効きません。"),
+    ZH_HANS("这段素材会变成好几个图像文件夹——相机的各个镜头，或者 360 文件展开后的"
+            "各个视角。每个都是独立的画面，在一个上面画的提示对其他的不起作用。"),
+    ZH_HANT("這段素材會變成好幾個影像資料夾——相機的各個鏡頭，或者 360 檔案展開後的"
+            "各個視角。每個都是獨立的畫面，在一個上面畫的提示對其他的不起作用。"),
+    KO("이 촬영은 여러 개의 이미지 폴더가 됩니다. 카메라의 각 렌즈이거나, 360 "
+       "파일을 펼친 각 시점입니다. 서로 다른 그림이므로 한쪽에 표시한 지시는 "
+       "다른 쪽에는 적용되지 않습니다."),
+    DE("Diese Aufnahme wird zu mehreren Bildordnern -- den Objektiven der "
+       "Kamera oder den Ansichten, in die eine 360-Datei entfaltet wird. Jede "
+       "ist ein eigenes Bild, eine Eingabe auf der einen gilt der anderen "
+       "nicht."),
+    FR("Cette prise devient plusieurs dossiers d'images : les objectifs de la "
+       "caméra, ou les vues issues du dépliage d'un fichier 360. Chacune est "
+       "une image à part, et une invite tracée sur l'une ne dit rien des "
+       "autres."),
+    ES("Esta toma se convierte en varias carpetas de imágenes: los objetivos "
+       "de la cámara, o las vistas en que se despliega un archivo 360. Cada "
+       "una es su propia imagen, así que una indicación marcada en una no dice "
+       "nada de las demás."),
+    PT("Esta captura vira várias pastas de imagens: as lentes da câmera, ou as "
+       "vistas em que um arquivo 360 é desdobrado. Cada uma é uma imagem "
+       "própria, então um comando marcado numa não vale para as outras."),
+    IT("Questa ripresa diventa più cartelle di immagini: gli obiettivi della "
+       "camera, oppure le viste in cui un file 360 viene aperto. Ognuna è "
+       "un'immagine a sé, quindi un testo tracciato su una non dice nulla "
+       "delle altre."),
+    NL("Deze opname wordt meerdere beeldmappen -- de lenzen van de camera, of "
+       "de aanzichten waarin een 360-bestand wordt uitgevouwen. Elk is een "
+       "eigen beeld, dus een prompt op de ene zegt niets over de andere."),
+    RU("Эта съёмка становится несколькими папками снимков -- объективами "
+       "камеры или видами, на которые разворачивается файл 360. Каждый из них "
+       "-- отдельный снимок, и запрос, отмеченный на одном, ничего не говорит "
+       "об остальных."),
+    TR("Bu çekim birkaç görüntü klasörüne dönüşür: kameranın objektifleri ya "
+       "da bir 360 dosyasının açıldığı görünümler. Her biri ayrı bir resimdir, "
+       "birine çizilen istem ötekiler için bir şey söylemez."));
+
 SS_MSG(preview_try_it,
     EN("Try it"),        JA("試す"),          ZH_HANS("试一下"),   ZH_HANT("試一下"),
     KO("해 보기"),        DE("Ausprobieren"), FR("Essayer"),      ES("Probar"),
@@ -7060,6 +7073,197 @@ SS_MSG(sfm_metric_gps_help,
        "fotoğraflar atlanır; oturtulamayan model ölçeksiz yazılır ve bunu "
        "bildirir. Videonun kendi sensörleri yukarıdaki ayardır."));
 
+SS_MSG(rig_none,
+    EN("No rig"), JA("リグなし"), ZH_HANS("无装置"), ZH_HANT("無裝置"), KO("리그 없음"),
+    DE("Kein Rig"), FR("Pas de rig"), ES("Sin rig"), PT("Sem rig"), IT("Nessun rig"),
+    NL("Geen rig"), RU("Без рига"), TR("Rig yok"));
+
+SS_MSG(rig_own,
+    EN("This input's lenses"), JA("この入力のレンズ"), ZH_HANS("此输入的镜头"),
+    ZH_HANT("此輸入的鏡頭"), KO("이 입력의 렌즈"), DE("Die Objektive dieser Eingabe"),
+    FR("Les objectifs de cette entrée"), ES("Las lentes de esta entrada"),
+    PT("As lentes desta entrada"), IT("Gli obiettivi di questo ingresso"),
+    NL("De lenzen van deze invoer"), RU("Объективы этого входа"), TR("Bu girdinin lensleri"));
+
+SS_MSG(rig_help,
+    EN("Lenses on one rig keep a fixed relative pose, and the reconstruction "
+       "uses that: one pose per frame, a lens on the sky placed by its "
+       "neighbour. A multi-lens file is its own rig; rows sharing a letter "
+       "form one rig by file name -- across inputs when each contributes the "
+       "same lenses, as one rig behind several videos."),
+    JA("同じリグ上のレンズは相対姿勢が固定で、再構成はそれを利用します。フレームごとに"
+       "1 姿勢、空を向いたレンズも隣のレンズから配置されます。複数レンズのファイルは"
+       "それ自体がリグです。同じ文字を選んだ行はファイル名で 1 つのリグになります。"
+       "各入力が同じレンズを持つなら、複数の動画の背後にある 1 つのリグとして扱います。"),
+    ZH_HANS("同一装置上的镜头保持固定的相对位姿，重建会利用这一点：每帧一个位姿，朝天的"
+            "镜头由相邻镜头定位。多镜头文件自成一个装置；选同一字母的行按文件名组成一个"
+            "装置——各输入镜头相同时，视作多段视频背后的同一装置。"),
+    ZH_HANT("同一裝置上的鏡頭保持固定的相對姿態，重建會利用這一點：每幀一個姿態，朝天的"
+            "鏡頭由相鄰鏡頭定位。多鏡頭檔案自成一個裝置；選同一字母的列按檔名組成一個"
+            "裝置——各輸入鏡頭相同時，視作多段影片背後的同一裝置。"),
+    KO("한 리그의 렌즈들은 상대 자세가 고정되어 있고 재구성은 그것을 이용합니다. 프레임마다 "
+       "자세 하나, 하늘을 향한 렌즈도 이웃이 배치합니다. 다중 렌즈 파일은 그 자체가 리그이고, "
+       "같은 글자를 고른 행은 파일 이름으로 하나의 리그가 됩니다. 각 입력이 같은 렌즈를 내면 "
+       "여러 영상 뒤의 한 리그로 봅니다."),
+    DE("Objektive eines Rigs behalten eine feste relative Pose, und die "
+       "Rekonstruktion nutzt das: eine Pose je Frame, ein Objektiv zum Himmel von "
+       "seinem Nachbarn platziert. Eine Mehrlinsendatei ist ihr eigenes Rig; "
+       "Zeilen mit demselben Buchstaben bilden nach Dateiname ein Rig -- über "
+       "Eingaben hinweg als ein Rig hinter mehreren Videos, wenn jede dieselben "
+       "Objektive beisteuert."),
+    FR("Les objectifs d'un même rig gardent une pose relative fixe, et la "
+       "reconstruction s'en sert : une pose par image, un objectif vers le ciel "
+       "placé par son voisin. Un fichier multi-objectifs est son propre rig ; les "
+       "lignes partageant une lettre forment un rig par nom de fichier -- entre "
+       "entrées comme un seul rig derrière plusieurs vidéos, quand chacune "
+       "apporte les mêmes objectifs."),
+    ES("Las lentes de un mismo rig mantienen una pose relativa fija y la "
+       "reconstrucción lo aprovecha: una pose por cuadro, una lente hacia el cielo "
+       "colocada por su vecina. Un archivo multilente es su propio rig; las filas "
+       "que comparten una letra forman un rig por nombre de archivo -- entre "
+       "entradas como un solo rig tras varios vídeos, cuando cada una aporta las "
+       "mismas lentes."),
+    PT("As lentes de um mesmo rig mantêm uma pose relativa fixa e a reconstrução "
+       "usa isso: uma pose por quadro, uma lente virada ao céu posicionada pela "
+       "vizinha. Um ficheiro multilente é o seu próprio rig; linhas que partilham "
+       "uma letra formam um rig por nome de ficheiro -- entre entradas como um só "
+       "rig por trás de vários vídeos, quando cada uma traz as mesmas lentes."),
+    IT("Gli obiettivi di uno stesso rig mantengono una posa relativa fissa e la "
+       "ricostruzione lo sfrutta: una posa per fotogramma, un obiettivo verso il "
+       "cielo posizionato dal vicino. Un file multi-obiettivo è un rig a sé; le "
+       "righe che condividono una lettera formano un rig per nome di file -- tra "
+       "ingressi come un solo rig dietro più video, quando ciascuno porta gli "
+       "stessi obiettivi."),
+    NL("Lenzen op één rig houden een vaste relatieve pose en de reconstructie "
+       "gebruikt dat: één pose per frame, een lens naar de lucht geplaatst door "
+       "zijn buur. Een bestand met meerdere lenzen is zijn eigen rig; rijen met "
+       "dezelfde letter vormen één rig op bestandsnaam -- over invoeren heen als "
+       "één rig achter meerdere video's, wanneer elke dezelfde lenzen levert."),
+    RU("Объективы одного рига сохраняют фиксированную относительную позу, и "
+       "реконструкция этим пользуется: одна поза на кадр, объектив в небо "
+       "размещается по соседу. Файл с несколькими объективами -- сам себе риг; "
+       "строки с одной буквой образуют риг по имени файла -- между входами как "
+       "один риг за несколькими видео, когда каждый даёт те же объективы."),
+    TR("Bir rigdeki lensler sabit göreli duruşu korur ve yeniden kurulum bunu "
+       "kullanır: kare başına bir duruş, gökyüzüne bakan lens komşusunca "
+       "yerleştirilir. Çok lensli bir dosya kendi rigidir; aynı harfi paylaşan "
+       "satırlar dosya adına göre tek rig olur -- her girdi aynı lensleri "
+       "veriyorsa girdiler arasında birkaç videonun ardındaki tek rig olarak."));
+
+SS_MSG(sync_lenses,
+    EN("Synchronize lenses"), JA("レンズを同期"), ZH_HANS("同步镜头"), ZH_HANT("同步鏡頭"),
+    KO("렌즈 동기화"), DE("Objektive synchronisieren"), FR("Synchroniser les objectifs"),
+    ES("Sincronizar lentes"), PT("Sincronizar lentes"), IT("Sincronizza gli obiettivi"),
+    NL("Lenzen synchroniseren"), RU("Синхронизировать объективы"), TR("Lensleri eşzamanla"));
+
+SS_MSG(sync_lenses_help,
+    EN("Keep the same instants from every lens of a dual-fisheye file (one "
+       "sharpness window over both), so every frame is a rig frame. Off, each "
+       "lens keeps its own sharpest frame and only the coincidences form rig "
+       "frames. Built-in decoder only."),
+    JA("デュアル魚眼ファイルの全レンズで同じ瞬間を残します（シャープさの判定窓は両方"
+       "共通）。すべてのフレームがリグフレームになります。オフなら各レンズが自分の"
+       "いちばん鮮明なフレームを残し、偶然一致したものだけがリグフレームになります。"
+       "内蔵デコーダのみ。"),
+    ZH_HANS("双鱼眼文件的每个镜头保留相同时刻（清晰度窗口对两者共用），这样每一帧都是"
+            "装置帧。关闭时各镜头保留各自最清晰的帧，只有恰好重合的才构成装置帧。"
+            "仅内置解码器。"),
+    ZH_HANT("雙魚眼檔案的每個鏡頭保留相同時刻（清晰度視窗對兩者共用），這樣每一幀都是"
+            "裝置幀。關閉時各鏡頭保留各自最清晰的幀，只有恰好重合的才構成裝置幀。"
+            "僅內建解碼器。"),
+    KO("이중 어안 파일의 모든 렌즈에서 같은 순간을 남깁니다(선명도 창은 둘에 하나). 그러면 "
+       "모든 프레임이 리그 프레임이 됩니다. 끄면 렌즈마다 제일 선명한 프레임을 따로 남기고 "
+       "우연히 겹친 것만 리그 프레임이 됩니다. 내장 디코더에서만."),
+    DE("Aus jedem Objektiv einer Dual-Fisheye-Datei dieselben Augenblicke behalten "
+       "(ein Schärfefenster über beide), damit jedes Bild ein Rig-Frame ist. Aus: "
+       "jedes Objektiv behält sein schärfstes Bild, und nur die Zufallstreffer "
+       "bilden Rig-Frames. Nur mit dem eingebauten Decoder."),
+    FR("Garder les mêmes instants de chaque objectif d'un fichier double fisheye "
+       "(une fenêtre de netteté sur les deux), pour que chaque image soit une "
+       "image de rig. Désactivé, chaque objectif garde sa propre image la plus "
+       "nette et seules les coïncidences forment des images de rig. Décodeur "
+       "intégré uniquement."),
+    ES("Conservar los mismos instantes de cada lente de un archivo doble ojo de "
+       "pez (una ventana de nitidez sobre ambas), para que cada cuadro sea un "
+       "cuadro de rig. Apagado, cada lente conserva su propio cuadro más nítido y "
+       "solo las coincidencias forman cuadros de rig. Solo con el decodificador "
+       "integrado."),
+    PT("Guardar os mesmos instantes de cada lente de um ficheiro de duplo olho de "
+       "peixe (uma janela de nitidez sobre ambas), para que cada quadro seja um "
+       "quadro de rig. Desligado, cada lente guarda o seu quadro mais nítido e só "
+       "as coincidências formam quadros de rig. Apenas com o descodificador "
+       "integrado."),
+    IT("Tenere gli stessi istanti da ogni obiettivo di un file dual fisheye (una "
+       "finestra di nitidezza su entrambi), così ogni fotogramma è un fotogramma "
+       "di rig. Spento, ogni obiettivo tiene il proprio fotogramma più nitido e "
+       "solo le coincidenze formano fotogrammi di rig. Solo con il decoder "
+       "integrato."),
+    NL("Dezelfde momenten van elke lens van een dual-fisheye-bestand houden (één "
+       "scherptevenster over beide), zodat elk frame een rigframe is. Uit houdt "
+       "elke lens zijn eigen scherpste frame en alleen de toevalstreffers vormen "
+       "rigframes. Alleen met de ingebouwde decoder."),
+    RU("Сохранять одни и те же мгновения с каждого объектива двойного фишая (одно "
+       "окно резкости на оба), чтобы каждый кадр был кадром рига. Выкл.: каждый "
+       "объектив оставляет свой самый резкий кадр, и лишь совпадения образуют "
+       "кадры рига. Только со встроенным декодером."),
+    TR("Çift balıkgözü dosyasının her lensinden aynı anları tut (iki lens için tek "
+       "keskinlik penceresi); böylece her kare bir rig karesi olur. Kapalıyken "
+       "her lens kendi en keskin karesini tutar ve yalnızca çakışanlar rig "
+       "karesi olur. Yalnızca yerleşik çözücüyle."));
+
+SS_MSG(sfm_final_free_rig,
+    EN("Release the rig at the end"), JA("最後にリグを解放"), ZH_HANS("最后解除装置约束"),
+    ZH_HANT("最後解除裝置約束"), KO("마지막에 리그 해제"), DE("Rig am Ende freigeben"),
+    FR("Libérer le rig à la fin"), ES("Liberar el rig al final"), PT("Liberar o rig no fim"),
+    IT("Rilascia il rig alla fine"), NL("Rig aan het eind loslaten"),
+    RU("Освободить риг в конце"), TR("Sonunda rigi serbest bırak"));
+
+SS_MSG(sfm_final_free_rig_help,
+    EN("After the reconstruction, one last bundle adjustment with the rig set "
+       "aside so every image settles on its own pose. For a mount that flexed or "
+       "lenses that did not fire together; off, the rig holds to the end."),
+    JA("再構成の後に、リグ拘束を外したバンドル調整を 1 回行い、各画像を単独の姿勢に"
+       "落ち着かせます。マウントがたわんだ、レンズの撮影時刻がずれたといった場合向け。"
+       "オフなら最後までリグを保ちます。"),
+    ZH_HANS("重建之后再做一次不带装置约束的光束法平差，让每张图像落到各自的位姿。适合"
+            "支架变形或镜头未同步拍摄的情况；关闭则装置约束保持到底。"),
+    ZH_HANT("重建之後再做一次不帶裝置約束的光束法平差，讓每張影像落到各自的姿態。適合"
+            "支架變形或鏡頭未同步拍攝的情況；關閉則裝置約束保持到底。"),
+    KO("재구성 뒤에 리그 제약을 푼 번들 조정을 한 번 더 해 각 이미지가 제 자세에 안착하게 "
+       "합니다. 마운트가 휘었거나 렌즈가 동시에 찍히지 않았을 때를 위한 것이고, 끄면 리그가 "
+       "끝까지 유지됩니다."),
+    DE("Nach der Rekonstruktion eine letzte Bündelausgleichung ohne Rig-Bindung, "
+       "damit jedes Bild auf seiner eigenen Pose zur Ruhe kommt. Für eine "
+       "Halterung, die sich verbogen hat, oder Objektive, die nicht gleichzeitig "
+       "auslösten; aus hält das Rig bis zum Schluss."),
+    FR("Après la reconstruction, un dernier ajustement de faisceaux sans la "
+       "contrainte du rig pour que chaque image se pose sur sa propre pose. Pour "
+       "une monture qui a fléchi ou des objectifs qui n'ont pas déclenché "
+       "ensemble ; désactivé, le rig tient jusqu'au bout."),
+    ES("Tras la reconstrucción, un último ajuste de haces con el rig apartado "
+       "para que cada imagen se asiente en su propia pose. Para una montura que "
+       "flexionó o lentes que no dispararon a la vez; apagado, el rig se mantiene "
+       "hasta el final."),
+    PT("Após a reconstrução, um último ajuste de feixes com o rig posto de lado "
+       "para que cada imagem assente na sua própria pose. Para um suporte que "
+       "cedeu ou lentes que não dispararam juntas; desligado, o rig mantém-se "
+       "até ao fim."),
+    IT("Dopo la ricostruzione, un ultimo bundle adjustment con il rig messo da "
+       "parte, così ogni immagine si assesta sulla propria posa. Per un supporto "
+       "che ha flesso o obiettivi che non hanno scattato insieme; spento, il rig "
+       "tiene fino alla fine."),
+    NL("Na de reconstructie één laatste bundelvereffening met het rig terzijde, "
+       "zodat elk beeld op zijn eigen pose tot rust komt. Voor een bevestiging "
+       "die doorboog of lenzen die niet gelijk afgingen; uit houdt het rig tot "
+       "het eind."),
+    RU("После реконструкции последнее уравнивание связок без рига, чтобы каждое "
+       "изображение устоялось на собственной позе. Для крепления, которое "
+       "погнулось, или объективов, сработавших не одновременно; выкл. -- риг "
+       "держится до конца."),
+    TR("Yeniden kurulumdan sonra, her görüntünün kendi duruşuna oturması için rig "
+       "bir kenara konularak son bir demet ayarı. Esneyen bir montaj ya da aynı "
+       "anda çekmeyen lensler için; kapalıyken rig sona kadar tutulur."));
+
 SS_MSG(sfm_per_image_intrinsics,
     EN("Per-image intrinsics at the end"),
     JA("最後に画像ごとの内部パラメータ"),
@@ -7678,6 +7882,88 @@ SS_MSG(photo_import_inplace_help,
        "gerekir. Böyle yalnızca tek bir fotoğraf klasörü okunabilir; girdisi "
        "bundan çok olan bir çalıştırma onları yine de kopyalar."));
 
+SS_MSG(drop_intermediate_title,
+    EN("Delete the intermediate files after each run?"),
+    JA("実行のたびに中間ファイルを削除しますか？"),
+    ZH_HANS("每次运行后都删除中间文件吗？"),
+    ZH_HANT("每次執行後都刪除中間檔案嗎？"),
+    KO("실행이 끝날 때마다 중간 파일을 지울까요?"),
+    DE("Die Zwischendateien nach jedem Lauf löschen?"),
+    FR("Supprimer les fichiers intermédiaires après chaque exécution ?"),
+    ES("¿Borrar los archivos intermedios después de cada ejecución?"),
+    PT("Apagar os arquivos intermediários depois de cada execução?"),
+    IT("Cancellare i file intermedi dopo ogni esecuzione?"),
+    NL("De tussenbestanden na elke run verwijderen?"),
+    RU("Удалять промежуточные файлы после каждого запуска?"),
+    TR("Her çalıştırmadan sonra ara dosyalar silinsin mi?"));
+
+SS_MSG(drop_intermediate_confirm,
+    EN("The features and the verified image pairs are what lets a "
+       "reconstruction that was stopped or that failed carry on from where it "
+       "got to. Without them the next run starts again from the first image, "
+       "which on a large capture is hours. They are large, and deleting them "
+       "costs nothing else."),
+    JA("特徴点と検証済みの画像ペアは、止めた／失敗した再構成を途中から続けるために使われます。"
+       "これがないと次の実行は1枚目からやり直しになり、大きな撮影では何時間もかかります。"
+       "サイズは大きく、削除してもほかに失うものはありません。"),
+    ZH_HANS("特征点和已验证的图像对，是让中断或失败的重建从断点接着做的依据。"
+            "没有它们，下次运行就要从第一张图重来，大型拍摄要花好几个小时。"
+            "它们体积很大，删掉之外并无其他损失。"),
+    ZH_HANT("特徵點和已驗證的影像對，是讓中斷或失敗的重建從斷點接著做的依據。"
+            "沒有它們，下次執行就要從第一張影像重來，大型拍攝要花好幾個小時。"
+            "它們體積很大，刪掉之外並無其他損失。"),
+    KO("특징점과 검증된 이미지 쌍은 멈추거나 실패한 복원을 하던 데서 이어서 하게 해 줍니다. "
+       "이것이 없으면 다음 실행은 첫 장부터 다시 하며, 큰 촬영에서는 몇 시간이 걸립니다. "
+       "크기가 크고, 지운다고 해서 달리 잃는 것은 없습니다."),
+    DE("Die Merkmale und die geprüften Bildpaare sind es, womit eine "
+       "abgebrochene oder fehlgeschlagene Rekonstruktion dort weitermacht, wo "
+       "sie war. Ohne sie beginnt der nächste Lauf wieder beim ersten Bild, was "
+       "bei einer großen Aufnahme Stunden sind. Sie sind groß, und sonst kostet "
+       "das Löschen nichts."),
+    FR("Les points caractéristiques et les paires d'images vérifiées sont ce "
+       "qui permet à une reconstruction arrêtée ou échouée de repartir d'où "
+       "elle en était. Sans eux, la prochaine exécution recommence à la "
+       "première image, soit des heures sur une grande prise de vue. Ils sont "
+       "volumineux, et les supprimer ne coûte rien d'autre."),
+    ES("Los rasgos y los pares de imágenes verificados son lo que permite que "
+       "una reconstrucción detenida o fallida siga desde donde llegó. Sin "
+       "ellos, la próxima ejecución empieza otra vez por la primera imagen, lo "
+       "que en una captura grande son horas. Ocupan mucho, y borrarlos no "
+       "cuesta nada más."),
+    PT("Os pontos característicos e os pares de imagens verificados são o que "
+       "permite a uma reconstrução interrompida ou falhada seguir de onde "
+       "parou. Sem eles, a próxima execução recomeça pela primeira imagem, o "
+       "que numa captura grande são horas. Ocupam muito, e apagá-los não custa "
+       "mais nada."),
+    IT("I punti caratteristici e le coppie di immagini verificate sono ciò che "
+       "permette a una ricostruzione interrotta o fallita di riprendere da dove "
+       "era arrivata. Senza di essi la prossima esecuzione riparte dalla prima "
+       "immagine, il che su una ripresa grande sono ore. Occupano molto, e "
+       "cancellarli non costa altro."),
+    NL("De kenmerken en de geverifieerde beeldparen zijn wat een gestopte of "
+       "mislukte reconstructie laat doorgaan waar ze gebleven was. Zonder die "
+       "begint de volgende run weer bij het eerste beeld, bij een grote opname "
+       "uren werk. Ze zijn groot, en verder kost verwijderen niets."),
+    RU("Признаки и проверенные пары снимков — это то, что позволяет "
+       "остановленной или неудавшейся реконструкции продолжиться с места "
+       "остановки. Без них следующий запуск начнётся с первого снимка, а на "
+       "большой съёмке это часы. Они занимают много места, и ничего другого "
+       "их удаление не стоит."),
+    TR("Öznitelikler ve doğrulanmış görüntü çiftleri, durdurulan ya da "
+       "başarısız olan bir kurulumun kaldığı yerden sürmesini sağlayan şeydir. "
+       "Onlarsız bir sonraki çalıştırma ilk görüntüden başlar; büyük bir "
+       "çekimde bu saatler demektir. Yer kaplarlar, silmenin başka bir "
+       "bedeli yoktur."));
+
+SS_MSG(drop_intermediate_button,
+    EN("Delete them"),
+    JA("削除する"),        ZH_HANS("删除"),      ZH_HANT("刪除"),
+    KO("지우기"),          DE("Sie löschen"),
+    FR("Les supprimer"),   ES("Borrarlos"),
+    PT("Apagá-los"),       IT("Cancellarli"),
+    NL("Verwijderen"),     RU("Удалять"),
+    TR("Sil"));
+
 SS_MSG(keep_intermediate,
     EN("Keep intermediate files"),
     JA("中間ファイルを残す"),
@@ -7694,42 +7980,48 @@ SS_MSG(keep_intermediate,
     TR("Ara dosyaları sakla"));
 
 SS_MSG(keep_intermediate_help,
-    EN("Keep features/ and matches.bin in the output folder after a "
-       "successful run. They are large, and only useful for re-running the "
-       "mapper by hand with `spirula sfm`."),
-    JA("実行が成功したあとも、出力フォルダに features/ と matches.bin を"
-       "残します。サイズが大きく、`spirula sfm` で手動でマッパーを再実行する"
-       "とき以外は使いません。"),
-    ZH_HANS("运行成功后仍在输出文件夹里保留 features/ 和 matches.bin。它们体积很大，"
-            "只有在用 `spirula sfm` 手动重跑建图时才有用。"),
-    ZH_HANT("執行成功後仍在輸出資料夾裡保留 features/ 和 matches.bin。它們體積很大，"
-            "只有在用 `spirula sfm` 手動重跑建圖時才有用。"),
-    KO("실행이 성공한 뒤에도 출력 폴더에 features/와 matches.bin을 남깁니다. "
-       "크기가 크고, `spirula sfm`으로 매퍼를 손수 다시 돌릴 때만 쓸모가 있습니다."),
-    DE("features/ und matches.bin nach einem erfolgreichen Lauf im "
-       "Ausgabeordner behalten. Sie sind groß und nur nützlich, um den Mapper "
-       "von Hand mit `spirula sfm` erneut laufen zu lassen."),
-    FR("Conserver features/ et matches.bin dans le dossier de sortie après une "
-       "exécution réussie. Ils sont volumineux et ne servent qu'à relancer le "
-       "mapper à la main avec `spirula sfm`."),
-    ES("Conservar features/ y matches.bin en la carpeta de salida tras una "
-       "ejecución correcta. Son grandes y solo sirven para volver a lanzar el "
-       "mapeador a mano con `spirula sfm`."),
-    PT("Manter features/ e matches.bin na pasta de saída após uma execução "
-       "bem-sucedida. São grandes e só servem para rodar o mapeador à mão com "
-       "o `spirula sfm`."),
-    IT("Conservare features/ e matches.bin nella cartella di destinazione dopo "
-       "un'esecuzione riuscita. Sono grandi e servono solo per rilanciare a "
-       "mano il mapper con `spirula sfm`."),
-    NL("features/ en matches.bin na een geslaagde run in de uitvoermap "
-       "bewaren. Ze zijn groot en alleen nuttig om de mapper met de hand "
-       "opnieuw te draaien met `spirula sfm`."),
-    RU("Оставлять features/ и matches.bin в папке результатов после успешного "
-       "запуска. Они большие и нужны, только чтобы вручную перезапустить "
-       "маппер через `spirula sfm`."),
-    TR("Başarılı bir çalıştırmadan sonra features/ ve matches.bin dosyalarını "
-       "çıktı klasöründe tutar. Büyüktürler ve yalnızca haritalayıcıyı "
-       "`spirula sfm` ile elle yeniden çalıştırmak için işe yararlar."));
+    EN("Keep features/, matches.bin and .resume/ in the output folder after a "
+       "successful run. They are large, and they are what lets an interrupted "
+       "or failed reconstruction carry on rather than start over."),
+    JA("実行が成功したあとも、出力フォルダに features/、matches.bin、.resume/ を"
+       "残します。サイズは大きいものの、中断や失敗した再構成を最初からではなく"
+       "途中から続けられるのはこれらのおかげです。"),
+    ZH_HANS("运行成功后仍在输出文件夹里保留 features/、matches.bin 和 .resume/。"
+            "它们体积很大，但正是它们让中断或失败的重建能接着做而不是从头再来。"),
+    ZH_HANT("執行成功後仍在輸出資料夾裡保留 features/、matches.bin 和 .resume/。"
+            "它們體積很大，但正是它們讓中斷或失敗的重建能接著做而不是從頭再來。"),
+    KO("실행이 성공한 뒤에도 출력 폴더에 features/, matches.bin, .resume/ 을 남깁니다. "
+       "크기는 크지만, 중단되거나 실패한 복원을 처음부터가 아니라 하던 데서 "
+       "이어서 할 수 있게 해 주는 것이 이것들입니다."),
+    DE("features/, matches.bin und .resume/ nach einem erfolgreichen Lauf im "
+       "Ausgabeordner behalten. Sie sind groß, und sie sind es, womit eine "
+       "abgebrochene oder fehlgeschlagene Rekonstruktion weitermacht, statt "
+       "neu zu beginnen."),
+    FR("Conserver features/, matches.bin et .resume/ dans le dossier de sortie "
+       "après une exécution réussie. Ils sont volumineux, et ce sont eux qui "
+       "permettent à une reconstruction interrompue ou échouée de continuer au "
+       "lieu de tout recommencer."),
+    ES("Conservar features/, matches.bin y .resume/ en la carpeta de salida "
+       "tras una ejecución correcta. Son grandes, y son lo que permite que una "
+       "reconstrucción interrumpida o fallida continúe en vez de empezar de "
+       "cero."),
+    PT("Manter features/, matches.bin e .resume/ na pasta de saída após uma "
+       "execução bem-sucedida. São grandes, e são eles que permitem a uma "
+       "reconstrução interrompida ou falhada continuar em vez de recomeçar."),
+    IT("Conservare features/, matches.bin e .resume/ nella cartella di "
+       "destinazione dopo un'esecuzione riuscita. Sono grandi, e sono ciò che "
+       "permette a una ricostruzione interrotta o fallita di continuare invece "
+       "di ricominciare."),
+    NL("features/, matches.bin en .resume/ na een geslaagde run in de "
+       "uitvoermap bewaren. Ze zijn groot, en ze zijn wat een afgebroken of "
+       "mislukte reconstructie laat doorgaan in plaats van opnieuw beginnen."),
+    RU("Оставлять features/, matches.bin и .resume/ в папке результатов после "
+       "успешного запуска. Они большие, и именно они позволяют прерванной или "
+       "неудавшейся реконструкции продолжиться, а не начаться заново."),
+    TR("Başarılı bir çalıştırmadan sonra features/, matches.bin ve .resume/ "
+       "dosyalarını çıktı klasöründe tutar. Büyüktürler, ama yarıda kalan ya "
+       "da başarısız olan bir kurulumun baştan başlamak yerine sürmesini "
+       "sağlayan şey onlardır."));
 
 SS_MSG(extra_sfm_flags_hint,
     EN("extra `spirula sfm` flags, e.g. --max-error 2"),

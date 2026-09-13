@@ -258,6 +258,66 @@ SS_MSG(stage_matching_images,
     RU("Сопоставление снимков"),
     TR("Görüntüler eşleştiriliyor"));
 
+SS_MSG(stage_reading_features,
+    EN("Reading the features"),
+    JA("特徴点を読み込んでいます"),
+    ZH_HANS("正在读取特征点"),
+    ZH_HANT("正在讀取特徵點"),
+    KO("특징점을 읽는 중"),
+    DE("Merkmale werden gelesen"),
+    FR("Lecture des points caractéristiques"),
+    ES("Leyendo los rasgos"),
+    PT("Lendo os pontos característicos"),
+    IT("Lettura dei punti caratteristici"),
+    NL("Kenmerken inlezen"),
+    RU("Чтение признаков"),
+    TR("Öznitelikler okunuyor"));
+
+SS_MSG(stage_selecting_pairs,
+    EN("Choosing which images to compare"),
+    JA("比べる画像の組を選んでいます"),
+    ZH_HANS("正在挑选要比对的图像组合"),
+    ZH_HANT("正在挑選要比對的影像組合"),
+    KO("비교할 이미지 짝을 고르는 중"),
+    DE("Es wird ausgewählt, welche Bilder verglichen werden"),
+    FR("Choix des images à comparer"),
+    ES("Eligiendo qué imágenes comparar"),
+    PT("Escolhendo quais imagens comparar"),
+    IT("Scelta delle immagini da confrontare"),
+    NL("Kiezen welke beelden vergeleken worden"),
+    RU("Выбор снимков для сравнения"),
+    TR("Hangi görüntülerin karşılaştırılacağı seçiliyor"));
+
+SS_MSG(stage_seeding,
+    EN("Choosing the lens and a starting pair"),
+    JA("レンズと最初のペアを決めています"),
+    ZH_HANS("正在确定镜头和起始像对"),
+    ZH_HANT("正在確定鏡頭和起始影像對"),
+    KO("렌즈와 시작 쌍을 고르는 중"),
+    DE("Objektiv und Startpaar werden gewählt"),
+    FR("Choix de l'objectif et d'une paire de départ"),
+    ES("Eligiendo el objetivo y un par inicial"),
+    PT("Escolhendo a lente e um par inicial"),
+    IT("Scelta dell'obiettivo e di una coppia iniziale"),
+    NL("Lens en startpaar kiezen"),
+    RU("Выбор объектива и стартовой пары"),
+    TR("Objektif ve bir başlangıç çifti seçiliyor"));
+
+SS_MSG(stage_refining,
+    EN("Refining the finished model"),
+    JA("完成したモデルを調整しています"),
+    ZH_HANS("正在精修完成的模型"),
+    ZH_HANT("正在精修完成的模型"),
+    KO("완성된 모델을 다듬는 중"),
+    DE("Das fertige Modell wird verfeinert"),
+    FR("Affinage du modèle terminé"),
+    ES("Afinando el modelo terminado"),
+    PT("Refinando o modelo pronto"),
+    IT("Rifinitura del modello finito"),
+    NL("Het voltooide model verfijnen"),
+    RU("Уточнение готовой модели"),
+    TR("Biten model iyileştiriliyor"));
+
 SS_MSG(stage_reconstructing,
     EN("Reconstructing cameras (the slow part)"),
     JA("カメラ位置を復元しています（時間のかかる工程）"),
@@ -489,6 +549,54 @@ SS_MSG(using_bundled_masks,
     NL("De meegeleverde maskers worden gebruikt: {0}"),
     RU("Используются маски, приложенные к фотографиям: {0}"),
     TR("Fotoğraflarla birlikte gelen maskeler kullanılıyor: {0}"));
+
+// {0} is a whole number of degrees.
+SS_MSG(video_autorotate,
+    EN("The capture asks to be turned {0} degrees; the frames are written already turned."),
+    JA("この撮影は {0} 度回転して表示するよう指定されています。フレームは回転済みで書き出されます。"),
+    ZH_HANS("该素材要求旋转 {0} 度显示；导出的帧已经旋转好。"),
+    ZH_HANT("此素材要求旋轉 {0} 度顯示；輸出的影格已經旋轉完成。"),
+    KO("이 촬영본은 {0}도 회전해 표시하도록 지정되어 있습니다. 프레임은 회전된 상태로 저장됩니다."),
+    DE("Die Aufnahme verlangt eine Drehung um {0} Grad; die Einzelbilder werden bereits gedreht geschrieben."),
+    FR("La capture demande une rotation de {0} degrés ; les images sont écrites déjà tournées."),
+    ES("La captura pide un giro de {0} grados; los fotogramas se escriben ya girados."),
+    PT("A captura pede uma rotação de {0} graus; os fotogramas são gravados já girados."),
+    IT("La ripresa chiede una rotazione di {0} gradi; i fotogrammi vengono scritti già ruotati."),
+    NL("De opname vraagt om een draaiing van {0} graden; de beelden worden al gedraaid weggeschreven."),
+    RU("Съёмка требует поворота на {0} градусов; кадры записываются уже повёрнутыми."),
+    TR("Bu çekim {0} derece döndürülmeyi istiyor; kareler döndürülmüş olarak yazılıyor."));
+
+SS_MSG(video_autorotate_mixed,
+    EN("The tracks of this file ask for different rotations; all of them are "
+       "turned the same way."),
+    JA("このファイルのトラックごとに回転指定が異なります。すべて同じ向きに回転します。"),
+    ZH_HANS("该文件各轨道要求的旋转角度不同；全部按同一方向旋转。"),
+    ZH_HANT("此檔案各軌道要求的旋轉角度不同；全部按同一方向旋轉。"),
+    KO("이 파일의 트랙마다 회전 지정이 다릅니다. 모두 같은 방향으로 회전합니다."),
+    DE("Die Spuren dieser Datei verlangen unterschiedliche Drehungen; alle werden gleich gedreht."),
+    FR("Les pistes de ce fichier demandent des rotations différentes ; toutes sont tournées de la même façon."),
+    ES("Las pistas de este archivo piden giros distintos; todas se giran igual."),
+    PT("As faixas deste ficheiro pedem rotações diferentes; todas são giradas da mesma forma."),
+    IT("Le tracce di questo file chiedono rotazioni diverse; vengono ruotate tutte allo stesso modo."),
+    NL("De sporen in dit bestand vragen om verschillende draaiingen; ze worden allemaal gelijk gedraaid."),
+    RU("Дорожки этого файла требуют разного поворота; все поворачиваются одинаково."),
+    TR("Bu dosyanın izleri farklı dönüşler istiyor; hepsi aynı yöne döndürülüyor."));
+
+SS_MSG(video_autorotate_mirror,
+    EN("The capture also asks to be mirrored. That is left alone: a mirrored "
+       "picture has no camera pose that fits it."),
+    JA("この撮影は左右反転も指定していますが、適用しません。反転した画像に合うカメラ姿勢は存在しません。"),
+    ZH_HANS("该素材还要求左右镜像，但不会应用：镜像后的画面没有与之相符的相机位姿。"),
+    ZH_HANT("此素材還要求左右鏡像，但不會套用：鏡像後的畫面沒有與之相符的相機姿態。"),
+    KO("이 촬영본은 좌우 반전도 요구하지만 적용하지 않습니다. 반전된 그림에 맞는 카메라 자세는 없습니다."),
+    DE("Die Aufnahme verlangt außerdem eine Spiegelung. Sie bleibt aus: zu einem gespiegelten Bild passt keine Kamerapose."),
+    FR("La capture demande aussi un miroir. Il n'est pas appliqué : aucune pose de caméra ne correspond à une image miroir."),
+    ES("La captura también pide un espejado. No se aplica: ninguna pose de cámara encaja con una imagen espejada."),
+    PT("A captura também pede um espelhamento. Não é aplicado: nenhuma pose de câmara corresponde a uma imagem espelhada."),
+    IT("La ripresa chiede anche una specchiatura. Non viene applicata: nessuna posa di camera corrisponde a un'immagine specchiata."),
+    NL("De opname vraagt ook om spiegeling. Die blijft achterwege: bij een gespiegeld beeld past geen camerapositie."),
+    RU("Съёмка также требует зеркального отражения. Оно не применяется: зеркальному изображению не соответствует ни одна поза камеры."),
+    TR("Bu çekim ayrıca aynalanmayı istiyor. Uygulanmıyor: aynalanmış bir görüntüye uyan kamera duruşu yoktur."));
 
 SS_MSG(video_input,
     EN("Video: {0}"),
@@ -816,6 +924,31 @@ SS_MSG(warn_unreadable_skipped,
     TR("Uyarı: {0} okunamadı; atlandı"));
 
 // ---- the built-in reconstruction's notes ----------------------------------
+
+SS_MSG(sync_needs_builtin,
+    EN("note: synchronized lenses need the built-in decoder; ffmpeg picks each "
+       "track's frames on its own"),
+    JA("注記: レンズの同期には内蔵デコーダが必要です。ffmpeg は各トラックのフレームを"
+       "個別に選びます"),
+    ZH_HANS("注意：同步镜头需要内置解码器；ffmpeg 会各自挑选每条轨道的帧"),
+    ZH_HANT("注意：同步鏡頭需要內建解碼器；ffmpeg 會各自挑選每條軌道的幀"),
+    KO("참고: 렌즈 동기화에는 내장 디코더가 필요합니다. ffmpeg 는 트랙마다 프레임을 따로 고릅니다"),
+    DE("Hinweis: synchronisierte Objektive brauchen den eingebauten Decoder; ffmpeg "
+       "wählt die Bilder jeder Spur für sich"),
+    FR("note : la synchronisation des objectifs demande le décodeur intégré ; ffmpeg "
+       "choisit les images de chaque piste séparément"),
+    ES("nota: sincronizar las lentes requiere el decodificador integrado; ffmpeg "
+       "elige los fotogramas de cada pista por separado"),
+    PT("nota: sincronizar as lentes exige o descodificador integrado; o ffmpeg "
+       "escolhe os quadros de cada pista separadamente"),
+    IT("nota: sincronizzare gli obiettivi richiede il decoder integrato; ffmpeg "
+       "sceglie i fotogrammi di ogni traccia per conto suo"),
+    NL("opmerking: gesynchroniseerde lenzen hebben de ingebouwde decoder nodig; "
+       "ffmpeg kiest de frames van elk spoor apart"),
+    RU("примечание: синхронизация объективов требует встроенного декодера; ffmpeg "
+       "выбирает кадры каждой дорожки по отдельности"),
+    TR("not: eşzamanlı lensler yerleşik çözücüyü gerektirir; ffmpeg her izin karelerini "
+       "kendi başına seçer"));
 
 SS_MSG(sfm_focal_unreadable,
     EN("warning: could not read an image in {0}; leaving its focal length to "

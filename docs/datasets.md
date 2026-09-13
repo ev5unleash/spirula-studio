@@ -337,6 +337,74 @@ pivot and nothing else. `src/data/SceneCenter.h` is the one implementation;
 the table of centres travels to a viewer on `ViewerRenderConfig::centers`,
 and the training viewer's browser client fetches it from `/scene`.
 
+## EXIF orientation
+
+A phone held upright records a **landscape file plus a tag** that says to turn
+it. Nothing in a reconstruction pipeline reads that tag by default -- COLMAP
+does not, and neither did this one -- so a portrait capture arrives as a scene
+lying on its side, and the images look wrong in any viewer that does read it.
+
+Three things now deal with it, at three different points:
+
+1. **Frames pulled out of a video** are written already turned by the
+   container's display matrix (`app/FrameExtract.h`, `auto_rotate`, on by
+   default; `spirula sam extract --no-autorotate` declines). ffmpeg does the
+   same for the fallback path, so both decoders write the same pixels. The
+   files carry no orientation metadata afterwards, so nothing downstream has
+   to agree about anything.
+2. **Photos copied into a dataset** with "Copy, re-encoded as JPEG" are
+   re-encoded when their tag asks for a turn, with the turn baked into the
+   pixels and the tag reset to 1. The rest of the EXIF block is carried over
+   unchanged -- the focal-length prior and the GPS are what the reconstruction
+   would otherwise lose.
+3. **Photos read as they are** keep their tag, and `--exif-orientation` says
+   what it is worth. It is a flag of `spirula sfm` and of `spirula train`, and
+   **the two must be given the same value**: it decides what frame the model
+   and the images share.
+
+| `--exif-orientation` | the pixels | the model | reads correctly in |
+|---|---|---|---|
+| `none` | untouched | levelled by the image's own up | -- (the scene is on its side) |
+| `orient` (default) | untouched | levelled by the tag's up | software that ignores EXIF, and software that reads it |
+| `apply` | turned on load | levelled by the image's own up, which is now the tag's | software that reads EXIF |
+
+`orient` is the default because it is the only one that leaves the pair usable
+either way: the files on disk are untouched, so a reader that ignores EXIF
+still sees images that match the cameras, while the scene itself stands up.
+`apply` is for a pipeline whose every consumer applies the tag; a model built
+with it describes the TURNED frame, so a training run over it needs `apply`
+too, and a run that forgets is told so by name (the warning that the image is
+its camera transposed).
+
+**A mirrored tag (2, 4, 5, 7) is a compromise in `apply`.** Mirroring an image
+cannot be undone by moving the camera -- the pose that fits mirrored pixels is
+the mirror image of the real one -- so only the rotation is applied and the run
+warns. `orient` needs no compromise: a mirror does not move which way is up.
+
+**Every model sees the picture upright; every map it produces is written in
+the stored frame.** SAM and the geometry networks were trained on pictures the
+way up they are meant to be shown, and a photo case 3 left alone is not that
+way up. So masking and `spirula geometry` turn what goes IN by the tag
+(`app::load_upright`) and turn the mask, the depth and the normals back out by
+its inverse (`app::inverse_turn`) -- a normal map's vectors along with its
+pixels, x and y being image axes. The files beside an image are then in the
+image's own frame, which is the pair `orient` and `none` need; `apply` turns
+both together on load, so it needs the same pair.
+
+**The GUI's previews are the same pictures.** "Try the mask" goes through
+`gui/PreviewFrames.h`, which applies the input's `app::FrameLook` -- the turn
+above, the downscale, a 360 file's unwrap into views -- and for a video
+decodes through `app::extract_frames_at`, the entry point extraction itself
+uses. So the frame on screen is the one the masker sees, and a click on it
+names a pixel the run will read. The geometry preview reads its frames STORED,
+because those come with a camera that describes the stored pixels, and turns
+the warped FACE instead -- exactly as `spirula geometry` does.
+
+One thing this does not reach: `spirula sfm merge` has no features to read the
+tag from, so it reads it back off the image files (`sfm/map/Orient.h`,
+`fillExifOrientations`); without `--image-dir` it falls back to the image's
+own up.
+
 ## Train/eval split
 
 `eval_mode` selects the strategy:
@@ -375,6 +443,11 @@ A caller with no image decoders leaves `probe_image_size` null and gets the
 reconstruction's resolution unchanged; the WebAssembly viewer does exactly that.
 
 ## 360 cameras (GoPro MAX `.360`)
+
+The ten views of a frame share one file stem under `cam0/` .. `cam9/`, so
+`--rig cam0,cam1,...,cam9` (Spirula Studio: the input's rig row, on by
+default for a `.360`) reconstructs them as one pose per frame with the
+inter-view poses calibrated from the capture -- `src/sfm/README.md` "Rigs".
 
 `src/app/Pano360.h` is the one implementation: it recognises the packing,
 plans the views, and resamples them. Both decode paths go through it -- ffmpeg
@@ -477,8 +550,6 @@ high`) -- about 4.4 px per degree, against 16.7 for a 1504 px face.
   than to three sliders nobody can visualise. `src/sfm/core/Telemetry.h` reads
   them and `viewer/telemetry.html` plots them, but nothing consumes them yet;
   `docs/notes/imu-gps-for-sfm.md` is the plan for what will.
-- **Click prompts for masking.** Clicks are recorded on the camera's own
-  frame, which the unwrap reshapes. Prompt a 360 capture with text.
 - **The operator.** Whoever is holding it is in the downward and rearward views
   of every frame of most captures, and wants masking out.
 

@@ -4,7 +4,7 @@
 
 #include "app/gui/SfmInProcess.h"
 
-#include "sfm/core/Manifest.h"
+#include "sfm/core/Resume.h"
 
 #include <fstream>
 
@@ -16,9 +16,10 @@
 #include "app/AppPaths.h"
 #include "app/gui/Subprocess.h"
 #ifdef SS_TOOL_SFM
-// For the stage tags the child prints; a build without the module has no child
-// to read (see availability()).
+// The stage tags the child prints and the manifest it reads; a build without the
+// module has no child to run (see availability()).
 #include "sfm/core/Log.h"
+#include "sfm/core/Manifest.h"
 #include "i18n/catalog/Sfm.h"
 #endif
 
@@ -232,6 +233,7 @@ void SfmRunner::take_reconstruction(SfmJob& job) {
     job.init_distortion = _live.init_distortion;
     job.distortion_refine = _live.distortion_refine;
     job.final_per_image_intrinsics = _live.final_per_image_intrinsics;
+    job.final_free_rig = _live.final_free_rig;
     job.max_features = _live.max_features;
     job.max_image_size = _live.max_image_size;
     job.mapper = _live.mapper;
@@ -350,6 +352,7 @@ void SfmRunner::sweep_intermediates() {
     // camera folders puts them in features/cam0/... and a single-level sweep
     // removed nothing and left the directory.
     remove_tree(dir / "features");
+    remove_tree(dir / sfm::resume::kDir);
     std::error_code ec;
     fs::remove(dir / "matches.bin", ec);
 }
@@ -384,11 +387,29 @@ void SfmRunner::apply_status(const RunStatus& st) {
     switch (st.stage) {
         case 0: set_stage_if_new(Stage::Features, lmsg::stage_finding_features.get());
                 _prog.count(Stage::Features, st.done, st.total); break;
+        // Reading the feature files and choosing which pairs to match are both
+        // matching, and both used to leave the screen on a full features bar
+        // with nothing moving -- minutes of it with a learned frontend.
+        case 6: set_stage_if_new(Stage::Matching, lmsg::stage_reading_features.get());
+                _prog.count(Stage::Matching, st.done, st.total); break;
+        case 7: set_stage_if_new(Stage::Matching, lmsg::stage_selecting_pairs.get());
+                _prog.count(Stage::Matching, st.done, st.total); break;
         case 1: set_stage_if_new(Stage::Matching, lmsg::stage_matching_images.get());
                 _prog.count(Stage::Matching, st.done, st.total); break;
         case 2: case 3: case 4:
                 set_stage_if_new(Stage::Mapping, lmsg::stage_reconstructing.get());
-                _prog.count(Stage::Mapping, st.done, st.total); break;
+                _prog.count(Stage::Mapping, st.done, st.total);
+                _prog.fraction(Stage::Mapping, mapping_fraction(st.done, st.total));
+                break;
+        // Two stretches of the mapping step place no image, so the bar has
+        // nothing to say and the label has to: choosing a focal and a seed
+        // before the first, and the finishing solves after the last.
+        case 8: set_stage_if_new(Stage::Mapping, lmsg::stage_seeding.get());
+                _prog.fraction(Stage::Mapping, 0.0f);
+                break;
+        case 9: set_stage_if_new(Stage::Mapping, lmsg::stage_refining.get());
+                _prog.fraction(Stage::Mapping, kMappingBarFull);
+                break;
         default: break;
     }
     if (st.finished) {
@@ -398,6 +419,7 @@ void SfmRunner::apply_status(const RunStatus& st) {
     }
 }
 
+#ifdef SS_TOOL_SFM
 // The panel's per-input rows become the manifest's camera groups, keyed on the
 // sub-folder each input's frames went into. The focal is a fraction of the
 // width up to here: the width is not known until the frames exist.
@@ -448,8 +470,90 @@ sfm::Manifest SfmRunner::build_manifest(const SfmJob& job, const PrepResult& pre
         c.fps = pc.fps;
         man.captures.push_back(std::move(c));
     }
+    man.rigs = build_rigs(job.prep);
     return man;
 }
+
+// The rows' rig choices as definitions (sfm/core/Rig.h): "this input's
+// lenses" is a rig per input; a shared letter joins rows across inputs, as
+// captures of one rig when every input contributes the same lens folders.
+std::vector<sfm::RigDef> SfmRunner::build_rigs(const PrepJob& prep) {
+    std::vector<sfm::RigDef> out;
+    auto join = [](const std::string& a, const std::string& b) {
+        return a.empty() ? b : b.empty() ? a : a + "/" + b;
+    };
+    // Per input, the lens folders under its subdir: the sub-camera rows, or a
+    // video's tracks / views.
+    std::vector<std::vector<std::string>> lenses(prep.inputs.size());
+    for (size_t i = 0; i < prep.inputs.size(); i++) {
+        const PrepInput& in = prep.inputs[i];
+        if (!in.subcameras.empty()) continue;
+        lenses[i] = lens_dirs(prep, in);
+    }
+    // "This input's lenses": one rig per input.
+    for (size_t i = 0; i < prep.inputs.size(); i++) {
+        const PrepInput& in = prep.inputs[i];
+        std::vector<std::string> members;
+        if (in.subcameras.empty()) {
+            if (in.rig == kRigOwn) members = lenses[i];
+        } else {
+            for (const SubCamera& sc : in.subcameras)
+                if (sc.rig == kRigOwn) members.push_back(sc.rel);
+        }
+        if (members.size() < 2) continue;
+        sfm::RigDef d;
+        d.name = in.subdir.empty() ? std::string("rig") : in.subdir;
+        for (const std::string& m : members) {
+            sfm::RigMemberDef md;
+            md.prefix = join(in.subdir, m);
+            d.members.push_back(md);
+        }
+        out.push_back(std::move(d));
+    }
+    // The shared letters.
+    for (int letter = 0; letter < kRigShared; letter++) {
+        const int id = kRigFirstShared + letter;
+        // input -> the lens folders it contributes under this letter
+        std::vector<std::pair<size_t, std::vector<std::string>>> parts;
+        for (size_t i = 0; i < prep.inputs.size(); i++) {
+            const PrepInput& in = prep.inputs[i];
+            std::vector<std::string> mine;
+            if (in.subcameras.empty()) {
+                if (in.rig == id) mine = lenses[i].empty() ? std::vector<std::string>{""} : lenses[i];
+            } else {
+                for (const SubCamera& sc : in.subcameras)
+                    if (sc.rig == id) mine.push_back(sc.rel);
+            }
+            if (!mine.empty()) parts.push_back({i, std::move(mine)});
+        }
+        if (parts.empty()) continue;
+        sfm::RigDef d;
+        d.name = std::string(1, (char)('A' + letter));
+        bool same = parts.size() > 1 && parts[0].second.size() > 1;
+        for (const auto& p : parts) same = same && p.second == parts[0].second;
+        if (same) {
+            // One rig behind several inputs: captures, and members relative
+            // to each.
+            for (const auto& p : parts) d.captures.push_back(prep.inputs[p.first].subdir);
+            for (const std::string& m : parts[0].second) {
+                sfm::RigMemberDef md;
+                md.prefix = m;
+                d.members.push_back(md);
+            }
+        } else {
+            for (const auto& p : parts)
+                for (const std::string& m : p.second) {
+                    sfm::RigMemberDef md;
+                    md.prefix = join(prep.inputs[p.first].subdir, m);
+                    d.members.push_back(md);
+                }
+        }
+        if (d.members.size() < 2) continue;
+        out.push_back(std::move(d));
+    }
+    return out;
+}
+#endif  // SS_TOOL_SFM
 
 // The flags that describe the MODEL rather than where it goes. The command
 // line and the workspace's stamp are both made from this, so they cannot drift.
@@ -494,6 +598,7 @@ std::vector<std::string> SfmRunner::recon_args(const SfmJob& job,
     if (job.distortion_refine >= 2) argv.push_back("--no-final-extra-params");
     if (job.final_per_image_intrinsics)
         argv.push_back("--final-per-image-intrinsics");
+    if (job.final_free_rig) argv.push_back("--final-free-rig");
     if (job.ba_cpu) {
         argv.push_back("--ba-real");
         argv.push_back("cpu");
@@ -637,12 +742,10 @@ void SfmRunner::run(SfmJob job) {
             if (prior.model && !changed.empty())
                 log(fmt(lmsg::sfm_settings_changed, {changed}), /*detail=*/false);
             set_stage(Stage::Features, lmsg::stage_reconstructing_features.get());
-            // Matching reads every .bin under features/, so one an interrupted
-            // run left for an image this one no longer has would join it as a
-            // phantom view. Nothing here is reused; start from none of it.
-            remove_tree(ws / "features");
+            // What features/ and matches.bin are still worth is the run's own
+            // decision, per stage and per file (sfm/core/Resume.h). The
+            // snapshots are not: they describe the run that wrote them.
             remove_tree(ws / ".progress");
-            fs::remove(ws / "matches.bin", ec);
             // From here the intermediates are this run's, however it ends: a
             // cancelled run leaves the same ones a finished one does, and the
             // screen goes on reading both until it is done with them.

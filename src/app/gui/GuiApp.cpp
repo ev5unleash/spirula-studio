@@ -232,6 +232,9 @@ void GuiApp::load_settings() {
         else if (k == "preview_h") _preview_h = (float)atof(v.c_str());
         else if (k == "show_settings") _show_settings = v != "0";
         else if (k == "native_dialogs") _dialog.use_native(v != "0");
+        // Absent -- an upgrade from a build that did not write it -- leaves the
+        // default, which is ON: the files are what makes a run resumable.
+        else if (k == "keep_intermediate") _sfm_job.keep_intermediate = v != "0";
         else if (k.rfind(kDirPrefix, 0) == 0 && !v.empty())
             _dialog_dirs[k.substr(sizeof kDirPrefix - 1)] = v;
     }
@@ -274,6 +277,7 @@ void GuiApp::save_settings() {
     std::fprintf(f, "preview_h=%.1f\n", _preview_h);
     std::fprintf(f, "show_settings=%d\n", _show_settings ? 1 : 0);
     std::fprintf(f, "native_dialogs=%d\n", _dialog.native_enabled() ? 1 : 0);
+    std::fprintf(f, "keep_intermediate=%d\n", _sfm_job.keep_intermediate ? 1 : 0);
     for (const auto& [key, dir] : _dialog_dirs)
         std::fprintf(f, "%s%s=%s\n", kDirPrefix, key.c_str(), dir.c_str());
     for (const auto& l : _accepted_licenses)
@@ -471,6 +475,7 @@ void GuiApp::write_run_settings(std::ofstream& f) {
     if (!j.init_distortion.empty()) line("init_distortion", j.init_distortion);
     line("distortion_refine", std::to_string(j.distortion_refine));
     line("final_per_image_intrinsics", cfg_str(j.final_per_image_intrinsics));
+    line("final_free_rig", cfg_str(j.final_free_rig));
     line("max_features", std::to_string(j.max_features));
     line("max_image_size", std::to_string(j.max_image_size));
     line("metric_gps", std::to_string(j.metric_gps));
@@ -482,6 +487,7 @@ void GuiApp::write_run_settings(std::ofstream& f) {
     line("force_external_masking", cfg_str(j.prep.force_external_masking));
     line("video_fps", cfg_str(j.prep.video_fps));
     line("sharp_window", std::to_string(j.prep.sharp_window));
+    line("sync_tracks", cfg_str(j.prep.sync_tracks));
     line("max_frames", std::to_string(j.prep.max_frames));
     if (!j.extra_args.empty()) line("extra_args", j.extra_args);
 
@@ -1619,6 +1625,14 @@ void GuiApp::add_sources(const std::vector<std::string>& paths, bool replace) {
         static const std::atomic<bool> never{false};
         s.eac360 = probe_eac360(_ffmpeg_exe, s.path, never);
     }
+    // A file with several lenses starts as a rig of its own; the row can
+    // still say otherwise.
+    for (PrepInput& s : _sources) {
+        if (!s.is_video || s.video_tracks > 0) continue;
+        static const std::atomic<bool> never{false};
+        s.video_tracks = std::max(1, probe_video_tracks(_ffmpeg_exe, s.path, never));
+        if (s.eac360.valid() || s.video_tracks >= 2) s.rig = kRigOwn;
+    }
     for (const std::string& masks : mask_folders) {
         if (attach_mask_folder(_sources, masks))
             log(i18n::format(dmsg::log_masks_attached, {masks}));
@@ -2450,6 +2464,7 @@ void GuiApp::sync_dataset_jobs() {
     prep.pano = _sfm_job.prep.pano;
     prep.max_frames = _sfm_job.prep.max_frames;
     prep.force_external_decode = _sfm_job.prep.force_external_decode;
+    prep.sync_tracks = _sfm_job.prep.sync_tracks;
     prep.ffmpeg_exe = _ffmpeg_exe;
     prep.python_exe = _python_exe;
     prep.mask_enable = _mask_enable;
@@ -2965,6 +2980,13 @@ void GuiApp::draw_dataset_basics() {
         ImGui::SetNextItemWidth(px(220.0f));
         ui::SliderInt(dmsg::sharpness_window, &_sfm_job.prep.sharp_window, 1, 8);
         ui::help_on_hover(dmsg::sharpness_window_help);
+        bool any_multi = false;
+        for (const PrepInput& s : _sources)
+            any_multi = any_multi || (s.is_video && !s.eac360.valid() && s.video_tracks >= 2);
+        if (any_multi) {
+            ui::Checkbox(dmsg::sync_lenses, &_sfm_job.prep.sync_tracks);
+            ui::help_on_hover(dmsg::sync_lenses_help);
+        }
         if (any_pano360()) draw_pano360_options();
         if (!backends().builtin_video) {
             // What the note says is a build-configuration diagnostic and
@@ -3123,6 +3145,23 @@ void GuiApp::draw_source_cameras() {
         ui::InputFloat(dmsg::focal_x_width, &group_focal(_sources, g), 0, 0,
                        "%.4g");
         ui::help_on_hover(dmsg::focal_x_width_help);
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(px(150.0f));
+        {
+            // "This input's lenses" only means something for an input with
+            // several: a lone photo folder or a one-lens video has none to rig.
+            const bool multi = g.sub >= 0 || !lens_dirs(_sfm_job.prep, in).empty();
+            const char* const items[] = {ui::detail::label(dmsg::rig_none),
+                                         ui::detail::label(dmsg::rig_own), "A", "B", "C", "D"};
+            int& rig = group_rig(_sources, g);
+            if (!multi && rig == kRigOwn) rig = kRigNone;
+            const int first = multi ? 0 : 1;
+            int idx = rig - first;
+            if (idx < 0) idx = 0;
+            if (ui::ComboRaw("##rig", &idx, items + first, kRigFirstShared + kRigShared - first))
+                rig = idx + first;
+            ui::help_on_hover(dmsg::rig_help);
+        }
         draw_lens_warning(dir, in.is_video, models[i], /*builtin=*/true);
         ImGui::PopID();
     }
@@ -3191,18 +3230,35 @@ void GuiApp::draw_lens_warning(const std::string& path, bool is_video,
 // Masking
 // ---------------------------------------------------------------------------
 
+PreviewSource GuiApp::preview_source(size_t input) const {
+    PreviewSource src;
+    if (input >= _sources.size()) return src;
+    const PrepInput& in = _sources[input];
+    src.input = in.path;
+    src.is_video = in.is_video;
+    src.ffmpeg_exe = _ffmpeg_exe;
+    // In process where the driver can, ffmpeg where it cannot or where the job
+    // said to -- the choice preparation itself makes.
+    src.builtin_decode =
+        !_sfm_job.prep.force_external_decode && backends().builtin_video;
+    src.tracks = std::max(in.video_tracks, 1);
+    src.look.auto_rotate = _sfm_job.prep.auto_rotate;
+    if (in.eac360.valid() && _sfm_job.prep.pano.mode != app::Pano360Mode::Off) {
+        src.look.eac = in.eac360;
+        src.look.views = app::pano360_views(in.eac360, _sfm_job.prep.pano);
+    }
+    return src;
+}
+
 void GuiApp::open_mask_preview() {
     if (_sources.empty()) {
         log(dmsg::mask_pick_input_first.get());
         return;
     }
-    const PrepInput& s = _sources[(size_t)_mask_preview_input];
     // One backbone on the device at a time; see open_geometry_preview.
     _geometry_panel.close();
-    // The preview reads the video the same way preparation will: in process
-    // where the driver can, ffmpeg where it cannot or where the job said to.
-    _segment.open(s.path, s.is_video, _mask_enable ? selected_model_path() : "",
-                  _ffmpeg_exe, _sfm_job.prep.force_external_decode);
+    _segment.open(preview_source((size_t)_mask_preview_input),
+                  _mask_enable ? selected_model_path() : "");
 }
 
 void GuiApp::draw_masking_options() {
@@ -3282,8 +3338,6 @@ void GuiApp::draw_masking_options() {
             ui::TextColoredWrappedRaw(kErr, _download.status());
         if (entry && !entry->text_prompts && _mask.clicks.empty())
             ui::TextColored(kWarn, dmsg::mask_no_text_prompts);
-        if (any_pano360())
-            ui::TextColoredWrapped(kWarn, dmsg::pano360_clicks_warning);
         if (!_mask.clicks.empty()) {
             int objects = 0;
             for (const MaskClick& c : _mask.clicks)
@@ -3448,15 +3502,12 @@ void GuiApp::open_geometry_preview() {
         _sources.empty() ? 0
                          : std::min((size_t)_mask_preview_input,
                                     _sources.size() - 1);
-    const PrepInput* in = _sources.empty() ? nullptr : &_sources[idx];
     std::string lens = _sfm_job.camera_model;
     float focal = 0.0f;
-    if (in) source_lens(idx, lens, focal);
-    _geometry_panel.open(in ? in->path : std::string(), in && in->is_video,
-                         _workspace,
+    if (!_sources.empty()) source_lens(idx, lens, focal);
+    _geometry_panel.open(preview_source(idx), _workspace,
                          planned_image_dir(_sources, _workspace, _photo_import),
-                         lens, focal, _ffmpeg_exe,
-                         _sfm_job.prep.force_external_decode);
+                         lens, focal);
 }
 
 void GuiApp::draw_geometry_options() {
@@ -3937,14 +3988,17 @@ void GuiApp::draw_dataset_rerun(const WorkspaceState& prior) {
 
 void GuiApp::reset_recon_options() {
     // The photographs' colour space was read off the files, not chosen, so it
-    // is not one of the options this puts back.
+    // is not one of the options this puts back -- and keeping the intermediate
+    // files is a setting of the program's rather than of this project's.
     const std::string gamut = _sfm_job.image_gamut;
     const std::optional<bool> linear = _sfm_job.image_is_linear;
+    const bool keep = _sfm_job.keep_intermediate;
     _sfm_job = SfmJob{};
     _colmap_job = ColmapJob{};
     _geometry = GeometryJob{};
     _sfm_job.image_gamut = gamut;
     _sfm_job.image_is_linear = linear;
+    _sfm_job.keep_intermediate = keep;
     for (PrepInput& s : _sources) {
         s.camera_model = default_lens(s.path);
         s.focal_factor = 0.0f;
@@ -4022,6 +4076,40 @@ void GuiApp::draw_clear_project_modal() {
     ImGui::SameLine();
     if (ui::Button(dmsg::cancel, ImVec2(px(150.0f), 0))) {
         _clear_shown = false;
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
+
+void GuiApp::draw_drop_intermediate_modal() {
+    if (_drop_intermediate_open) {
+        ui::OpenPopup(dmsg::drop_intermediate_title);
+        _drop_intermediate_open = false;
+        _drop_intermediate_shown = true;
+    }
+    if (!_drop_intermediate_shown) return;
+    // Closed by the window's own means rather than by a button: the setting
+    // stays as it was, which is the safe half of the question.
+    if (!ui::BeginPopupModal(dmsg::drop_intermediate_title, nullptr,
+                             ImGuiWindowFlags_AlwaysAutoResize)) {
+        _drop_intermediate_shown = false;
+        _sfm_job.keep_intermediate = true;
+        return;
+    }
+    ImGui::PushTextWrapPos(px(460.0f));
+    ui::Text(dmsg::drop_intermediate_confirm);
+    ImGui::PopTextWrapPos();
+    ImGui::Spacing();
+    if (ui::Button(dmsg::drop_intermediate_button, ImVec2(px(150.0f), 0))) {
+        _sfm_job.keep_intermediate = false;
+        save_settings();
+        _drop_intermediate_shown = false;
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ui::Button(dmsg::cancel, ImVec2(px(150.0f), 0))) {
+        _sfm_job.keep_intermediate = true;
+        _drop_intermediate_shown = false;
         ImGui::CloseCurrentPopup();
     }
     ImGui::EndPopup();
@@ -4193,6 +4281,8 @@ void GuiApp::draw_sfm_advanced() {
                  &_sfm_job.final_per_image_intrinsics);
     ImGui::EndDisabled();
     ui::help_on_hover(dmsg::sfm_per_image_intrinsics_help);
+    ui::Checkbox(dmsg::sfm_final_free_rig, &_sfm_job.final_free_rig);
+    ui::help_on_hover(dmsg::sfm_final_free_rig_help);
 
     ImGui::SetNextItemWidth(px(260.0f));
     ui::InputInt(dmsg::max_features_auto, &_sfm_job.max_features);
@@ -4219,7 +4309,12 @@ void GuiApp::draw_sfm_advanced() {
     ui::help_on_hover(dmsg::sfm_metric_gps_help);
     ImGui::Spacing();
 
-    ui::Checkbox(dmsg::keep_intermediate, &_sfm_job.keep_intermediate);
+    // Unticking it is what throws the resumable state away, so it asks first
+    // and the answer is remembered; ticking it back needs no ceremony.
+    if (ui::Checkbox(dmsg::keep_intermediate, &_sfm_job.keep_intermediate)) {
+        if (_sfm_job.keep_intermediate) save_settings();
+        else _drop_intermediate_open = true;
+    }
     ui::help_on_hover(dmsg::keep_intermediate_help);
 
     ImGui::SetNextItemWidth(-1);
@@ -4643,6 +4738,7 @@ void GuiApp::draw_new_dataset() {
     }
     if (_geometry_panel.is_open()) _geometry_panel.draw(_geometry);
     draw_clear_project_modal();
+    draw_drop_intermediate_modal();
     draw_license_modal();
 }
 

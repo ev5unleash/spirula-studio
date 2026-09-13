@@ -52,6 +52,7 @@
 #include "sfm/core/Features.h"
 #include "sfm/core/Image.h"
 #include "sfm/core/ImageLoader.h"
+#include "sfm/map/Orient.h"
 #include "sfm/core/Mask.h"
 #include "sfm/core/Matches.h"
 #include "sfm/feature/Matcher.h"
@@ -69,6 +70,7 @@
 #include "i18n/catalog/Sfm.h"
 #include "i18n/catalog/Cli.h"
 #include "i18n/catalog/SfmHelp.h"
+#include "i18n/TimeFormat.h"
 
 // `spirula-sfm ba`, in sfm_ba.cpp. It prints its own help.
 int cmdBa(int argc, char** argv);
@@ -89,6 +91,7 @@ struct MergeSummary {
     double seconds = 0, ba_seconds = 0;
 };
 using namespace sfm;
+using spirula::i18n::format_duration;
 
 // Every line this tool prints goes out tagged and translated; see
 // sfm/core/Log.h for the mechanism and for what stays English.
@@ -155,6 +158,7 @@ static void ownOptionsAuto(FILE* out) {
     helpLine(out, "-o, --output DIR", H::word_required.get(),
              H::opt_auto_output.get());
     helpLine(out, "--manifest FILE", "", H::opt_manifest.get());
+    helpLine(out, "--rig PREFIX,PREFIX,...", "", H::opt_rig.get());
     helpLine(out, "--no-masks", "", H::opt_no_masks.get());
     helpLine(out, "--no-manage", "", H::opt_no_manage_auto.get());
     helpLine(out, "--progress-dir DIR", "", H::opt_progress_dir.get());
@@ -171,6 +175,7 @@ static void ownOptionsMatch(FILE* out) {
 }
 static void ownOptionsMap(FILE* out) {
     helpLine(out, "-o, --output DIR", "", H::opt_map_output.get());
+    helpLine(out, "--rig PREFIX,PREFIX,...", "", H::opt_rig.get());
     helpLine(out, "--audit", "", H::opt_map_audit.get());
     helpLine(out, "--no-manage", "", H::opt_no_manage_map.get());
     helpLine(out, "--progress-dir DIR", "", H::opt_progress_dir.get());
@@ -383,8 +388,10 @@ static void printEvent(const sfm::Event& e) {
     if (trace) {
         static const char* kKind[] = {"stage-begin", "stage-end", "progress",
                                       "image", "pair", "model", "result"};
-        static const char* kStage[] = {"extract", "match", "map",
-                                       "merge", "orient", "finish"};
+        static const char* kStage[] = {"extract", "match", "map",  "merge",
+                                       "orient",  "finish", "load", "select",
+                                       "seed",    "refine"};
+        static_assert(sizeof kStage / sizeof *kStage == sfm::kNumStages, "");
         L::diag(Tag::Run, "[ev] %-11s %-7s done=%lld/%lld reg=%lld pts=%lld %s",
                 kKind[(int)e.kind], kStage[(int)e.stage], (long long)e.done,
                 (long long)e.total, (long long)e.registered, (long long)e.points,
@@ -757,6 +764,14 @@ static int cmdMap(int argc, char** argv) {
                 return usageError("map", err);
             continue;
         }
+        if (a == "--rig") {
+            if (i + 1 >= argc) return usageError("map", "--rig: missing value");
+            RigDef d;
+            if (std::string err = parseRigArg(argv[++i], d); !err.empty())
+                return usageError("map", err);
+            cfg.rigs.push_back(std::move(d));
+            continue;
+        }
         int r = tableFlag(cfg, CMD_MAP, "map", a, argc, argv, i, seen);
         if (r < 0) return 1;
         if (r > 0) continue;
@@ -859,7 +874,14 @@ static int cmdMap(int argc, char** argv) {
     opt.given_focal_cameras = cs.focal_given;
     opt.measured_focal_cameras = cs.focal_measured;
 
-    Mapper mapper(db, feats, opt, cs.ids);
+    RigTable rigs;
+    try {
+        rigs = buildRigs(db, cfg, opt.verbose);
+    } catch (const std::runtime_error& e) {
+        L::fail(Tag::Map, M::rig_bad, {e.what()});
+        return 1;
+    }
+    Mapper mapper(db, feats, opt, cs.ids, &rigs);
     std::vector<Reconstruction> models;
     AssembleStats ast;
     if (cfg.resume.empty()) {
@@ -991,7 +1013,7 @@ static int cmdMap(int argc, char** argv) {
     const bool map_metric = fixGauge(models, cfg, cfg.image_dir, opt.verbose, map_gauge);
     recolorPoints(models, cfg);
     splitCamerasBySize(models, feats);
-    if (!output.empty()) writeModels(models, output, opt.verbose, map_gauge);
+    if (!output.empty()) writeModels(models, output, opt.verbose, map_gauge, &rigs);
     return map_metric ? 0 : 4;
 }
 
@@ -1069,10 +1091,11 @@ static int cmdMerge(int argc, char** argv) {
         models = mergeModels(std::move(models), mo, cfg.merge_ba, cfg.device, sum);
 
         L::out(Tag::Merge, M::merge_summary,
-               {(long long)sum.before, (long long)sum.after, L::num(sum.seconds, 2),
-                (long long)sum.merges, (long long)sum.refused});
+               {(long long)sum.before, (long long)sum.after,
+                format_duration(sum.seconds), (long long)sum.merges,
+                (long long)sum.refused});
         if (sum.ba_seconds > 0)
-            L::out(Tag::Merge, M::merge_ba_seconds, {L::num(sum.ba_seconds, 2)});
+            L::out(Tag::Merge, M::merge_ba_seconds, {format_duration(sum.ba_seconds)});
         for (size_t i = 0; i < models.size(); i++) {
             double mean = 0, median = 0;
             size_t nobs = 0;
@@ -1089,6 +1112,8 @@ static int cmdMerge(int argc, char** argv) {
     }
 
     std::vector<sfm::ModelGauge> merge_gauge;
+    // These models came off disk, which records no Orientation tag.
+    if (cfg.exif_orientation == "orient") fillExifOrientations(models, cfg.image_dir);
     const bool merge_metric = fixGauge(models, cfg, cfg.image_dir, mo.verbose, merge_gauge);
     recolorPoints(models, cfg);
     writeModels(models, fs::path(output), mo.verbose, merge_gauge);

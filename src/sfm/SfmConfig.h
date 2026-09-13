@@ -141,6 +141,10 @@ struct SfmConfig {
     // Write the finished model in an upright, centred, unit-sized frame rather
     // than in whatever gauge the seed pair left it in (map/Orient.h).
     bool orient = true;
+    // What each image's EXIF Orientation is worth: "none", "orient" (the up
+    // direction only, pixels untouched) or "apply" (turn the pixels).
+    // docs/datasets.md, "EXIF orientation".
+    std::string exif_orientation = "orient";
     // Instead: fix the gauge from an outside measurement in metres, so the
     // model is written metric (map/MetricGauge.h, D74).
     std::string metric_positions;       // one `image_name X Y Z` per line
@@ -154,6 +158,15 @@ struct SfmConfig {
     std::string telemetry;
     std::string sensor_gauge = "auto";
     std::vector<TelemetryInput> telemetry_inputs;   // manifest entries + --telemetry
+    // Cameras farther from the metric fit than this fraction of the reference
+    // positions' RMS radius are outliers too, so a kilometre-long flight is
+    // not judged by a threshold made for a walk (map/MetricGauge.h).
+    double metric_max_error_frac = 0.03;
+    // Rigs (sfm/core/Rig.h): --rig and the manifest, resolved against the image
+    // names once they are known. `final_free_rig` runs one last bundle
+    // adjustment with every image on its own pose.
+    std::vector<RigDef> rigs;
+    bool final_free_rig = false;
     bool merge_ba = true;               // merge: bundle-adjust across the seams
     bool in_place = false;              // merge: write back over the input
 
@@ -162,6 +175,11 @@ struct SfmConfig {
     std::string feature_dir;
     std::string resume;
     bool check = false;
+
+    // `auto`: pick up what an interrupted run of the same settings left in the
+    // workspace -- the feature files it wrote, the pair list it chose, the pairs
+    // verification finished (sfm/core/Resume.h). Off starts every stage over.
+    bool reuse = true;
 
     // Runtime.
     int threads = 0;           // host worker pools; 0 = hardware_concurrency
@@ -284,6 +302,8 @@ struct SfmConfig {
       0, 0, "", exif_groups)                                                                       \
     F(camera.exif_focal_tol, "exif-focal-tol", CMD_AUTO | CMD_MATCH | CMD_MAP, Tier::Advanced,     \
       "camera", 0.001, 1.0, "", exif_focal_tol)                                                    \
+    F(exif_orientation, "exif-orientation", CMD_AUTO | CMD_EXTRACT | CMD_MAP | CMD_MERGE,          \
+      Tier::Advanced, "camera", 0, 0, "none|orient|apply", exif_orientation)                       \
     /* ---- features ---- */                                                                       \
     F(features, "features", CMD_AUTO | CMD_EXTRACT, Tier::Basic, "features", 0, 0,                 \
       "sift|aliked-n16rot|aliked-n32|loma-b128|loma-b", features)                                  \
@@ -369,6 +389,8 @@ struct SfmConfig {
       "none|horizontal|full", metric_gps)                                                          \
     F(metric_max_error, "metric-max-error", CMD_AUTO | CMD_MAP | CMD_MERGE, Tier::Advanced,        \
       "mapper", 0, 1000000, "", metric_max_error)                                                  \
+    F(metric_max_error_frac, "metric-max-error-frac", CMD_AUTO | CMD_MAP | CMD_MERGE,              \
+      Tier::Advanced, "mapper", 0, 1, "", metric_max_error_frac)                                   \
     F(telemetry, "telemetry", CMD_AUTO | CMD_MAP | CMD_MERGE, Tier::Advanced, "mapper", 0, 0, "",  \
       telemetry)                                                                                   \
     F(sensor_gauge, "sensor-gauge", CMD_AUTO | CMD_MAP | CMD_MERGE, Tier::Advanced, "mapper", 0,   \
@@ -453,6 +475,18 @@ struct SfmConfig {
       "mapper", 0, 1, "", strong_pnp_max_rival)                                                    \
     F(mapper.audit_min_evidence, "audit-evidence", CMD_AUTO | CMD_MAP, Tier::Advanced, "mapper",   \
       0, 1000000, "", audit_evidence)                                                              \
+    /* ---- rigs ---- */                                                                           \
+    F(mapper.use_rigs, "rigs", CMD_AUTO | CMD_MAP, Tier::Advanced, "rig", 0, 0, "", rigs)          \
+    F(mapper.refine_rigs, "refine-rigs", CMD_AUTO | CMD_MAP, Tier::Advanced, "rig", 0, 0, "",      \
+      refine_rigs)                                                                                 \
+    F(mapper.rig_complete_blind, "rig-blind", CMD_AUTO | CMD_MAP, Tier::Advanced, "rig", 0, 0,     \
+      "", rig_blind)                                                                               \
+    F(mapper.rig_calib.min_frames, "rig-min-frames", CMD_AUTO | CMD_MAP, Tier::Advanced, "rig",    \
+      2, 1000000, "", rig_min_frames)                                                              \
+    F(mapper.rig_calib.max_spread_deg, "rig-max-spread", CMD_AUTO | CMD_MAP, Tier::Advanced,       \
+      "rig", 0, 180, "", rig_max_spread)                                                           \
+    F(final_free_rig, "final-free-rig", CMD_AUTO | CMD_MAP, Tier::Advanced, "rig", 0, 0, "",       \
+      final_free_rig)                                                                              \
     /* ---- assembling the models ---- */                                                          \
     F(assemble.max_rounds, "rounds", CMD_AUTO | CMD_MAP, Tier::Alias, "manage", 1, 1000, "",       \
       rounds)                                                                                      \
@@ -504,6 +538,7 @@ struct SfmConfig {
     F(image_dir, "images", CMD_MAP | CMD_MERGE, Tier::Advanced, "input", 0, 0, "", images)         \
     F(feature_dir, "features", CMD_MAP, Tier::Advanced, "input", 0, 0, "", feature_dir)            \
     F(resume, "resume", CMD_MAP, Tier::Advanced, "input", 0, 0, "", resume)                        \
+    F(reuse, "resume", CMD_AUTO, Tier::Basic, "input", 0, 0, "", auto_resume)                      \
     F(check, "check", CMD_MAP, Tier::Advanced, "input", 0, 0, "", check)                           \
     /* ---- runtime ---- */                                                                        \
     F(threads, "threads", CMD_AUTO | CMD_MATCH | CMD_MAP, Tier::Advanced, "runtime", 0, 4096, "",  \
@@ -549,5 +584,10 @@ void printConfigOptions(FILE* out, uint32_t cmd, const SfmConfig& defaults);
 // note after it, empty for a switch.
 void printOptionLine(FILE* out, const std::string& flag, const std::string& value,
                      const std::string& help);
+
+// Everything a stage's output depends on, as text: the table's rows for `cmd`
+// minus the ones that cannot change a byte of it, plus the camera overrides.
+// An interrupted run's leftovers are reusable exactly when this still matches.
+std::string stageSignature(const SfmConfig& cfg, uint32_t cmd);
 
 }  // namespace sfm

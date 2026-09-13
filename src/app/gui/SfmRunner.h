@@ -19,7 +19,10 @@
 #include "app/gui/DatasetPrep.h"
 #include "core/Env.h"
 #include "app/gui/SfmProgress.h"
+#ifdef SS_TOOL_SFM
+// Reaches the Vulkan headers, which a build without the module may not have.
 #include "sfm/core/Manifest.h"
+#endif
 #include "app/gui/FilmReel.h"
 #include "app/gui/GeometryRunner.h"
 #include "app/gui/PrepProgress.h"
@@ -105,6 +108,8 @@ struct SfmJob {
     // One more bundle adjustment at the very end with every image on its own
     // intrinsics, whatever the camera sharing above says.
     bool final_per_image_intrinsics = false;
+    // ... and one with the rigs released, every image on its own pose.
+    bool final_free_rig = false;
     int max_features = 0;             // 0 = the quality preset's
     int max_image_size = 0;           // 0 = the quality preset's
     // 0 flat, 1 bottom-up. Flat for every capture, whatever its size: there is
@@ -126,7 +131,10 @@ struct SfmJob {
     // The video's own IMU and GPS track: 0 off, 1 orientation only, 2 (the
     // default) orientation and whatever metric scale passes its own checks.
     int sensor_gauge = 2;
-    bool keep_intermediate = false;   // keep features/ and matches.bin
+    // Keep features/, matches.bin and .resume/ after a finished run. On by
+    // default and remembered between sessions: they are what makes a cancelled
+    // or failed reconstruction resumable (sfm/core/Resume.h).
+    bool keep_intermediate = true;
     // Bundle adjustment on the host from the start. The escape hatch for a
     // driver that resets under a long solve: a run falls back by itself when
     // the device fails, but only after paying for the failure.
@@ -238,8 +246,11 @@ private:
     // by the in-process run. apply_status is what both feed.
     void poll_status();
     void apply_status(const RunStatus& st);
+#ifdef SS_TOOL_SFM
     // The panel's per-input lens and focal rows, as the file the run reads.
     sfm::Manifest build_manifest(const SfmJob& job, const PrepResult& prep);
+    static std::vector<sfm::RigDef> build_rigs(const PrepJob& prep);
+#endif
     // Everything the child is told about the model, as against where to put
     // it. Both the command line and the workspace's stamp are made from this.
     std::vector<std::string> recon_args(const SfmJob& job, const PrepResult& prep);
