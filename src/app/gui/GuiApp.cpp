@@ -2703,14 +2703,18 @@ void GuiApp::sync_dataset_jobs() {
         recovery_run ? _dataset_recovery_redo_masks : _redo_masks;
     const bool redo_model =
         recovery_run ? _dataset_recovery_redo_model : _redo_model;
+    const bool redo_geometry =
+        recovery_run ? _dataset_recovery_redo_geometry : _redo_geometry;
     _sfm_job.prep.redo_frames = _colmap_job.redo_frames = redo_frames;
     _sfm_job.prep.redo_masks = _colmap_job.redo_masks = redo_masks;
     _sfm_job.redo_model = _colmap_job.redo_model = redo_model;
     // The same step either way: `spirula geometry` over the finished dataset.
     _sfm_job.geometry = _colmap_job.geometry = _geometry;
+    // Replacing frames changes the pixels geometry predicts.
     _sfm_job.geometry.overwrite = _colmap_job.geometry.overwrite =
-        _geometry.overwrite ||
-        (recovery_run ? _dataset_recovery_redo_geometry : _redo_geometry);
+        _geometry.overwrite || redo_geometry ||
+        (redo_frames && _geometry.enable &&
+         (_geometry.want_normal || _geometry.want_depth));
     // A settings file written by a build that HAS the inference layer must not
     // make a run on one that has not fail at the last step.
     _sfm_job.geometry.enable = _colmap_job.geometry.enable =
@@ -3872,7 +3876,7 @@ bool GuiApp::geometry_will_run() {
         (!_geometry.want_normal && !_geometry.want_depth))
         return false;
     GeometryJob check = _geometry;
-    check.overwrite = check.overwrite || _redo_geometry;
+    check.overwrite = check.overwrite || _redo_geometry || _redo_frames;
     if (check.overwrite) return true;
 
     const WorkspaceState& prior = workspace_state();
@@ -4334,54 +4338,73 @@ void GuiApp::draw_dataset_rerun(const WorkspaceState& prior) {
 
     // Each button starts a run of its own. A geometry checkpoint is needed
     // only when that run would actually invoke the geometry child.
+    const bool geometry_requested =
+        _geometry.enable && (_geometry.want_normal || _geometry.want_depth);
     const bool need_mask_model = mask_model_missing();
     const bool need_feat_model = feature_model_missing();
     const bool need_geom_model =
         geometry_model_missing() && geometry_will_run();
+    const bool need_frame_geom_model =
+        geometry_model_missing() && geometry_requested;
 
     bool go = false;
     if (prior.frames) {
-        ImGui::BeginDisabled(need_mask_model || need_feat_model);
+        const bool blocked =
+            need_mask_model || need_feat_model || need_frame_geom_model;
+        ImGui::BeginDisabled(blocked);
         if (ui::Button(dmsg::rerun_frames)) {
             _redo_frames = _redo_masks = true;   // the masks describe the frames
             _redo_model = go = true;
         }
         ImGui::EndDisabled();
-        if (need_mask_model || need_feat_model)
-            ui::help_on_hover_disabled(need_mask_model ? dmsg::mask_model_first
-                                                       : dmsg::feat_model_first);
+        if (blocked)
+            ui::help_on_hover_disabled(
+                need_mask_model ? dmsg::mask_model_first
+                : need_feat_model ? dmsg::feat_model_first
+                                   : dmsg::geom_model_first);
         ImGui::SameLine();
     }
     if (prior.masks) {
-        ImGui::BeginDisabled(need_mask_model);
+        const bool blocked = need_mask_model || need_geom_model;
+        ImGui::BeginDisabled(blocked);
         if (ui::Button(dmsg::rerun_masks)) {
             _redo_masks = true;
             _redo_model = go = true;
         }
         ImGui::EndDisabled();
-        if (need_mask_model) ui::help_on_hover_disabled(dmsg::mask_model_first);
+        if (blocked)
+            ui::help_on_hover_disabled(
+                need_mask_model ? dmsg::mask_model_first
+                                : dmsg::geom_model_first);
         ImGui::SameLine();
     }
-    ImGui::BeginDisabled(need_feat_model);
-    if (ui::Button(dmsg::rerun_model)) {
-        _redo_model = go = true;
+    {
+        const bool blocked = need_feat_model || need_geom_model;
+        ImGui::BeginDisabled(blocked);
+        if (ui::Button(dmsg::rerun_model)) {
+            _redo_model = go = true;
+        }
+        ImGui::EndDisabled();
+        if (blocked)
+            ui::help_on_hover_disabled(
+                need_feat_model ? dmsg::feat_model_first
+                                : dmsg::geom_model_first);
     }
-    ImGui::EndDisabled();
-    if (need_feat_model) ui::help_on_hover_disabled(dmsg::feat_model_first);
     // Depth and normals are the one step that reruns on its own: they are read
-    // off the finished dataset and nothing downstream of them exists.
+    // off the finished dataset and nothing downstream of them exists. Mask-only
+    // reruns leave the pixels unchanged, so their maps remain valid.
     if (prior.geometry) {
         ImGui::SameLine();
-        const bool need_geom_model =
-            geometry_model_missing() &&
-            (_geometry.want_normal || _geometry.want_depth);
-        ImGui::BeginDisabled(!_geometry.enable || need_geom_model);
+        const bool need_geometry_button_model =
+            geometry_model_missing() && geometry_requested;
+        ImGui::BeginDisabled(!_geometry.enable || need_geometry_button_model);
         if (ui::Button(dmsg::rerun_geometry)) {
             _redo_geometry = go = true;
         }
         ImGui::EndDisabled();
-        ui::help_on_hover_disabled(need_geom_model ? dmsg::geom_model_first
-                                                   : dmsg::rerun_geometry_help);
+        ui::help_on_hover_disabled(
+            need_geometry_button_model ? dmsg::geom_model_first
+                                       : dmsg::rerun_geometry_help);
     }
     ImGui::NewLine();
     ImGui::Unindent();

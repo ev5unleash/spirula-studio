@@ -6,7 +6,6 @@
 #include "app/AppPaths.h"
 #include "app/gui/Subprocess.h"
 #include "data/DatasetParser.h"
-#include "data/ImageProbe.h"
 #include "i18n/Locale.h"
 #include "i18n/catalog/Dataset.h"
 #include "i18n/catalog/Geometry.h"
@@ -217,7 +216,7 @@ bool geometry_outputs_complete(const GeometryJob& job,
         DatasetParserConfig cfg;
         cfg.require_image_files = false;
         cfg.image_dir = images.empty() ? "images" : images;
-        cfg.probe_image_size = probe_image_size;
+        cfg.probe_image_size = nullptr;
         const ParsedDataset ds = parse_dataset(dataset, cfg, "");
         if (ds.image_filenames.empty()) return false;
 
