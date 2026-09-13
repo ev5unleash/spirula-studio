@@ -41,7 +41,9 @@ int main() {
     CHECK(detail.find("9999") != std::string::npos);
     CHECK(detail.find("does not exist") != std::string::npos ||
           detail.find("range") != std::string::npos);
-    CHECK(device_select_identity("auto"));
+    const std::string selector = device_current_selector();
+    CHECK(!selector.empty());
+    CHECK(device_select_identity(selector.c_str()));
     CHECK(device_selection_error().empty());
 
     // --- allocation + classification ---

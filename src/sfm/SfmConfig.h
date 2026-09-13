@@ -191,8 +191,9 @@ struct SfmConfig {
     // usable native device.
     std::string device_selector;
     bool quiet = false;
-    // Raw --device spelling; explicit empty is normalized to "auto".
+    // Raw --device spelling; request_set preserves an explicit empty value.
     std::string device_request;
+    bool device_request_set = false;
 
     // Which frontend runs. "sift" is the GPU one; aliked-* and loma-* are the
     // learned ones and need the inference layer. Two flags and not one because
@@ -241,7 +242,9 @@ struct SfmConfig {
     std::string resolveDevice();
 
     // Resolve a --device value for direct BA without mutating this config.
-    static std::string selectorForDevice(const std::string& request, std::string& error);
+    // `request_set` preserves an explicit Auto when the value is empty.
+    static std::string selectorForDevice(const std::string& request,
+                                         bool request_set, std::string& error);
 
     // What --pairs names, with "auto" resolving to exhaustive. `auto` alone
     // additionally switches to pair selection above 100 images, which it can

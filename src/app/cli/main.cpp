@@ -222,19 +222,21 @@ std::string help_summary(const char* text, size_t max_columns = 110) {
 // Applies --device through the backend-neutral device API, then prints the
 // device table VkSplat-style (all visible devices, '*' on the one in use).
 // Vulkan takes the shared selector forms, CUDA only a nonnegative ordinal.
-void select_and_print_devices(const std::string& requested) {
+void select_and_print_devices(const std::string& requested, bool requested_set) {
+    const bool explicit_request = requested_set || !requested.empty();
     int n = backend::device_count();
     if (n == 0) {
-        if (!requested.empty())
+        if (explicit_request)
             throw std::runtime_error("--device: no compute devices found");
         return;  // let the backend report its own error on first use
     }
-    if (!requested.empty()) {
+    if (explicit_request) {
 #ifdef SS_BACKEND_VULKAN
-        if (!backend::device_select_identity(requested.c_str())) {
+        const std::string selector = requested.empty() ? "auto" : requested;
+        if (!backend::device_select_identity(selector.c_str())) {
             std::string detail = backend::device_selection_error();
             if (detail.empty()) detail = "device selection failed";
-            throw std::runtime_error("--device " + requested + ": " + detail);
+            throw std::runtime_error("--device " + selector + ": " + detail);
         }
 #else
         // CUDA accepts only a nonnegative ordinal here; from_chars rejects
@@ -417,6 +419,7 @@ int spirula_train_main(int argc, char** argv) {
         }
 
         std::string device_flag;
+        bool device_set = false;
         for (int i = argi; i < argc; i++) {
             std::string arg = argv[i];
             if (arg == "--help" || arg == "-h") {
@@ -430,10 +433,15 @@ int spirula_train_main(int argc, char** argv) {
             if (arg.rfind("--", 0) != 0)
                 throw std::runtime_error("unexpected argument: " + arg + " (flags are --key value)");
             // App-level flag, not part of the generated training config.
-            if (arg.rfind("--device=", 0) == 0) { device_flag = arg.substr(9); continue; }
+            if (arg.rfind("--device=", 0) == 0) {
+                device_flag = arg.substr(9);
+                device_set = true;
+                continue;
+            }
             if (arg == "--device") {
                 if (i + 1 >= argc) throw std::runtime_error("--device: missing value");
                 device_flag = argv[++i];
+                device_set = true;
                 continue;
             }
             // --key=value form: re-parse via a 2-token mini-argv. Tuple
@@ -476,7 +484,7 @@ int spirula_train_main(int argc, char** argv) {
         SS_CONFIG_REQUIRED_FIELDS(SS_CHECK_REQUIRED)
 #undef SS_CHECK_REQUIRED
 
-        select_and_print_devices(device_flag);
+        select_and_print_devices(device_flag, device_set);
 
         // ---- Session -------------------------------------------------------
         TrainerSession session;
