@@ -32,7 +32,7 @@
 
 #include <deque>
 #include <fstream>
-#include <future>
+#include <memory>
 #include <map>
 #include <string>
 #include <utility>
@@ -40,6 +40,7 @@
 
 namespace gui {
 
+class GeometryOutputProbe;
 class GuiApp {
 public:
     static constexpr float kDefaultPanelW = 420.0f;
@@ -521,7 +522,7 @@ private:
     bool _redo_geometry = false;
     // Output completeness is parsed asynchronously; the UI consumes only the
     // last completed answer.
-    std::future<bool> _geometry_output_probe;
+    std::unique_ptr<GeometryOutputProbe> _geometry_output_probe;
     std::string _geometry_output_probe_key;
     double _geometry_output_probed_at = -1.0;
     bool _geometry_outputs_complete = false;

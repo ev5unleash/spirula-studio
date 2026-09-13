@@ -11,6 +11,7 @@
 #include "app/AppPaths.h"
 #include "app/CrashLog.h"
 #include "app/gui/DatasetPrep.h"
+#include "app/gui/GeometryRunner.h"
 #include "app/gui/MaskPrompt.h"
 #include "app/gui/Subprocess.h"
 #include "mesh/MeshImport.h"
@@ -35,11 +36,14 @@
 #include <cfloat>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
+#include <thread>
 
 namespace fs = std::filesystem;
 namespace i18n = spirula::i18n;
@@ -52,6 +56,107 @@ using spirula::i18n::Msg;
 using spirula::format_duration;
 
 namespace gui {
+
+class GeometryOutputProbe {
+    struct Request {
+        std::string key;
+        GeometryJob job;
+        std::string dataset;
+        std::string images;
+    };
+
+public:
+    ~GeometryOutputProbe() {
+        {
+            std::lock_guard<std::mutex> lk(_mu);
+            _quit = true;
+            _pending = false;
+        }
+        _cv.notify_one();
+        if (_worker.joinable()) _worker.join();
+    }
+
+    bool busy() const {
+        std::lock_guard<std::mutex> lk(_mu);
+        return _pending || _running;
+    }
+
+    bool take(const std::string& key, bool& complete) {
+        std::lock_guard<std::mutex> lk(_mu);
+        if (!_ready || _ready_key != key) return false;
+        complete = _complete;
+        _ready = false;
+        return true;
+    }
+
+    bool request(const std::string& key, const GeometryJob& job,
+                 const std::string& dataset, const std::string& images) {
+        Request next{key, job, dataset, images};
+        {
+            std::lock_guard<std::mutex> lk(_mu);
+            if (_quit) return false;
+            if ((_pending && _request.key == key) ||
+                (_running && _running_key == key) ||
+                (_ready && _ready_key == key))
+                return true;
+            _request = std::move(next);
+            _pending = true;
+            if (!_worker.joinable()) {
+                try {
+                    _worker = std::thread([this] { run(); });
+                } catch (...) {
+                    _pending = false;
+                    return false;
+                }
+            }
+        }
+        _cv.notify_one();
+        return true;
+    }
+
+private:
+    void run() {
+        for (;;) {
+            Request request;
+            {
+                std::unique_lock<std::mutex> lk(_mu);
+                _cv.wait(lk, [this] { return _quit || _pending; });
+                if (_quit) return;
+                request = std::move(_request);
+                _pending = false;
+                _running = true;
+                _running_key = request.key;
+            }
+            bool complete = false;
+            try {
+                complete = geometry_outputs_complete(
+                    request.job, request.dataset, request.images);
+            } catch (...) {
+            }
+            {
+                std::lock_guard<std::mutex> lk(_mu);
+                _running = false;
+                _running_key.clear();
+                _ready_key = request.key;
+                _complete = complete;
+                _ready = true;
+            }
+        }
+    }
+
+    mutable std::mutex _mu;
+    std::condition_variable _cv;
+    Request _request;
+    std::thread _worker;
+    std::string _running_key;
+    std::string _ready_key;
+    bool _pending = false;
+    bool _running = false;
+    bool _ready = false;
+    bool _complete = false;
+    bool _quit = false;
+};
+
 
 namespace {
 
@@ -142,7 +247,8 @@ Stage recovery_boundary(const dataset_recovery::State& state) {
 // Lifecycle + persistence
 // ===========================================================================
 
-GuiApp::GuiApp() {
+GuiApp::GuiApp()
+    : _geometry_output_probe(std::make_unique<GeometryOutputProbe>()) {
     load_settings();
     if (auto pending = TrainRunner::pending_recovery_run()) {
         try {
@@ -189,6 +295,7 @@ void GuiApp::shutdown() {
     _sfm.cancel();
     _colmap.wait();
     _sfm.wait();
+    _geometry_output_probe.reset();
     poll_dataset_recovery();
     reset_dataset_preview();
     _download.cancel();
@@ -2869,7 +2976,12 @@ void GuiApp::start_dataset_job() {
         (redo_model || (int)restart <= (int)Stage::Matching) &&
             feature_model_missing())
         return;
-    if (geometry_will_run() && geometry_model_missing()) {
+    const bool geometry_run = geometry_will_run();
+    if (_geometry.enable &&
+        (_geometry.want_normal || _geometry.want_depth) &&
+        _geometry_output_probe->busy())
+        return;
+    if (geometry_run && geometry_model_missing()) {
         _resume_error = dmsg::geom_model_first.get();
         return;
     }
@@ -3889,49 +4001,28 @@ bool GuiApp::geometry_will_run() {
     key += (check.normal_jpg ? "J" : "P");
     const double now = ImGui::GetTime();
     if (key != _geometry_output_probe_key) {
-        if (_geometry_output_probe.valid()) {
-            if (_geometry_output_probe.wait_for(std::chrono::milliseconds(0)) !=
-                std::future_status::ready)
-                return true;
-            try {
-                (void)_geometry_output_probe.get();
-            } catch (...) {
-            }
-        }
         _geometry_output_probe_key = key;
         _geometry_output_probed_at = -1.0;
+        _geometry_outputs_complete = false;
     }
-    if (_geometry_output_probe.valid()) {
-        if (_geometry_output_probe.wait_for(std::chrono::milliseconds(0)) !=
-            std::future_status::ready)
-            return true;
-        try {
-            _geometry_outputs_complete = _geometry_output_probe.get();
-        } catch (...) {
-            _geometry_outputs_complete = false;
-        }
+    bool complete = false;
+    if (_geometry_output_probe->take(key, complete)) {
+        _geometry_outputs_complete = complete;
         _geometry_output_probed_at = now;
     }
     if (_geometry_output_probed_at < 0.0 ||
         now - _geometry_output_probed_at > 1.0) {
-        const GeometryJob probe_job = check;
-        const std::string dataset = _workspace;
-        try {
-            _geometry_output_probe = std::async(
-                std::launch::async,
-                [probe_job, dataset, images] {
-                    return geometry_outputs_complete(probe_job, dataset,
-                                                      images);
-                });
-        } catch (...) {
+        if (!_geometry_output_probe->request(key, check, _workspace, images)) {
             _geometry_output_probed_at = now;
             _geometry_outputs_complete = false;
+        } else {
+            _geometry_output_probed_at = now;
         }
         return true;
     }
     return !_geometry_outputs_complete;
-
 }
+
 void GuiApp::request_geometry_download() {
     _geom_download.start(geometry_model_downloads(_geometry.model));
 }
