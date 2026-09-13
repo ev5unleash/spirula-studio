@@ -11,6 +11,7 @@
 #include "app/AppPaths.h"
 #include "app/CrashLog.h"
 #include "app/gui/DatasetPrep.h"
+#include "app/gui/GeometryRunner.h"
 #include "app/gui/MaskPrompt.h"
 #include "app/gui/Subprocess.h"
 #include "mesh/MeshImport.h"
@@ -35,11 +36,14 @@
 #include <cfloat>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
+#include <thread>
 
 namespace fs = std::filesystem;
 namespace i18n = spirula::i18n;
@@ -52,6 +56,107 @@ using spirula::i18n::Msg;
 using spirula::format_duration;
 
 namespace gui {
+
+class GeometryOutputProbe {
+    struct Request {
+        std::string key;
+        GeometryJob job;
+        std::string dataset;
+        std::string images;
+    };
+
+public:
+    ~GeometryOutputProbe() {
+        {
+            std::lock_guard<std::mutex> lk(_mu);
+            _quit = true;
+            _pending = false;
+        }
+        _cv.notify_one();
+        if (_worker.joinable()) _worker.join();
+    }
+
+    bool busy() const {
+        std::lock_guard<std::mutex> lk(_mu);
+        return _pending || _running;
+    }
+
+    bool take(const std::string& key, bool& complete) {
+        std::lock_guard<std::mutex> lk(_mu);
+        if (!_ready || _ready_key != key) return false;
+        complete = _complete;
+        _ready = false;
+        return true;
+    }
+
+    bool request(const std::string& key, const GeometryJob& job,
+                 const std::string& dataset, const std::string& images) {
+        Request next{key, job, dataset, images};
+        {
+            std::lock_guard<std::mutex> lk(_mu);
+            if (_quit) return false;
+            if ((_pending && _request.key == key) ||
+                (_running && _running_key == key) ||
+                (_ready && _ready_key == key))
+                return true;
+            _request = std::move(next);
+            _pending = true;
+            if (!_worker.joinable()) {
+                try {
+                    _worker = std::thread([this] { run(); });
+                } catch (...) {
+                    _pending = false;
+                    return false;
+                }
+            }
+        }
+        _cv.notify_one();
+        return true;
+    }
+
+private:
+    void run() {
+        for (;;) {
+            Request request;
+            {
+                std::unique_lock<std::mutex> lk(_mu);
+                _cv.wait(lk, [this] { return _quit || _pending; });
+                if (_quit) return;
+                request = std::move(_request);
+                _pending = false;
+                _running = true;
+                _running_key = request.key;
+            }
+            bool complete = false;
+            try {
+                complete = geometry_outputs_complete(
+                    request.job, request.dataset, request.images);
+            } catch (...) {
+            }
+            {
+                std::lock_guard<std::mutex> lk(_mu);
+                _running = false;
+                _running_key.clear();
+                _ready_key = request.key;
+                _complete = complete;
+                _ready = true;
+            }
+        }
+    }
+
+    mutable std::mutex _mu;
+    std::condition_variable _cv;
+    Request _request;
+    std::thread _worker;
+    std::string _running_key;
+    std::string _ready_key;
+    bool _pending = false;
+    bool _running = false;
+    bool _ready = false;
+    bool _complete = false;
+    bool _quit = false;
+};
+
 
 namespace {
 
@@ -129,6 +234,11 @@ std::vector<std::string> video_dialog_filters() {
     return std::vector<std::string>(kVideoExtensions,
                                     kVideoExtensions + kNumVideoExtensions);
 }
+Stage recovery_boundary(const dataset_recovery::State& state) {
+    for (int i = 0; i < kNumStages; i++)
+        if (!state.completed[(size_t)i]) return (Stage)i;
+    return state.current;
+}
 
 }  // namespace
 
@@ -137,7 +247,8 @@ std::vector<std::string> video_dialog_filters() {
 // Lifecycle + persistence
 // ===========================================================================
 
-GuiApp::GuiApp() {
+GuiApp::GuiApp()
+    : _geometry_output_probe(std::make_unique<GeometryOutputProbe>()) {
     load_settings();
     if (auto pending = TrainRunner::pending_recovery_run()) {
         try {
@@ -154,6 +265,7 @@ GuiApp::GuiApp() {
     // Built-in when it is there, COLMAP when it is not; effective_engine()
     // overrides this anyway if the stored choice is unavailable.
     if (!builtin_sfm_available()) _engine = Engine::Colmap;
+    _dataset_recovery = dataset_recovery::load();
     _compare.set_pick_file([this] {
         open_pick(PickAction::AddSplatFile, msg::viewer_pick_file.get(),
                   FileDialog::Mode::File, kViewableExtensions);
@@ -181,6 +293,10 @@ void GuiApp::shutdown() {
     _geometry_panel.destroy_gl();
     _colmap.cancel();
     _sfm.cancel();
+    _colmap.wait();
+    _sfm.wait();
+    _geometry_output_probe.reset();
+    poll_dataset_recovery();
     reset_dataset_preview();
     _download.cancel();
     _geom_download.cancel();
@@ -803,6 +919,167 @@ bool GuiApp::open_training_run(std::string path) {
     }
     return false;
 }
+bool GuiApp::open_dataset_recovery(const dataset_recovery::State& state) {
+    _resume_error.clear();
+    const bool builtin = state.engine == 0;
+    if (state.engine != 0 && state.engine != 1) {
+        _resume_error =
+            i18n::format(dmsg::failed, {"unknown recovery engine"});
+        return false;
+    }
+    if (builtin) {
+        if (!builtin_sfm_available()) {
+            _resume_error = SfmRunner::availability();
+            if (_resume_error.empty())
+                _resume_error =
+                    i18n::format(dmsg::failed, {
+                        "built-in reconstruction is unavailable"});
+            return false;
+        }
+        _sfm_job = state.sfm;
+        _sources = _sfm_job.prep.inputs;
+        _workspace = _sfm_job.prep.workspace;
+    } else {
+        _colmap_job = state.colmap;
+        _colmap_exe = _colmap_job.colmap_exe;
+        if (!colmap_available()) {
+            _resume_error = i18n::format(
+                dmsg::failed,
+                {"COLMAP executable is unavailable: " + _colmap_exe});
+            return false;
+        }
+        _sources = _colmap_job.inputs;
+        _workspace = _colmap_job.workspace;
+        _sfm_job.prep.video_fps = _colmap_job.video_fps;
+        _sfm_job.prep.sharp_window = _colmap_job.sharp_window;
+        _sfm_job.prep.pano = _colmap_job.pano;
+        _sfm_job.prep.max_frames = _colmap_job.max_frames;
+        _sfm_job.prep.force_external_decode =
+            _colmap_job.force_external_decode;
+        _sfm_job.prep.force_external_masking =
+            _colmap_job.force_external_masking;
+        _sfm_job.image_gamut = _colmap_job.image_gamut;
+        _sfm_job.image_is_linear = _colmap_job.image_is_linear;
+    }
+
+    const PrepJob* prep = builtin ? &_sfm_job.prep : nullptr;
+    const bool mask_enable = builtin ? prep->mask_enable
+                                     : _colmap_job.mask_enable;
+    const bool mask_keep = builtin ? prep->mask_keep_subject
+                                   : _colmap_job.mask_keep_subject;
+    const bool mask_memory = builtin ? prep->mask_memory
+                                     : _colmap_job.mask_memory;
+    const int mask_every = builtin ? prep->mask_detect_every
+                                   : _colmap_job.mask_detect_every;
+    const int mask_frames = builtin ? prep->mask_memory_frames
+                                    : _colmap_job.mask_memory_frames;
+    const std::string& prompt =
+        builtin ? prep->mask_prompt : _colmap_job.mask_prompt;
+    const std::string& negative =
+        builtin ? prep->mask_negative_prompt : _colmap_job.mask_negative_prompt;
+    const float dilate =
+        builtin ? prep->mask_dilate_ratio : _colmap_job.mask_dilate_ratio;
+    const int max_image_size =
+        builtin ? prep->mask_max_image_size : _colmap_job.mask_max_image_size;
+    const float threshold =
+        builtin ? prep->mask_threshold : _colmap_job.mask_threshold;
+    const float nms = builtin ? prep->mask_nms : _colmap_job.mask_nms;
+    const std::vector<MaskClick>& clicks =
+        builtin ? prep->mask_clicks : _colmap_job.mask_clicks;
+    const std::string& model_path =
+        builtin ? prep->mask_model_path : _colmap_job.mask_model_path;
+    const std::string& model_name =
+        builtin ? prep->mask_model_name : _colmap_job.mask_model;
+
+    _geometry = builtin ? _sfm_job.geometry : _colmap_job.geometry;
+    _resume = true;
+    _use_found_masks = false;
+    for (const PrepInput& in : _sources)
+        _use_found_masks = _use_found_masks || !in.mask_dir.empty();
+    _flip_found_masks = builtin ? prep->flip_found_masks : false;
+    _photo_import = builtin ? prep->photo_import : _colmap_job.photo_import;
+    _mask_enable = mask_enable;
+    _mask_memory = mask_memory;
+    _mask_detect_every = mask_every;
+    _mask_memory_frames = mask_frames;
+    _mask.prompt = prompt;
+    _mask.negative_prompt = negative;
+    _mask.keep_subject = mask_keep;
+    _mask.dilate_ratio = dilate;
+    _mask.max_image_size = max_image_size;
+    _mask.threshold = threshold;
+    _mask.nms = nms;
+    _mask.clicks = clicks;
+    _mask.object_count = 1;
+    _mask.current_object = 0;
+    for (const MaskClick& click : _mask.clicks)
+        if (click.object >= 0 && click.object < 1000000000)
+            _mask.object_count = std::max(_mask.object_count, click.object + 1);
+    _border_enable = false;
+    for (const PrepInput& in : _sources)
+        _border_enable = _border_enable || !in.stencil.empty();
+
+    _ffmpeg_exe = builtin ? prep->ffmpeg_exe : _colmap_job.ffmpeg_exe;
+    _python_exe = builtin ? prep->python_exe : _colmap_job.python_exe;
+    _model_id = "sam3-q4_0";
+    for (const ModelEntry& entry : model_catalog()) {
+        if ((!model_path.empty() &&
+             fs::path(model_path).filename().string() == entry.file) ||
+            (!model_name.empty() && model_name == entry.legacy_name)) {
+            _model_id = entry.id;
+            break;
+        }
+    }
+
+    const Stage restart = recovery_boundary(state);
+    const bool saved_redo_frames = builtin
+        ? _sfm_job.prep.redo_frames : _colmap_job.redo_frames;
+    const bool saved_redo_masks = builtin
+        ? _sfm_job.prep.redo_masks : _colmap_job.redo_masks;
+    const bool saved_redo_model = builtin
+        ? _sfm_job.redo_model : _colmap_job.redo_model;
+    const bool frames_pending =
+        !state.completed[(size_t)Stage::Frames];
+    const bool masks_pending =
+        !state.completed[(size_t)Stage::Masks];
+    const bool model_pending =
+        !state.completed[(size_t)Stage::Features] ||
+        !state.completed[(size_t)Stage::Matching] ||
+        !state.completed[(size_t)Stage::Mapping];
+    const bool before_geometry = restart == Stage::Frames ||
+                                 restart == Stage::Masks ||
+                                 restart == Stage::Features ||
+                                 restart == Stage::Matching ||
+                                 restart == Stage::Mapping;
+    _engine = builtin ? Engine::BuiltIn : Engine::Colmap;
+    _sfm_job.prep.resume = _colmap_job.resume = true;
+    _redo_frames =
+        _photo_import != PhotoImport::Move &&
+        ((saved_redo_frames && frames_pending) ||
+         restart == Stage::Frames);
+    _redo_masks = (saved_redo_masks && masks_pending) ||
+                  restart == Stage::Frames ||
+                  restart == Stage::Masks;
+    _redo_model = (saved_redo_model && model_pending) || before_geometry ||
+                  (!builtin && restart == Stage::Finishing &&
+                   _colmap_job.final_bundle_adjust);
+    _redo_geometry = restart == Stage::Geometry;
+    _sfm_job.redo_model = _colmap_job.redo_model = _redo_model;
+    _sfm_job.prep.redo_frames = _colmap_job.redo_frames = _redo_frames;
+    _sfm_job.prep.redo_masks = _colmap_job.redo_masks = _redo_masks;
+    _sfm_job.geometry = _colmap_job.geometry = _geometry;
+    _workspace_auto.clear();
+    _ws_state_key.clear();
+    _ws_state_at = -1.0;
+    _ws_artifacts.clear();
+    _input_size.clear();
+    _color_space_touched = true;
+    _dataset_recovery_resume = true;
+    _dataset_recovery_bootstrap = false;
+    _screen = Screen::NewDataset;
+    return true;
+}
+
 
 void GuiApp::clear_training_resume() {
     fs::path source;
@@ -1428,6 +1705,7 @@ static std::string inputs_without_clicks(const std::vector<PrepInput>& sources,
 }
 
 void GuiApp::refresh_sources() {
+    _dataset_recovery_resume = false;
     // One input keeps the layout a one-video dataset has always had: frames
     // straight into images/ (and cam0/, cam1/ under it for a dual-lens file).
     // Several need a folder each, which is also what makes them separate
@@ -1849,6 +2127,7 @@ void GuiApp::handle_dialog_result(const std::vector<std::string>& paths) {
             break;
         case PickAction::Workspace:
             _workspace = path;
+            _dataset_recovery_resume = false;
             break;
         case PickAction::OutputPrefix:
             _cfg.output_dir_prefix = path;
@@ -1950,6 +2229,7 @@ void GuiApp::frame() {
         _runner.cleanup_failed_engine();
     }
     append_logs();
+    poll_dataset_recovery();
     run_pending_if_stopped();
     // vit-giant2 is two files, and so is ALIKED with LightGlue: both fetches
     // are queues, stepped on from somewhere that runs whatever screen is up.
@@ -2392,6 +2672,9 @@ RunProgress* GuiApp::dataset_steps() {
 }
 
 bool GuiApp::dataset_locked(Stage s) {
+    if (_dataset_recovery_resume && _dataset_recovery &&
+        (int)s < (int)recovery_boundary(*_dataset_recovery))
+        return true;
     if (!dataset_busy()) return false;
     const bool builtin = _sfm.state() == SfmRunner::State::Running;
     return (builtin ? _sfm.steps() : _colmap.steps()).ran(s);
@@ -2519,17 +2802,26 @@ void GuiApp::sync_dataset_jobs() {
     _colmap_job.mask_memory = prep.mask_memory;
     _colmap_job.mask_detect_every = prep.mask_detect_every;
     _colmap_job.mask_memory_frames = prep.mask_memory_frames;
-    _colmap_job.mask_clicks = prep.mask_clicks;
-    _colmap_job.mask_model_path = prep.mask_model_path;
-    _colmap_job.mask_model = prep.mask_model_name;
-
-    _sfm_job.prep.redo_frames = _colmap_job.redo_frames = _redo_frames;
-    _sfm_job.prep.redo_masks = _colmap_job.redo_masks = _redo_masks;
-    _sfm_job.redo_model = _colmap_job.redo_model = _redo_model;
+    const bool recovery_run = _dataset_recovery_active &&
+                              _dataset_recovery.has_value();
+    const bool redo_frames =
+        recovery_run ? _dataset_recovery_redo_frames : _redo_frames;
+    const bool redo_masks =
+        recovery_run ? _dataset_recovery_redo_masks : _redo_masks;
+    const bool redo_model =
+        recovery_run ? _dataset_recovery_redo_model : _redo_model;
+    const bool redo_geometry =
+        recovery_run ? _dataset_recovery_redo_geometry : _redo_geometry;
+    _sfm_job.prep.redo_frames = _colmap_job.redo_frames = redo_frames;
+    _sfm_job.prep.redo_masks = _colmap_job.redo_masks = redo_masks;
+    _sfm_job.redo_model = _colmap_job.redo_model = redo_model;
     // The same step either way: `spirula geometry` over the finished dataset.
     _sfm_job.geometry = _colmap_job.geometry = _geometry;
+    // Replacing frames changes the pixels geometry predicts.
     _sfm_job.geometry.overwrite = _colmap_job.geometry.overwrite =
-        _geometry.overwrite || _redo_geometry;
+        _geometry.overwrite || redo_geometry ||
+        (redo_frames && _geometry.enable &&
+         (_geometry.want_normal || _geometry.want_depth));
     // A settings file written by a build that HAS the inference layer must not
     // make a run on one that has not fail at the last step.
     _sfm_job.geometry.enable = _colmap_job.geometry.enable =
@@ -2546,16 +2838,200 @@ void GuiApp::sync_dataset_jobs() {
     _sfm_job.prep.image_is_linear = _sfm_job.image_is_linear;
 }
 
+bool GuiApp::persist_dataset_recovery(bool force) {
+    if (!_dataset_recovery_active || !_dataset_recovery) return true;
+
+    RunProgress* progress =
+        _dataset_recovery->engine == 0 ? &_sfm.steps() : &_colmap.steps();
+    const Stage current = progress->current();
+    const StageStatus current_status = progress->stage(current).status;
+    const bool bootstrap =
+        _dataset_recovery_bootstrap &&
+        (int)current < (int)_dataset_recovery->current;
+    const bool cancelled = _dataset_recovery->engine == 0
+        ? _sfm.state() == SfmRunner::State::Cancelled
+        : _colmap.state() == ColmapRunner::State::Cancelled;
+    if (bootstrap && !force) return true;
+    _dataset_recovery_bootstrap = false;
+    std::array<bool, kNumStages> completed{};
+    for (int i = 0; i < kNumStages; i++) {
+        const StageStatus status = progress->stage((Stage)i).status;
+        completed[(size_t)i] =
+            (status == StageStatus::Done || status == StageStatus::Skipped) &&
+            !(cancelled && i == (int)current);
+    }
+    if (bootstrap && force) {
+        for (int i = 0; i < (int)_dataset_recovery->current; i++)
+            completed[(size_t)i] = _dataset_recovery->completed[(size_t)i];
+        if (current_status == StageStatus::Running ||
+            current_status == StageStatus::Failed ||
+            current_status == StageStatus::Skipped)
+            completed[(size_t)current] = false;
+    }
+    Stage boundary = current;
+    for (int i = 0; i < kNumStages; i++)
+        if (!completed[(size_t)i]) {
+            boundary = (Stage)i;
+            break;
+        }
+    bool changed = boundary != _dataset_recovery->current;
+    for (int i = 0; i < kNumStages; i++)
+        changed = changed ||
+                  completed[(size_t)i] != _dataset_recovery->completed[(size_t)i];
+    const double now = ImGui::GetTime();
+    if (!force && !changed && _dataset_recovery_saved_at >= 0.0 &&
+        now - _dataset_recovery_saved_at < 1.0)
+        return true;
+
+    dataset_recovery::State next = *_dataset_recovery;
+    next.current = boundary;
+    next.completed = completed;
+    const bool model_pending =
+        !completed[(size_t)Stage::Features] ||
+        !completed[(size_t)Stage::Matching] ||
+        !completed[(size_t)Stage::Mapping] ||
+        (next.engine == 1 && boundary == Stage::Finishing &&
+         next.colmap.final_bundle_adjust);
+    if (next.engine == 0) {
+        next.sfm = _sfm_job;
+        next.sfm.prep.redo_frames =
+            _dataset_recovery_redo_frames &&
+            !completed[(size_t)Stage::Frames];
+        next.sfm.prep.redo_masks =
+            _dataset_recovery_redo_masks &&
+            !completed[(size_t)Stage::Masks];
+        next.sfm.redo_model = _dataset_recovery_redo_model && model_pending;
+        next.sfm.geometry.overwrite =
+            _sfm_job.geometry.overwrite ||
+            (_dataset_recovery_redo_geometry &&
+             !completed[(size_t)Stage::Geometry]);
+    } else {
+        next.colmap = _colmap_job;
+        next.colmap.redo_frames =
+            _dataset_recovery_redo_frames &&
+            !completed[(size_t)Stage::Frames];
+        next.colmap.redo_masks =
+            _dataset_recovery_redo_masks &&
+            !completed[(size_t)Stage::Masks];
+        next.colmap.redo_model = _dataset_recovery_redo_model && model_pending;
+        next.colmap.geometry.overwrite =
+            _colmap_job.geometry.overwrite ||
+            (_dataset_recovery_redo_geometry &&
+             !completed[(size_t)Stage::Geometry]);
+    }
+    std::string error;
+    if (!dataset_recovery::save(next, error)) {
+        _resume_error = i18n::format(dmsg::failed, {error});
+        return false;
+    }
+    _dataset_recovery = std::move(next);
+    _dataset_recovery_saved_at = now;
+    return true;
+}
+
+void GuiApp::poll_dataset_recovery() {
+    if (!_dataset_recovery_active || !_dataset_recovery) return;
+    const bool done = _dataset_recovery->engine == 0
+        ? _sfm.state() == SfmRunner::State::Done
+        : _colmap.state() == ColmapRunner::State::Done;
+    if (done) {
+        dataset_recovery::clear();
+        _dataset_recovery.reset();
+        _dataset_recovery_active = false;
+        _dataset_recovery_saved_at = -1.0;
+        return;
+    }
+
+    const bool stopped = _dataset_recovery->engine == 0
+        ? _sfm.state() == SfmRunner::State::Failed ||
+          _sfm.state() == SfmRunner::State::Cancelled
+        : _colmap.state() == ColmapRunner::State::Failed ||
+          _colmap.state() == ColmapRunner::State::Cancelled;
+    if (stopped) {
+        persist_dataset_recovery(true);
+        _dataset_recovery_active = false;
+        _dataset_recovery_suppressed = true;
+        return;
+    }
+    persist_dataset_recovery(false);
+}
+
 void GuiApp::update_dataset_job() {
     if (!dataset_busy()) return;
     sync_dataset_jobs();
     if (_sfm.state() == SfmRunner::State::Running) _sfm.update(_sfm_job);
     else                                           _colmap.update(_colmap_job);
+    persist_dataset_recovery(false);
 }
 
 void GuiApp::start_dataset_job() {
+    const Stage restart =
+        _dataset_recovery_resume && _dataset_recovery
+            ? recovery_boundary(*_dataset_recovery)
+            : Stage::Frames;
+    const bool redo_masks = _redo_frames || _redo_masks;
+    const bool redo_model = _redo_frames || _redo_masks || _redo_model;
+    if ((redo_masks || (int)restart <= (int)Stage::Masks) &&
+            mask_model_missing() ||
+        (redo_model || (int)restart <= (int)Stage::Matching) &&
+            feature_model_missing())
+        return;
+    const bool geometry_run = geometry_will_run();
+    if (_geometry.enable &&
+        (_geometry.want_normal || _geometry.want_depth) &&
+        _geometry_output_probe->busy())
+        return;
+    if (geometry_run && geometry_model_missing()) {
+        _resume_error = dmsg::geom_model_first.get();
+        return;
+    }
     app::set_crash_note("building dataset " + _workspace);
+    _dataset_recovery_suppressed = false;
     sync_dataset_jobs();
+    const int engine = effective_engine() == Engine::BuiltIn ? 0 : 1;
+    auto same_inputs = [](const std::vector<PrepInput>& a,
+                          const std::vector<PrepInput>& b) {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); i++)
+            if (a[i].path != b[i].path ||
+                a[i].is_video != b[i].is_video ||
+                a[i].subdir != b[i].subdir)
+                return false;
+        return true;
+    };
+    const bool resumed = _resume && _dataset_recovery_resume &&
+                         _dataset_recovery &&
+                         _dataset_recovery->engine == engine &&
+                         _workspace ==
+                             (engine == 0
+                                  ? _dataset_recovery->sfm.prep.workspace
+                                  : _dataset_recovery->colmap.workspace) &&
+                         same_inputs(
+                             _sources,
+                             engine == 0
+                                 ? _dataset_recovery->sfm.prep.inputs
+                                 : _dataset_recovery->colmap.inputs);
+    dataset_recovery::State recovery =
+        resumed ? *_dataset_recovery : dataset_recovery::State{};
+    if (resumed) recovery.current = recovery_boundary(recovery);
+    recovery.engine = engine;
+    recovery.sfm = _sfm_job;
+    recovery.colmap = _colmap_job;
+    _dataset_recovery_redo_frames = _redo_frames;
+    _dataset_recovery_redo_masks = _redo_masks;
+    _dataset_recovery_redo_model = _redo_model;
+    _dataset_recovery_redo_geometry = _redo_geometry;
+    std::string recovery_error;
+    if (!dataset_recovery::save(recovery, recovery_error)) {
+        _resume_error = i18n::format(dmsg::failed, {recovery_error});
+        return;
+    }
+    _dataset_recovery = std::move(recovery);
+    _dataset_recovery_active = true;
+    _dataset_recovery_resume = false;
+    _dataset_recovery_bootstrap =
+        resumed && _dataset_recovery->current != Stage::Frames;
+    _dataset_recovery_saved_at = ImGui::GetTime();
     const std::string stamp = run_log_stamp();
     const fs::path prep_log_file =
         open_run_log(_prep_log,
@@ -2575,12 +3051,13 @@ void GuiApp::start_dataset_job() {
     _geometry_panel.close();
     reset_dataset_preview();
     const RunFilms films{&_film_frames, &_film_masks, &_film_geometry};
-    if (effective_engine() == Engine::BuiltIn) _sfm.start(_sfm_job, films);
-    else                                      _colmap.start(_colmap_job, films);
+    if (engine == 0) _sfm.start(_sfm_job, films);
+    else             _colmap.start(_colmap_job, films);
     // One run each: a re-do that stayed armed would throw the same step away
     // again the next time the button is pressed.
     _redo_frames = _redo_masks = _redo_model = _redo_geometry = false;
 }
+
 
 // ---------------------------------------------------------------------------
 // Source, destination, resume
@@ -2737,23 +3214,29 @@ void GuiApp::draw_dataset_source() {
     bool any_photos = false;
     for (const PrepInput& s : _sources) any_photos = any_photos || !s.is_video;
     if (any_photos) {
-        if (ui::Checkbox(dmsg::use_found_masks, &_use_found_masks))
+        if (ui::Checkbox(dmsg::use_found_masks, &_use_found_masks)) {
             rescan_found_masks();
+            _dataset_recovery_resume = false;
+        }
         ui::help_on_hover(dmsg::use_found_masks_help);
         // Which way round they are is a property of those files, so it is asked
         // here rather than per stage: everything the run writes comes out in
         // the one convention, whatever the folder arrived in.
         if (_use_found_masks && any_found_masks()) {
             ImGui::Indent();
-            ui::Checkbox(dmsg::flip_found_masks, &_flip_found_masks);
+            if (ui::Checkbox(dmsg::flip_found_masks, &_flip_found_masks))
+                _dataset_recovery_resume = false;
             ui::help_on_hover(dmsg::flip_found_masks_help);
             ImGui::Unindent();
         }
+        const PhotoImport previous_import = _photo_import;
         photo_import_combo(&_photo_import, _sources.size() > 1);
+        if (_photo_import != previous_import) _dataset_recovery_resume = false;
     }
 
     ImGui::SetNextItemWidth(px(-220.0f));
-    ui::InputTextRaw("##ws", &_workspace);
+    if (ui::InputTextRaw("##ws", &_workspace))
+        _dataset_recovery_resume = false;
     ImGui::SameLine();
     // Two "Browse..." buttons in one scope: the message supplies the ID, so
     // they need distinguishing exactly as two identical literals would.
@@ -2772,7 +3255,8 @@ void GuiApp::draw_dataset_source() {
     // not count as either (probe_workspace).
     const WorkspaceState& prior = workspace_state();
     if (prior.resumable()) {
-        ui::Checkbox(dmsg::resume_previous, &_resume);
+        if (ui::Checkbox(dmsg::resume_previous, &_resume))
+            _dataset_recovery_resume = false;
         ui::help_on_hover(dmsg::resume_previous_help);
         ImGui::SameLine();
         ui::TextDisabled(dmsg::unfinished_run_detected);
@@ -2784,7 +3268,8 @@ void GuiApp::draw_dataset_source() {
         ui::TextColoredWrapped(_redo_model ? kWarn : kOk,
                                _redo_model ? dmsg::model_will_be_replaced
                                            : dmsg::model_found_reuse);
-        ui::Checkbox(dmsg::reconstruct_again, &_redo_model);
+        if (ui::Checkbox(dmsg::reconstruct_again, &_redo_model))
+            _dataset_recovery_resume = false;
         ui::help_on_hover(dmsg::reconstruct_again_help);
     }
 }
@@ -3498,6 +3983,46 @@ bool GuiApp::geometry_model_missing() const {
     return !geometry_model_cached(_geometry.model);
 }
 
+bool GuiApp::geometry_will_run() {
+    if (!_geometry.enable ||
+        (!_geometry.want_normal && !_geometry.want_depth))
+        return false;
+    GeometryJob check = _geometry;
+    check.overwrite = check.overwrite || _redo_geometry || _redo_frames;
+    if (check.overwrite) return true;
+
+    const WorkspaceState& prior = workspace_state();
+    if (!prior.geometry) return true;
+    const std::string images =
+        planned_image_dir(_sources, _workspace, _photo_import);
+    std::string key = _workspace + '\n' + images;
+    key += (check.want_normal ? "N" : "-");
+    key += (check.want_depth ? "D" : "-");
+    key += (check.normal_jpg ? "J" : "P");
+    const double now = ImGui::GetTime();
+    if (key != _geometry_output_probe_key) {
+        _geometry_output_probe_key = key;
+        _geometry_output_probed_at = -1.0;
+        _geometry_outputs_complete = false;
+    }
+    bool complete = false;
+    if (_geometry_output_probe->take(key, complete)) {
+        _geometry_outputs_complete = complete;
+        _geometry_output_probed_at = now;
+    }
+    if (_geometry_output_probed_at < 0.0 ||
+        now - _geometry_output_probed_at > 1.0) {
+        if (!_geometry_output_probe->request(key, check, _workspace, images)) {
+            _geometry_output_probed_at = now;
+            _geometry_outputs_complete = false;
+        } else {
+            _geometry_output_probed_at = now;
+        }
+        return true;
+    }
+    return !_geometry_outputs_complete;
+}
+
 void GuiApp::request_geometry_download() {
     _geom_download.start(geometry_model_downloads(_geometry.model));
 }
@@ -3935,53 +4460,87 @@ void GuiApp::draw_dataset_rerun(const WorkspaceState& prior) {
     ImGui::Indent();
     ui::TextDisabledWrapped(dmsg::rerun_section_help);
 
-    // Each button starts a run of its own, so each is behind exactly the
-    // checkpoints its steps read -- a missing geometry model must not stop a
-    // rerun of the masks.
+    // Each button starts a run of its own. A geometry checkpoint is needed
+    // only when that run would actually invoke the geometry child.
+    const bool geometry_requested =
+        _geometry.enable && (_geometry.want_normal || _geometry.want_depth);
     const bool need_mask_model = mask_model_missing();
     const bool need_feat_model = feature_model_missing();
+    const bool geometry_run = geometry_will_run();
+    const bool need_geom_model =
+        geometry_model_missing() && geometry_run;
+    const bool need_frame_geom_model =
+        geometry_model_missing() && geometry_requested;
+    const bool geometry_probe_busy =
+        _geometry.enable &&
+        (_geometry.want_normal || _geometry.want_depth) &&
+        _geometry_output_probe->busy();
 
     bool go = false;
     if (prior.frames) {
-        ImGui::BeginDisabled(need_mask_model || need_feat_model);
+        const bool blocked_by_model =
+            need_mask_model || need_feat_model || need_frame_geom_model;
+        const bool blocked = blocked_by_model || geometry_probe_busy;
+        ImGui::BeginDisabled(blocked);
         if (ui::Button(dmsg::rerun_frames)) {
             _redo_frames = _redo_masks = true;   // the masks describe the frames
             _redo_model = go = true;
         }
         ImGui::EndDisabled();
-        if (need_mask_model || need_feat_model)
-            ui::help_on_hover_disabled(need_mask_model ? dmsg::mask_model_first
-                                                       : dmsg::feat_model_first);
+        if (blocked_by_model)
+            ui::help_on_hover_disabled(
+                need_mask_model ? dmsg::mask_model_first
+                : need_feat_model ? dmsg::feat_model_first
+                                   : dmsg::geom_model_first);
         ImGui::SameLine();
     }
     if (prior.masks) {
-        ImGui::BeginDisabled(need_mask_model);
+        const bool blocked_by_model = need_mask_model || need_geom_model;
+        const bool blocked = blocked_by_model || geometry_probe_busy;
+        ImGui::BeginDisabled(blocked);
         if (ui::Button(dmsg::rerun_masks)) {
             _redo_masks = true;
             _redo_model = go = true;
         }
         ImGui::EndDisabled();
-        if (need_mask_model) ui::help_on_hover_disabled(dmsg::mask_model_first);
+        if (blocked_by_model)
+            ui::help_on_hover_disabled(
+                need_mask_model ? dmsg::mask_model_first
+                                : dmsg::geom_model_first);
         ImGui::SameLine();
     }
-    ImGui::BeginDisabled(need_feat_model);
-    if (ui::Button(dmsg::rerun_model)) {
-        _redo_model = go = true;
+    {
+        const bool blocked_by_model = need_feat_model || need_geom_model;
+        const bool blocked = blocked_by_model || geometry_probe_busy;
+        ImGui::BeginDisabled(blocked);
+        if (ui::Button(dmsg::rerun_model)) {
+            _redo_model = go = true;
+        }
+        ImGui::EndDisabled();
+        if (blocked_by_model)
+            ui::help_on_hover_disabled(
+                need_feat_model ? dmsg::feat_model_first
+                                : dmsg::geom_model_first);
     }
-    ImGui::EndDisabled();
-    if (need_feat_model) ui::help_on_hover_disabled(dmsg::feat_model_first);
     // Depth and normals are the one step that reruns on its own: they are read
-    // off the finished dataset and nothing downstream of them exists.
+    // off the finished dataset and nothing downstream of them exists. Mask-only
+    // reruns leave the pixels unchanged, so their maps remain valid.
     if (prior.geometry) {
         ImGui::SameLine();
-        const bool need_geom_model = geometry_model_missing();
-        ImGui::BeginDisabled(!_geometry.enable || need_geom_model);
+        const bool need_geometry_button_model =
+            geometry_model_missing() && geometry_requested;
+        const bool geometry_blocked =
+            !_geometry.enable || need_geometry_button_model ||
+            geometry_probe_busy;
+        ImGui::BeginDisabled(geometry_blocked);
         if (ui::Button(dmsg::rerun_geometry)) {
             _redo_geometry = go = true;
         }
         ImGui::EndDisabled();
-        ui::help_on_hover_disabled(need_geom_model ? dmsg::geom_model_first
-                                                   : dmsg::rerun_geometry_help);
+        if (!geometry_probe_busy)
+            ui::help_on_hover_disabled(
+                need_geometry_button_model ? dmsg::geom_model_first
+                                           : dmsg::rerun_geometry_help);
     }
     ImGui::NewLine();
     ImGui::Unindent();
@@ -4018,6 +4577,7 @@ void GuiApp::reset_recon_options() {
     apply_source_presets();
     normalize_source_lenses();
     _redo_frames = _redo_masks = _redo_model = _redo_geometry = false;
+    _dataset_recovery_resume = false;
     _resume = true;
     log(dmsg::reset_options_done.get());
 }
@@ -4075,6 +4635,10 @@ void GuiApp::draw_clear_project_modal() {
             if (ec) log(i18n::format(dmsg::clear_project_failed,
                                      {path, ec.message()}));
         }
+        dataset_recovery::clear();
+        _dataset_recovery.reset();
+        _dataset_recovery_suppressed = false;
+        _dataset_recovery_resume = false;
         log(i18n::format(dmsg::clear_project_done, {_workspace}));
         _clear_targets.clear();
         _ws_state_at = -1.0;      // the answer changed; do not wait a second
@@ -4512,13 +5076,9 @@ void GuiApp::draw_dataset_form(float height, bool running) {
     // tall it is depends on what it is saying.
     ImGui::BeginChild("##dsform", ImVec2(0, height - _ds_action_h));
 
-    // What is greyed out is decided per section, by whether the step that
-    // reads it has started -- see dataset_locked. The whole form used to grey
-    // the instant a run began, which left nothing to do for the twenty minutes
-    // a capture takes to extract, and nothing to look at but the log.
-    //
-    // The inputs and the engine define the run and are the exception: they are
-    // fixed the moment it starts.
+    // dataset_locked fixes each consumed stage while running and each completed
+    // stage before an interrupted run's restart boundary. Inputs and engine are
+    // fixed when the run starts.
     ImGui::BeginDisabled(running);
     draw_dataset_source();
 
@@ -4537,6 +5097,7 @@ void GuiApp::draw_dataset_form(float height, bool running) {
         ui::help_on_hover(dmsg::engine_colmap_help);
         if ((eng == 1) != (_engine == Engine::Colmap)) {
             _engine = eng == 1 ? Engine::Colmap : Engine::BuiltIn;
+            _dataset_recovery_resume = false;
             save_settings();
         }
     }
@@ -4574,14 +5135,31 @@ void GuiApp::draw_dataset_form(float height, bool running) {
     if (!running) {
         bool ready = !_sources.empty() && !_workspace.empty();
         for (const PrepInput& s : _sources) ready = ready && !s.path.empty();
-        const bool need_mask_model = mask_model_missing();
-        const bool need_feat_model = feature_model_missing();
-        const bool need_geom_model = geometry_model_missing();
-        const bool need_model = need_mask_model || need_feat_model || need_geom_model;
+        const Stage restart =
+            _dataset_recovery_resume && _dataset_recovery
+                ? recovery_boundary(*_dataset_recovery)
+                : Stage::Frames;
+        const bool redo_masks = _redo_frames || _redo_masks;
+        const bool redo_model = _redo_frames || _redo_masks || _redo_model;
+        const bool need_mask_model =
+            (redo_masks || (int)restart <= (int)Stage::Masks) &&
+            mask_model_missing();
+        const bool need_feat_model =
+            (redo_model || (int)restart <= (int)Stage::Matching) &&
+            feature_model_missing();
+        const bool geometry_run = geometry_will_run();
+        const bool need_geom_model =
+            geometry_model_missing() && geometry_run;
+        const bool geometry_probe_busy =
+            _geometry.enable &&
+            (_geometry.want_normal || _geometry.want_depth) &&
+            _geometry_output_probe->busy();
+        const bool need_model = need_mask_model || need_feat_model ||
+                                need_geom_model;
         // The button names what pressing it does: a folder that already holds
         // a reconstruction is added to, not built.
         const bool adding = workspace_state().model && !_redo_model;
-        ImGui::BeginDisabled(!ready || need_model);
+        ImGui::BeginDisabled(!ready || need_model || geometry_probe_busy);
         if (ui::Button(adding ? dmsg::update_dataset : dmsg::create_dataset,
                        ImVec2(px(200.0f), px(34.0f))))
             start_dataset_job();
@@ -4589,7 +5167,8 @@ void GuiApp::draw_dataset_form(float height, bool running) {
         if (!ready) {
             ImGui::SameLine();
             ui::TextDisabled(dmsg::pick_input_first);
-        } else if (need_model) {
+        } else if (need_mask_model || need_feat_model ||
+                   (need_geom_model && !geometry_probe_busy)) {
             // The options above carry the same buttons, but they are a scroll
             // away by the time somebody is reaching for this one. One missing
             // checkpoint at a time; the next takes its place once this lands.
@@ -6498,7 +7077,12 @@ void GuiApp::draw_data_error_modal() {
 }
 
 void GuiApp::draw_recovery_modal() {
-    if (_recovery_run.empty() || _recovery_suppressed) return;
+    const bool training = !_recovery_run.empty() && !_recovery_suppressed;
+    const bool dataset = !training && !_dataset_recovery_active &&
+                         _dataset_recovery.has_value() &&
+                         !_dataset_recovery_suppressed;
+    if (!training && !dataset)
+        return;
     if (!_recovery_shown) {
         ui::OpenPopup(msg::recovery_title);
         _recovery_shown = true;
@@ -6506,41 +7090,63 @@ void GuiApp::draw_recovery_modal() {
     if (!ui::BeginPopupModal(msg::recovery_title, nullptr,
                              ImGuiWindowFlags_AlwaysAutoResize)) {
         _recovery_shown = false;
-        _recovery_suppressed = true;
+        if (training) _recovery_suppressed = true;
+        else         _dataset_recovery_suppressed = true;
         return;
     }
 
     ImGui::PushTextWrapPos(px(460.0f));
     ui::TextWrapped(msg::recovery_body);
     ImGui::PopTextWrapPos();
+    const std::string path = training
+        ? _recovery_run
+        : (_dataset_recovery->engine == 0
+               ? _dataset_recovery->sfm.prep.workspace
+               : _dataset_recovery->colmap.workspace);
     ImGui::BeginChild("##recovery_path", ImVec2(px(460.0f), px(38.0f)),
                       false, ImGuiWindowFlags_HorizontalScrollbar);
-    ui::TextDisabledRaw(_recovery_run);
+    ui::TextDisabledRaw(path);
     ImGui::EndChild();
     ImGui::Spacing();
 
     const float bw = px(120.0f);
     if (ui::Button(msg::recovery_yes, ImVec2(bw, 0))) {
-        const std::string path = _recovery_run;
-        if (open_training_run(path)) {
-            TrainRunner::dismiss_recovery_run();
-            _recovery_run.clear();
-            _recovery_suppressed = true;
+        const bool opened = training
+            ? open_training_run(path)
+            : open_dataset_recovery(*_dataset_recovery);
+        if (opened) {
+            if (training) {
+                TrainRunner::dismiss_recovery_run();
+                _recovery_run.clear();
+                _recovery_suppressed = true;
+                if (_dataset_recovery)
+                    _dataset_recovery_suppressed = true;
+            } else {
+                _dataset_recovery_suppressed = true;
+            }
             _recovery_shown = false;
             ImGui::CloseCurrentPopup();
         }
     }
     ImGui::SameLine();
     if (ui::Button(msg::recovery_no, ImVec2(bw, 0))) {
-        TrainRunner::dismiss_recovery_run();
-        _recovery_run.clear();
-        _recovery_suppressed = true;
+        if (training) {
+            TrainRunner::dismiss_recovery_run();
+            _recovery_run.clear();
+            _recovery_suppressed = true;
+        } else {
+            dataset_recovery::clear();
+            _dataset_recovery.reset();
+            _dataset_recovery_suppressed = true;
+            _resume_error.clear();
+        }
         _recovery_shown = false;
         ImGui::CloseCurrentPopup();
     }
     ImGui::SameLine();
     if (ui::Button(msg::recovery_later, ImVec2(bw, 0))) {
-        _recovery_suppressed = true;
+        if (training) _recovery_suppressed = true;
+        else         _dataset_recovery_suppressed = true;
         _recovery_shown = false;
         ImGui::CloseCurrentPopup();
     }

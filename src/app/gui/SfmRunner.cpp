@@ -183,6 +183,10 @@ std::string SfmRunner::availability() {
 
 SfmRunner::~SfmRunner() {
     cancel();
+    wait();
+}
+
+void SfmRunner::wait() {
     if (_worker.joinable()) _worker.join();
 }
 
