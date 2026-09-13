@@ -1,19 +1,8 @@
 #pragma once
 
-// CheckpointIO -- zero-dependency writers for the resumable-checkpoint format.
-//
-// A checkpoint's resume payload is a single POSIX ustar `state.tar` bundling:
-//   * state.json         -- small runtime/validation manifest (written by the
-//                           engine; NOT config -- config lives in config.json)
-//   * <slot_name>.npy    -- one flat, typed NumPy array per saved pool buffer,
-//                           named by its DevicePool slot ("world.means.npy",
-//                           "eng.sh_quant.q.npy", ...).
-//
-// The device->host copy is chunked through a small reusable host buffer, so
-// serializing a multi-GB buffer uses bounded host RAM and ZERO extra device
-// memory (nothing is allocated on the GPU during a save).
-//
-// Phase 2 (load/resume) will add the matching tar + .npy readers here.
+// Resumable checkpoints: POSIX ustar state.tar with state.json and flat NPY pool slots.
+// Training config lives separately in config.json.
+// Chunked device reads bound host RAM without allocating additional device memory.
 
 #include <algorithm>
 #include <charconv>
