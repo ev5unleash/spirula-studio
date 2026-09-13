@@ -72,10 +72,10 @@ public:
 private:
     enum class Screen { Home, NewDataset, Train, Viewer, Batch, Mesh };
     enum class PickAction {
-        None, OpenDataset, SourceImages, SourceVideo, SourceReplace, Workspace,
-        OutputPrefix, VocabTree, MaskModelFile, SplatFile,
-        PresetFile, PresetSaveFolder, BatchDataset, BatchOutput, BatchPresetFile,
-        MeshSource, MeshPhotos, MeshOutput, AddSplatFile
+        None, OpenDataset, ResumeTraining, SourceImages, SourceVideo,
+        SourceReplace, Workspace, OutputPrefix, VocabTree, MaskModelFile,
+        SplatFile, PresetFile, PresetSaveFolder, BatchDataset, BatchOutput,
+        BatchPresetFile, MeshSource, MeshPhotos, MeshOutput, AddSplatFile
     };
     // Which reconstruction back end the New Dataset screen runs.
     enum class Engine { BuiltIn, Colmap };
@@ -120,6 +120,8 @@ private:
                       bool keep_log = false);
     // Route for user-initiated opens: confirms first when training.
     void request_open_dataset(std::string dir);
+    bool open_training_run(std::string path);
+    void clear_training_resume();
 
     // The viewer screen: a splat file (or a checkpoint / run directory) opened
     // for looking at. Takes the engine over, so it goes through the same
@@ -162,6 +164,7 @@ private:
     // through it.
     void launch_training(const TrainConfig& cfg, const std::string& preset);
     bool training_busy() const;   // Preparing or Training
+    bool resume_training_busy() const;
 
     // ---- batch ----
     // Append a row for this dataset, seeded with the preset the trainer
@@ -349,6 +352,7 @@ private:
     // The splitter and then the panel. Call after the body child has ended.
     void draw_log_panel(float height);
     void draw_confirm_modal();
+    void draw_recovery_modal();
     void draw_data_error_modal();
     void handle_dialog_result(const std::vector<std::string>& paths);
     // Take paths onto the input list, `replace` clearing what was there (a
@@ -381,6 +385,9 @@ private:
     bool _confirm_shown = false;     // modal currently expected open
     bool _stop_confirmed = false;    // user chose one of the two stops
     bool _data_error_shown = false;  // unreadable-file modal currently open
+    std::string _recovery_run;       // startup marker path, if any
+    bool _recovery_shown = false;    // startup modal currently expected open
+    bool _recovery_suppressed = false; // Later/dismissal: next launch asks again
     // Training is paused for as long as the modal is up -- deciding should not
     // cost GPU time. This is what it goes back to if the user keeps training.
     bool _confirm_was_paused = false;
@@ -511,6 +518,8 @@ private:
     // the user typed is never overwritten when the input list changes.
     std::string _workspace_auto;
     bool _resume = true;
+    int _resume_step = -1;
+    std::string _resume_error;
     bool _mask_enable = false;
     // PrepJob::mask_memory. Off by default: a prompt that matches a crowd pays
     // one model pass per object per frame for it. The two below only apply

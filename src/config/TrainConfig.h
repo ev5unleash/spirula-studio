@@ -98,7 +98,7 @@ inline int train_tier_rank(const char* tier) {
     X(int, num_iterations, 30000, "run", "basic", "")                        \
     X(int, steps_per_save, 2000, "run", "advanced", "")                      \
     X(bool, save_only_latest_checkpoint, true, "run", "advanced", "")        \
-    X(bool, save_full_checkpoint, false, "run", "advanced", "")              \
+    X(bool, save_full_checkpoint, true, "run", "advanced", "")              \
     X(bool, save_eval_images, false, "run", "advanced", "")                  \
     X(int, viewer_port, 7007, "run", "advanced", "")                         \
     X(bool, disable_viewer, false, "run", "advanced", "")                    \

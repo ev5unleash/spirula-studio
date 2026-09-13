@@ -567,7 +567,10 @@ void save_scene_transform_json(const ParsedDataset& ds, const TrainConfig& c,
     FILE* f = std::fopen(path.string().c_str(), "w");
     if (!f) throw std::runtime_error("cannot write " + path.string());
     std::fputs(text.c_str(), f);
-    std::fclose(f);
+    const bool write_ok = std::ferror(f) == 0;
+    const int close_rc = std::fclose(f);
+    if (!write_ok || close_rc != 0)
+        throw std::runtime_error("failed while writing " + path.string());
 }
 
 // Flat, one key per flag: a key that followed the field table's heading
@@ -575,14 +578,222 @@ void save_scene_transform_json(const ParsedDataset& ds, const TrainConfig& c,
 // Macro flags are written beside what they resolved to; config/TrainConfigJson.h.
 void save_config_json(const TrainConfig& c, const fs::path& out_dir,
                       const std::string& preset) {
-    FILE* f = std::fopen((out_dir / "config.json").string().c_str(), "w");
+    const fs::path path = out_dir / "config.json";
+    FILE* f = std::fopen(path.string().c_str(), "w");
     if (!f) throw std::runtime_error("cannot write config.json");
     std::fprintf(f, "{\n    \"preset\": \"%s\"", preset.c_str());
     for (const auto& [key, value] : train_config_json_pairs(c))
         std::fprintf(f, ",\n    \"%s\": %s", key, value.c_str());
     std::fprintf(f, "\n}\n");
-    std::fclose(f);
+    const bool write_ok = std::ferror(f) == 0;
+    const int close_rc = std::fclose(f);
+    if (!write_ok || close_rc != 0)
+        throw std::runtime_error("failed while writing " + path.string());
 }
+
+namespace {
+
+std::string checkpoint_name(int step) {
+    char name[32];
+    std::snprintf(name, sizeof name, "step-%09d.ckpt", step);
+    return name;
+}
+
+void require_regular_file(const fs::path& path) {
+    std::error_code ec;
+    const fs::file_status st = fs::symlink_status(path, ec);
+    if (ec || st.type() != fs::file_type::regular)
+        throw std::runtime_error("checkpoint output is not a regular file: " +
+                                 path.string());
+}
+
+bool same_path(const fs::path& a, const fs::path& b) {
+    std::error_code ec;
+    if (fs::equivalent(a, b, ec)) return true;
+    ec.clear();
+    const fs::path aa = fs::absolute(a, ec);
+    if (ec) return false;
+    ec.clear();
+    const fs::path bb = fs::absolute(b, ec);
+    if (ec) return false;
+    return aa.lexically_normal() == bb.lexically_normal();
+}
+
+// Preserve the old run-root config beside each complete legacy checkpoint
+// before setup rewrites that convenience file.
+void snapshot_legacy_configs(const fs::path& run_dir) {
+    const fs::path root = run_dir / "config.json";
+    std::error_code ec;
+    fs::file_status root_status = fs::symlink_status(root, ec);
+    if (ec == std::errc::no_such_file_or_directory) {
+        ec.clear();
+        root_status = fs::file_status(fs::file_type::not_found);
+    }
+    if (ec || root_status.type() != fs::file_type::regular) return;
+    try {
+        const TrainConfig legacy = ckpt::config_from_json(root);
+        if (legacy.data.empty()) return;
+    } catch (const std::exception&) {
+        return;
+    }
+
+    fs::directory_iterator it(run_dir, ec), end;
+    if (ec) throw std::runtime_error("cannot enumerate " + run_dir.string() +
+                                     ": " + ec.message());
+    for (; it != end; it.increment(ec)) {
+        if (ec) throw std::runtime_error("cannot enumerate " + run_dir.string() +
+                                         ": " + ec.message());
+        const fs::path ckpt_dir = it->path();
+        if (ckpt::checkpoint_step(ckpt_dir) < 0) continue;
+        fs::file_status ckpt_status = fs::symlink_status(ckpt_dir, ec);
+        if (ec == std::errc::no_such_file_or_directory) {
+            ec.clear();
+            ckpt_status = fs::file_status(fs::file_type::not_found);
+        }
+        if (ec) throw std::runtime_error("cannot inspect " + ckpt_dir.string() +
+                                         ": " + ec.message());
+        if (ckpt_status.type() != fs::file_type::directory) continue;
+        const fs::path local = ckpt_dir / "config.json";
+        fs::file_status local_status = fs::symlink_status(local, ec);
+        if (ec == std::errc::no_such_file_or_directory) {
+            ec.clear();
+            local_status = fs::file_status(fs::file_type::not_found);
+        }
+        if (ec) throw std::runtime_error("cannot inspect " + local.string() +
+                                         ": " + ec.message());
+        if (local_status.type() != fs::file_type::not_found) continue;
+        try {
+            ckpt::validate_checkpoint(ckpt_dir, true);
+        } catch (const std::exception&) {
+            continue;
+        }
+
+        fs::path tmp;
+        for (uint64_t attempt = 0;; ++attempt) {
+            tmp = ckpt_dir / (".config-" + std::to_string(attempt) + ".tmp");
+            fs::file_status tmp_status = fs::symlink_status(tmp, ec);
+            if (ec == std::errc::no_such_file_or_directory) {
+                ec.clear();
+                tmp_status = fs::file_status(fs::file_type::not_found);
+            }
+            if (ec) throw std::runtime_error("cannot inspect " + tmp.string() +
+                                             ": " + ec.message());
+            if (tmp_status.type() == fs::file_type::not_found) break;
+        }
+        try {
+            std::ifstream src(root, std::ios::binary);
+            if (!src) throw std::runtime_error("cannot read " + root.string());
+            std::ofstream dst(tmp, std::ios::binary);
+            if (!dst) throw std::runtime_error("cannot write " + tmp.string());
+            dst << src.rdbuf();
+            const bool src_ok = !src.bad();
+            dst.flush();
+            const bool dst_ok = !dst.fail();
+            src.close();
+            const bool src_close_ok = !src.fail();
+            dst.close();
+            const bool dst_close_ok = !dst.fail();
+            if (!src_ok || !src_close_ok || !dst_ok || !dst_close_ok)
+                throw std::runtime_error("failed copying " + root.string());
+            fs::rename(tmp, local, ec);
+            if (ec) throw std::runtime_error("cannot rename " + tmp.string() +
+                                             " to " + local.string() + ": " +
+                                             ec.message());
+        } catch (...) {
+            std::error_code remove_ec;
+            fs::remove(tmp, remove_ec);
+            throw;
+        }
+    }
+    if (ec) throw std::runtime_error("cannot enumerate " + run_dir.string() +
+                                     ": " + ec.message());
+}
+
+void reject_resume_conflict(const TrainConfig& cfg, const fs::path& out_dir) {
+    if (cfg.resume.empty()) return;
+    const ckpt::ResolvedCheckpoint selected = ckpt::resolve_checkpoint(cfg.resume);
+    const JsonValue state = ckpt::validate_checkpoint(selected.ckpt_dir, true);
+    const JsonValue* step_value = state.find("step");
+    const int selected_step = (int)step_value->as_int();
+    if (!same_path(out_dir, selected.run_dir)) return;
+
+    std::error_code ec;
+    for (fs::directory_iterator it(selected.run_dir, ec), end;
+         !ec && it != end; it.increment(ec)) {
+        const fs::path entry = it->path();
+        const int step = ckpt::checkpoint_step(entry);
+        if (step <= selected_step) continue;
+        const fs::file_status st = fs::symlink_status(entry, ec);
+        if (ec) throw std::runtime_error("cannot inspect " + entry.string() +
+                                         ": " + ec.message());
+        if (st.type() != fs::file_type::not_found)
+            throw std::runtime_error(lfmt(
+                lmsg::checkpoint_conflict, {entry.string()}));
+    }
+    if (ec) throw std::runtime_error("cannot enumerate " +
+                                     selected.run_dir.string() + ": " +
+                                     ec.message());
+}
+
+fs::path make_checkpoint_staging(const fs::path& out_dir, int step) {
+    for (uint64_t attempt = 0;; ++attempt) {
+        const fs::path path = out_dir /
+            (".checkpoint-" + std::to_string(step) + "-" +
+             std::to_string(attempt) + ".tmp");
+        std::error_code ec;
+        fs::file_status st = fs::symlink_status(path, ec);
+        if (ec == std::errc::no_such_file_or_directory) {
+            ec.clear();
+            st = fs::file_status(fs::file_type::not_found);
+        }
+        if (ec) throw std::runtime_error("cannot inspect " + path.string() +
+                                         ": " + ec.message());
+        if (st.type() != fs::file_type::not_found) continue;
+        if (fs::create_directory(path, ec)) return path;
+        if (!ec || ec == std::errc::file_exists) continue;
+        throw std::runtime_error("cannot create " + path.string() + ": " +
+                                 ec.message());
+    }
+}
+
+void warn_prune(TrainerSession& session, const fs::path& path,
+                const std::string& detail) {
+    session.log(lfmt(lmsg::checkpoint_prune_failed,
+                     {path.string(), detail}));
+}
+
+void prune_old_checkpoints(TrainerSession& session, int step) {
+    std::error_code ec;
+    fs::directory_iterator it(session.out_dir, ec), end;
+    if (ec) {
+        warn_prune(session, session.out_dir, ec.message());
+        return;
+    }
+    for (; it != end; it.increment(ec)) {
+        if (ec) {
+            warn_prune(session, session.out_dir, ec.message());
+            return;
+        }
+        const fs::path path = it->path();
+        const int old_step = ckpt::checkpoint_step(path);
+        if (old_step < 0 || old_step >= step) continue;
+        const fs::file_status st = fs::symlink_status(path, ec);
+        if (ec) {
+            warn_prune(session, path, ec.message());
+            ec.clear();
+            continue;
+        }
+        if (st.type() != fs::file_type::directory) continue;
+        fs::remove_all(path, ec);
+        if (ec) {
+            warn_prune(session, path, ec.message());
+            ec.clear();
+        }
+    }
+    if (ec) warn_prune(session, session.out_dir, ec.message());
+}
+
+}  // namespace
 
 
 // ===========================================================================
@@ -1454,6 +1665,21 @@ static std::vector<float> exif_exposure_evs(const ParsedDataset& ds,
 }
 
 void TrainerSession::setup_engine() {
+    _last_checkpoint_step = -1;
+    start_step = 0;
+    cur_step = 0;
+    if (!out_dir_override.empty()) {
+        out_dir = fs::path(out_dir_override);
+    } else if (!cfg.output_dir_name.empty()) {
+        out_dir = fs::path(cfg.output_dir_prefix) / cfg.output_dir_name;
+    } else {
+        std::time_t t = std::time(nullptr);
+        char stamp[32];
+        std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", std::localtime(&t));
+        out_dir = fs::path(cfg.output_dir_prefix) /
+                  (fs::path(cfg.data).stem().string() + "_" + stamp);
+    }
+    reject_resume_conflict(cfg, out_dir);
 #ifndef SS_BACKEND_VULKAN
     check_cuda_runtime();
 #endif
@@ -1483,19 +1709,9 @@ void TrainerSession::setup_engine() {
         memory_budget, app_limit, kTrainingMemoryReserveBytes);
     enforce_preflight(memory_budget, memory_estimate, app_limit);
 
-    if (!out_dir_override.empty()) {
-        out_dir = fs::path(out_dir_override);
-    } else if (!cfg.output_dir_name.empty()) {
-        out_dir = fs::path(cfg.output_dir_prefix) / cfg.output_dir_name;
-    } else {
-        std::time_t t = std::time(nullptr);
-        char stamp[32];
-        std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", std::localtime(&t));
-        out_dir = fs::path(cfg.output_dir_prefix) /
-                  (fs::path(cfg.data).stem().string() + "_" + stamp);
-    }
     fs::create_directories(out_dir);
     if (write_config_json) {
+        snapshot_legacy_configs(out_dir);
         save_config_json(cfg, out_dir, preset);
         save_scene_transform_json(ds, cfg, out_dir);
     }
@@ -1687,8 +1903,8 @@ void TrainerSession::release_engine_budget() {
 // the host first when its layout differs from the one just built (fewer
 // splats, different SH degree, bilagrid/PPISP added or dropped).
 void TrainerSession::restore_checkpoint() {
-    ckpt::ResolvedCheckpoint r = ckpt::resolve_checkpoint(cfg.resume);
-    ckpt::check_resumable(r.ckpt_dir);
+    const ckpt::ResolvedCheckpoint r = ckpt::resolve_checkpoint(cfg.resume);
+    const JsonValue state = ckpt::validate_checkpoint(r.ckpt_dir, true);
 
     // Channel presence is resolved during setup, not from config flags alone.
     ckpt::TargetLayout target;
@@ -1708,14 +1924,11 @@ void TrainerSession::restore_checkpoint() {
     fs::path load_from = r.ckpt_dir;
     fs::path tmp;
     bool adapted = false;
-    {
-        JsonValue state = ckpt::read_state_json(r.ckpt_dir);
-        if (ckpt::needs_adapt(state, target)) {
-            tmp = out_dir / ".resume_adapt";
-            log(lmsg::ckpt_adapting.get());
-            adapted = ckpt::adapt_checkpoint(r.ckpt_dir, target, tmp);
-            if (adapted) load_from = tmp;
-        }
+    if (ckpt::needs_adapt(state, target)) {
+        tmp = out_dir / ".resume_adapt";
+        log(lmsg::ckpt_adapting.get());
+        adapted = ckpt::adapt_checkpoint(r.ckpt_dir, target, tmp);
+        if (adapted) load_from = tmp;
     }
 
     try {
@@ -1727,26 +1940,79 @@ void TrainerSession::restore_checkpoint() {
             e.what());
     }
     if (adapted) remove_tree(tmp);
+    const int manifest_step = (int)state.find("step")->as_int();
+    if (start_step != manifest_step)
+        throw std::runtime_error("checkpoint loader returned a different step");
+    cur_step = start_step;
+    const fs::path expected = out_dir / checkpoint_name(start_step);
+    if (ckpt::checkpoint_step(r.ckpt_dir) == start_step &&
+        same_path(r.ckpt_dir, expected))
+        _last_checkpoint_step = start_step;
     log(lfmt(lmsg::resumed_from, {r.ckpt_dir.string(), (long long)start_step}));
 }
 
 void TrainerSession::save_checkpoint(int step) {
-    char name[32];
-    std::snprintf(name, sizeof name, "step-%09d.ckpt", step);
-    fs::path ckpt = out_dir / name;
-    fs::create_directories(ckpt);
-    engine_save_checkpoint(ckpt.string(), cfg.save_full_checkpoint, step);
-    if (cfg.save_only_latest_checkpoint) {
-        std::vector<fs::path> stale;
-        for (const auto& e : fs::directory_iterator(out_dir)) {
-            std::string b = e.path().filename().string();
-            if (b.rfind("step-", 0) == 0 &&
-                b.find(".ckpt") != std::string::npos && e.path() != ckpt)
-                stale.push_back(e.path());
-        }
-        for (const auto& p : stale) remove_tree(p);
+    const fs::path ckpt = out_dir / checkpoint_name(step);
+    std::error_code ec;
+    fs::file_status dst_status = fs::symlink_status(ckpt, ec);
+    if (ec == std::errc::no_such_file_or_directory) {
+        ec.clear();
+        dst_status = fs::file_status(fs::file_type::not_found);
     }
+    if (ec) throw std::runtime_error("cannot inspect " + ckpt.string() +
+                                     ": " + ec.message());
+    if (dst_status.type() != fs::file_type::not_found) {
+        if (_last_checkpoint_step == step &&
+            dst_status.type() == fs::file_type::directory) {
+            try {
+                (void)ckpt::validate_checkpoint(ckpt, cfg.save_full_checkpoint);
+                const ckpt::ResolvedCheckpoint known =
+                    ckpt::resolve_checkpoint(ckpt);
+                const TrainConfig saved =
+                    ckpt::config_from_json(known.config_path);
+                if (saved.data.empty())
+                    throw std::runtime_error("checkpoint config has no dataset path");
+                return;
+            } catch (const std::exception&) {
+                // A remembered but damaged destination is a conflict, not a
+                // reason to overwrite it.
+            }
+        }
+        throw std::runtime_error(lfmt(lmsg::checkpoint_conflict, {ckpt.string()}));
+    }
+
+    const fs::path staging = make_checkpoint_staging(out_dir, step);
+    bool published = false;
+    try {
+        engine_save_checkpoint(staging.string(), cfg.save_full_checkpoint, step);
+        TrainConfig snapshot = cfg;
+        snapshot.data = fs::absolute(fs::path(snapshot.data)).string();
+        save_config_json(snapshot, staging, preset);
+        require_regular_file(staging / "splat.ply");
+        require_regular_file(staging / "state.tar");
+        require_regular_file(staging / "config.json");
+        const JsonValue state =
+            ckpt::validate_checkpoint(staging, cfg.save_full_checkpoint);
+        const JsonValue* state_step = state.find("step");
+        if (!state_step || (int)state_step->as_int(-1) != step)
+            throw std::runtime_error("checkpoint state step does not match save step");
+        const TrainConfig saved = ckpt::config_from_json(staging / "config.json");
+        if (saved.data.empty())
+            throw std::runtime_error("checkpoint config has no dataset path");
+        fs::rename(staging, ckpt);
+        published = true;
+    } catch (...) {
+        if (!published) {
+            std::error_code remove_ec;
+            fs::remove_all(staging, remove_ec);
+        }
+        throw;
+    }
+    _last_checkpoint_step = step;
+    if (cfg.save_only_latest_checkpoint)
+        prune_old_checkpoints(*this, step);
 }
+
 
 // One step. Split out of train() so a front-end that keeps its own loop
 // shares this per-step config rather than rebuilding it.

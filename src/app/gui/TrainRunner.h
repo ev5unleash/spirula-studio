@@ -71,6 +71,9 @@ public:
     // the session after that, so engine_ready() goes back to false.
     void note_engine_taken();
     std::string error();
+    // A GUI training run left active when the process stopped unexpectedly.
+    static std::optional<std::string> pending_recovery_run();
+    static void dismiss_recovery_run();
 
     // Structured GPU-memory failure behind a failed run, if that is what
     // failed it (copy). Empty for a generic training exception. Localize the
@@ -114,6 +117,7 @@ public:
     void resolve_data_error(bool retry);
 
 private:
+    void clear_armed_recovery_marker();
     void push_log(const std::string& s);
     double avg_latency_locked() const;   // caller holds _mu
     void join_worker();
@@ -134,6 +138,7 @@ private:
     // hold this session's state, and cleanup_failed_engine() is owed. Reset on
     // every new load_dataset()/start_training().
     std::atomic<bool> _engine_dirty{false};
+    bool _recovery_marker_armed = false;
 
     mutable std::mutex _mu;       // guards everything below
     std::string _error;

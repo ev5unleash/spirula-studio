@@ -1422,6 +1422,66 @@ SS_MSG(checkpoint_saved,
     RU("Контрольная точка сохранена: {0}"),
     TR("Denetim noktası şuraya kaydedildi: {0}"));
 
+SS_MSG(checkpoint_resume_unavailable,
+    EN("No resumable checkpoint was found in {0}. A complete full-state checkpoint and readable config.json are required."),
+    JA("{0} に再開可能なチェックポイントがありません。完全な状態のチェックポイントと読み取り可能な config.json が必要です。"),
+    ZH_HANS("在 {0} 中找不到可继续训练的检查点。需要完整的全状态检查点和可读取的 config.json。"),
+    ZH_HANT("在 {0} 中找不到可繼續訓練的檢查點。需要完整的全狀態檢查點和可讀取的 config.json。"),
+    KO("{0}에서 재개할 수 있는 체크포인트를 찾지 못했습니다. 완전한 전체 상태 체크포인트와 읽을 수 있는 config.json이 필요합니다."),
+    DE("In {0} wurde kein fortsetzbarer Checkpoint gefunden. Ein vollständiger Zustands-Checkpoint und eine lesbare config.json sind erforderlich."),
+    FR("Aucun point de reprise n'a été trouvé dans {0}. Un point de reprise complet et un config.json lisible sont nécessaires."),
+    ES("No se encontró ningún punto de control reanudable en {0}. Se necesitan un punto de control de estado completo y un config.json legible."),
+    PT("Nenhum checkpoint retomável foi encontrado em {0}. É necessário um checkpoint completo e um config.json legível."),
+    IT("Nessun checkpoint riprendibile trovato in {0}. Servono un checkpoint completo e un config.json leggibile."),
+    NL("Geen hervatbaar checkpoint gevonden in {0}. Een volledig statuscheckpoint en een leesbare config.json zijn vereist."),
+    RU("В {0} не найдена контрольная точка для продолжения. Требуются полная контрольная точка состояния и читаемый config.json."),
+    TR("{0} içinde sürdürülebilir denetim noktası bulunamadı. Tam durumlu bir denetim noktası ve okunabilir bir config.json gerekir."));
+
+SS_MSG(checkpoint_not_resumable,
+    EN("Checkpoint {0} is inference-only and cannot resume training. Use a full-state checkpoint."),
+    JA("チェックポイント {0} は推論専用のため、学習を再開できません。完全な状態のチェックポイントを使ってください。"),
+    ZH_HANS("检查点 {0} 仅用于推理，无法继续训练。请使用全状态检查点。"),
+    ZH_HANT("檢查點 {0} 僅供推論使用，無法繼續訓練。請使用全狀態檢查點。"),
+    KO("체크포인트 {0}은(는) 추론 전용이므로 학습을 이어갈 수 없습니다. 전체 상태 체크포인트를 사용하십시오."),
+    DE("Checkpoint {0} ist nur für Inferenz und kann das Training nicht fortsetzen. Verwenden Sie einen vollständigen Zustands-Checkpoint."),
+    FR("Le point de reprise {0} est réservé à l'inférence et ne peut pas reprendre l'entraînement. Utilisez un point de reprise complet."),
+    ES("El punto de control {0} es solo para inferencia y no puede reanudar el entrenamiento. Use un punto de control de estado completo."),
+    PT("O checkpoint {0} é somente para inferência e não pode retomar o treinamento. Use um checkpoint de estado completo."),
+    IT("Il checkpoint {0} è solo per l'inferenza e non può riprendere l'addestramento. Usare un checkpoint completo."),
+    NL("Checkpoint {0} is alleen voor inferentie en kan de training niet hervatten. Gebruik een volledig statuscheckpoint."),
+    RU("Контрольная точка {0} предназначена только для вывода и не может продолжить обучение. Используйте полную контрольную точку состояния."),
+    TR("{0} denetim noktası yalnızca çıkarım içindir ve eğitime devam edemez. Tam durumlu bir denetim noktası kullanın."));
+
+SS_MSG(checkpoint_conflict,
+    EN("Checkpoint {0} already exists and will not be overwritten. Resume that checkpoint or choose a different output run directory."),
+    JA("チェックポイント {0} はすでに存在するため上書きしません。そのチェックポイントから再開するか、別の出力実行フォルダーを選んでください。"),
+    ZH_HANS("检查点 {0} 已存在，不会覆盖。请从该检查点继续，或选择其他输出运行目录。"),
+    ZH_HANT("檢查點 {0} 已存在，不會覆寫。請從該檢查點繼續，或選擇其他輸出執行目錄。"),
+    KO("체크포인트 {0}이(가) 이미 있어 덮어쓰지 않습니다. 해당 체크포인트를 이어서 사용하거나 다른 출력 실행 폴더를 선택하십시오."),
+    DE("Checkpoint {0} ist bereits vorhanden und wird nicht überschrieben. Setzen Sie diesen Checkpoint fort oder wählen Sie ein anderes Ausgabe-Laufverzeichnis."),
+    FR("Le point de reprise {0} existe déjà et ne sera pas écrasé. Reprenez ce point de reprise ou choisissez un autre dossier d'exécution de sortie."),
+    ES("El punto de control {0} ya existe y no se sobrescribirá. Reanude ese punto de control o elija otra carpeta de ejecución de salida."),
+    PT("O checkpoint {0} já existe e não será sobrescrito. Retome esse checkpoint ou escolha outra pasta de execução de saída."),
+    IT("Il checkpoint {0} esiste già e non verrà sovrascritto. Riprendere da quel checkpoint o scegliere un'altra cartella di esecuzione."),
+    NL("Checkpoint {0} bestaat al en wordt niet overschreven. Hervat dat checkpoint of kies een andere uitvoermap voor de run."),
+    RU("Контрольная точка {0} уже существует и не будет перезаписана. Продолжите с неё или выберите другой каталог запуска."),
+    TR("{0} denetim noktası zaten var ve üzerine yazılmayacak. Bu denetim noktasından devam edin veya farklı bir çıktı çalıştırma klasörü seçin."));
+
+SS_MSG(checkpoint_prune_failed,
+    EN("Checkpoint saved, but checkpoint cleanup failed at {0}: {1}"),
+    JA("チェックポイントは保存しましたが、{0} のチェックポイント整理に失敗しました: {1}"),
+    ZH_HANS("检查点已保存，但清理 {0} 的检查点失败：{1}"),
+    ZH_HANT("檢查點已儲存，但清理 {0} 的檢查點失敗：{1}"),
+    KO("체크포인트는 저장했지만 {0}의 체크포인트 정리에 실패했습니다: {1}"),
+    DE("Checkpoint gespeichert, aber die Bereinigung der Checkpoints bei {0} ist fehlgeschlagen: {1}"),
+    FR("Point de reprise enregistré, mais le nettoyage des points de reprise a échoué à {0} : {1}"),
+    ES("Punto de control guardado, pero la limpieza de puntos de control falló en {0}: {1}"),
+    PT("Checkpoint salvo, mas a limpeza dos checkpoints falhou em {0}: {1}"),
+    IT("Checkpoint salvato, ma la pulizia dei checkpoint è fallita in {0}: {1}"),
+    NL("Checkpoint opgeslagen, maar het opschonen van checkpoints is mislukt bij {0}: {1}"),
+    RU("Контрольная точка сохранена, но очистка контрольных точек в {0} не удалась: {1}"),
+    TR("Denetim noktası kaydedildi ancak {0} konumundaki denetim noktası temizliği başarısız oldu: {1}"));
+
 // Labelled rather than inflected ("Steps: 3", not "3 steps") -- see
 // src/i18n/README.md. Steps counts what THIS run did, so it pairs with a
 // time that also excludes whatever a resumed checkpoint already had.

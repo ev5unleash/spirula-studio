@@ -351,6 +351,7 @@ private:
     bool _diverged_loss_reported = false;
     bool _budget_active = false;
     bool _engine_initialized = false;
+    int _last_checkpoint_step = -1;
 };
 
 }  // namespace spirula
