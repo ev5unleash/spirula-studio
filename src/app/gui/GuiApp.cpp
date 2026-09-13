@@ -4466,22 +4466,28 @@ void GuiApp::draw_dataset_rerun(const WorkspaceState& prior) {
         _geometry.enable && (_geometry.want_normal || _geometry.want_depth);
     const bool need_mask_model = mask_model_missing();
     const bool need_feat_model = feature_model_missing();
+    const bool geometry_run = geometry_will_run();
     const bool need_geom_model =
-        geometry_model_missing() && geometry_will_run();
+        geometry_model_missing() && geometry_run;
     const bool need_frame_geom_model =
         geometry_model_missing() && geometry_requested;
+    const bool geometry_probe_busy =
+        _geometry.enable &&
+        (_geometry.want_normal || _geometry.want_depth) &&
+        _geometry_output_probe->busy();
 
     bool go = false;
     if (prior.frames) {
-        const bool blocked =
+        const bool blocked_by_model =
             need_mask_model || need_feat_model || need_frame_geom_model;
+        const bool blocked = blocked_by_model || geometry_probe_busy;
         ImGui::BeginDisabled(blocked);
         if (ui::Button(dmsg::rerun_frames)) {
             _redo_frames = _redo_masks = true;   // the masks describe the frames
             _redo_model = go = true;
         }
         ImGui::EndDisabled();
-        if (blocked)
+        if (blocked_by_model)
             ui::help_on_hover_disabled(
                 need_mask_model ? dmsg::mask_model_first
                 : need_feat_model ? dmsg::feat_model_first
@@ -4489,27 +4495,29 @@ void GuiApp::draw_dataset_rerun(const WorkspaceState& prior) {
         ImGui::SameLine();
     }
     if (prior.masks) {
-        const bool blocked = need_mask_model || need_geom_model;
+        const bool blocked_by_model = need_mask_model || need_geom_model;
+        const bool blocked = blocked_by_model || geometry_probe_busy;
         ImGui::BeginDisabled(blocked);
         if (ui::Button(dmsg::rerun_masks)) {
             _redo_masks = true;
             _redo_model = go = true;
         }
         ImGui::EndDisabled();
-        if (blocked)
+        if (blocked_by_model)
             ui::help_on_hover_disabled(
                 need_mask_model ? dmsg::mask_model_first
                                 : dmsg::geom_model_first);
         ImGui::SameLine();
     }
     {
-        const bool blocked = need_feat_model || need_geom_model;
+        const bool blocked_by_model = need_feat_model || need_geom_model;
+        const bool blocked = blocked_by_model || geometry_probe_busy;
         ImGui::BeginDisabled(blocked);
         if (ui::Button(dmsg::rerun_model)) {
             _redo_model = go = true;
         }
         ImGui::EndDisabled();
-        if (blocked)
+        if (blocked_by_model)
             ui::help_on_hover_disabled(
                 need_feat_model ? dmsg::feat_model_first
                                 : dmsg::geom_model_first);
@@ -4521,14 +4529,18 @@ void GuiApp::draw_dataset_rerun(const WorkspaceState& prior) {
         ImGui::SameLine();
         const bool need_geometry_button_model =
             geometry_model_missing() && geometry_requested;
-        ImGui::BeginDisabled(!_geometry.enable || need_geometry_button_model);
+        const bool geometry_blocked =
+            !_geometry.enable || need_geometry_button_model ||
+            geometry_probe_busy;
+        ImGui::BeginDisabled(geometry_blocked);
         if (ui::Button(dmsg::rerun_geometry)) {
             _redo_geometry = go = true;
         }
         ImGui::EndDisabled();
-        ui::help_on_hover_disabled(
-            need_geometry_button_model ? dmsg::geom_model_first
-                                       : dmsg::rerun_geometry_help);
+        if (!geometry_probe_busy)
+            ui::help_on_hover_disabled(
+                need_geometry_button_model ? dmsg::geom_model_first
+                                           : dmsg::rerun_geometry_help);
     }
     ImGui::NewLine();
     ImGui::Unindent();
@@ -5135,8 +5147,9 @@ void GuiApp::draw_dataset_form(float height, bool running) {
         const bool need_feat_model =
             (redo_model || (int)restart <= (int)Stage::Matching) &&
             feature_model_missing();
+        const bool geometry_run = geometry_will_run();
         const bool need_geom_model =
-            geometry_model_missing() && geometry_will_run();
+            geometry_model_missing() && geometry_run;
         const bool geometry_probe_busy =
             _geometry.enable &&
             (_geometry.want_normal || _geometry.want_depth) &&
@@ -5154,7 +5167,7 @@ void GuiApp::draw_dataset_form(float height, bool running) {
         if (!ready) {
             ImGui::SameLine();
             ui::TextDisabled(dmsg::pick_input_first);
-        } else if (need_model) {
+        } else if (need_model && !geometry_probe_busy) {
             // The options above carry the same buttons, but they are a scroll
             // away by the time somebody is reaching for this one. One missing
             // checkpoint at a time; the next takes its place once this lands.
