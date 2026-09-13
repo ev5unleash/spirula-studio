@@ -11,6 +11,9 @@
 #include "app/FrameExtract.h"
 #include "video/Video.h"
 #endif
+#ifdef SS_BUILD_SAM
+#include "sam/Sam.h"   // sam::freeze_device
+#endif
 
 #include <algorithm>
 #include <cctype>
@@ -102,6 +105,18 @@ void collect_preview_frames(PreviewSource& src, int offers,
         // slider makes. Seeking is not supported by the decoder, so "frame N"
         // means "the Nth frame we sample while reading forward".
         long long total = 0;
+#ifdef SS_BUILD_SAM
+        // The listing opens a decoder, which creates the context. Freeze first;
+        // a request that cannot be honoured is reported rather than decoded
+        // around.
+        if (src.builtin_decode) {
+            std::string derr;
+            if (!sam::freeze_device(src.device, derr)) {
+                src.builtin_decode = false;
+                src.device_error = derr;
+            }
+        }
+#endif
 #ifdef SS_HAVE_VIDEO
         if (src.builtin_decode) {
             video::VideoReader r;
@@ -167,6 +182,10 @@ bool load_preview_frame(const PreviewSource& src, const PreviewFrame& frame,
                         std::string& error, const std::atomic<bool>& cancel) {
     w = h = 0;
     rgb.clear();
+    if (src.is_video && !src.device_error.empty()) {
+        error = src.device_error;
+        return false;
+    }
     if (!src.is_video) {
         if (frame.path.empty() ||
             !load_photo(frame.path, src.photos_as_stored, w, h, rgb)) {
@@ -176,12 +195,21 @@ bool load_preview_frame(const PreviewSource& src, const PreviewFrame& frame,
         return true;
     }
 
+#ifdef SS_BUILD_SAM
+    if (src.builtin_decode) {
+        std::string select_error;
+        if (!sam::freeze_device(src.device, select_error)) {
+            error = select_error;
+            return false;
+        }
+    }
+#endif
 #ifdef SS_HAVE_VIDEO
     if (src.builtin_decode) {
         nn::Image img;
         std::string err;
         if (app::extract_one_frame(src.input, src.look, frame.index, folder, img,
-                                   &cancel, err)) {
+                                   &cancel, err, src.device)) {
             w = img.width;
             h = img.height;
             rgb = std::move(img.data);
@@ -247,6 +275,13 @@ void scan_preview_frames(const PreviewSource& src,
                          const std::vector<PreviewFrame>& frames, int folder,
                          const std::function<void(const uint8_t*, int, int)>& on_frame,
                          const std::atomic<bool>& cancel) {
+    if (src.is_video && !src.device_error.empty()) return;
+#ifdef SS_BUILD_SAM
+    if (src.is_video && src.builtin_decode) {
+        std::string select_error;
+        if (!sam::freeze_device(src.device, select_error)) return;
+    }
+#endif
 #ifdef SS_HAVE_VIDEO
     if (src.is_video && src.builtin_decode && !frames.empty()) {
         std::vector<int64_t> indices;
@@ -259,7 +294,7 @@ void scan_preview_frames(const PreviewSource& src,
                                    on_frame(img.data.data(), img.width,
                                             img.height);
                                },
-                               &cancel, err);
+                               &cancel, err, src.device);
         if (any || cancel.load()) return;
     }
 #endif

@@ -555,8 +555,9 @@ std::vector<sfm::RigDef> SfmRunner::build_rigs(const PrepJob& prep) {
 }
 #endif  // SS_TOOL_SFM
 
-// The flags that describe the MODEL rather than where it goes. The command
-// line and the workspace's stamp are both made from this, so they cannot drift.
+// Flags that describe the model rather than the execution device. The same
+// model vector feeds the workspace stamp and the launch settings; the frozen
+// device is appended only when launching.
 std::vector<std::string> SfmRunner::recon_args(const SfmJob& job,
                                                const PrepResult& prep) {
     std::vector<std::string> argv = {
@@ -768,6 +769,12 @@ void SfmRunner::run(SfmJob job) {
                 const fs::path mf = ws / ".spirula_manifest.yaml";
                 std::ofstream(mf, std::ios::binary | std::ios::trunc) << now.args[++k];
                 settings.push_back(mf.string());
+            }
+            // Keep the execution identity out of ReconStamp while making it
+            // explicit for both in-process and self-child runs.
+            if (!job.device_selector.empty()) {
+                settings.push_back("--device");
+                settings.push_back(job.device_selector);
             }
 
             // What to advise on failure depends on which stage lost the

@@ -883,11 +883,7 @@ const Backends& backends() {
     static const Backends probed = [] {
         Backends b;
 #ifdef SS_HAVE_VIDEO
-        b.video_reason = app::video_decode_availability();
-        b.builtin_video = b.video_reason.empty();
-        if (!b.builtin_video)
-            b.video_note = "this graphics driver cannot decode video, so "
-                           "frames are extracted with ffmpeg";
+        b.builtin_video = true;
 #else
         b.video_reason = "built without the video decoder "
                          "(-DSS_ENABLE_PATENTED=OFF)";
@@ -907,6 +903,18 @@ const Backends& backends() {
         return b;
     }();
     return probed;
+}
+
+// The decoder's own capability answer for THIS device; empty means yes. It
+// creates the inference context, so it is only asked after a job's device
+// request is frozen, at that job's first extraction.
+static const std::string& native_decode_reason() {
+#ifdef SS_HAVE_VIDEO
+    static const std::string reason = app::video_decode_availability();
+    return reason;
+#else
+    return backends().video_reason;
+#endif
 }
 
 int DatasetPrep::count_images(const std::string& dir, const std::string& skip) {
@@ -985,7 +993,7 @@ int64_t DatasetPrep::estimate_frames(const PrepJob& job, const PrepInput& in,
             ? (int)app::pano360_views(in.eac360, job.pano).size()
             : 0;
 #ifdef SS_HAVE_VIDEO
-    if (!job.force_external_decode && backends().builtin_video) {
+    if (!job.force_external_decode && native_decode_reason().empty()) {
         std::string err;
         video::VideoProbe probe;
         if (video::probe_video(in.path, probe, err) && probe.tracks > 0)
@@ -1030,6 +1038,21 @@ bool DatasetPrep::run(const PrepJob& job_in, PrepResult& out, std::string& error
         error = lmsg::err_nothing_to_prepare.get();
         return false;
     }
+
+    // Before the built-in decoder can pick one. Only a job that will reach the
+    // decoder pays: asking whether THIS device decodes is what the freeze makes
+    // safe, and a photo-only job that masks freezes inside Masker::init.
+#ifdef SS_HAVE_VIDEO
+    bool wants_native_decode = false;
+    if (!job.force_external_decode)
+        for (const PrepInput& in : job.inputs)
+            if (in.is_video) {
+                wants_native_decode = true;
+                break;
+            }
+    if (wants_native_decode && !sam::freeze_device(job.device, error))
+        return false;
+#endif
 
     // Where each input's images and masks ended up, so the masking pass below
     // can run per input (see generate_masks) instead of over one flat tree.
@@ -1280,7 +1303,8 @@ bool DatasetPrep::extract_video(const PrepJob& job, const PrepInput& in,
         }
     }
 
-    const bool want_builtin = !job.force_external_decode && backends().builtin_video;
+    const bool want_builtin =
+        !job.force_external_decode && native_decode_reason().empty();
     if (want_builtin) {
         if (extract_video_builtin(job, in, images, out, error)) {
             out.captures.push_back({in.subdir, in.path, 0.0});
@@ -1333,6 +1357,7 @@ bool DatasetPrep::extract_video_builtin(const PrepJob& job, const PrepInput& in,
     app::FrameExtractJob fx;
     fx.input = in.path;
     fx.image_dir = images;
+    fx.device = job.device;
     fx.skip = skip;
     fx.keep = window > 1 ? window : 0;
     fx.max_frames = job.max_frames;
@@ -2062,7 +2087,7 @@ bool DatasetPrep::generate_masks_builtin(const PrepJob& job, const PrepInput& in
     // photo folder's clicks were recorded against its own sorted order.
     std::vector<int64_t> ids;
     const bool by_stem = in.is_video && !job.force_external_decode &&
-                         backends().builtin_video &&
+                         native_decode_reason().empty() &&
                          frame_ids_from_stems(files, ids);
     if (!by_stem) {
         ids.resize(files.size());
@@ -2076,6 +2101,7 @@ bool DatasetPrep::generate_masks_builtin(const PrepJob& job, const PrepInput& in
 
     sam::MaskOptions mo;
     mo.model = job.mask_model_path;
+    mo.device = job.device;
     mo.text = job.mask_prompt;
     mo.neg_text = job.mask_negative_prompt;
     mo.keep_prompted = job.mask_keep_subject;

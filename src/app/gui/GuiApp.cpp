@@ -27,8 +27,21 @@
 #include "app_generated/app_banner.h"
 #include "external/stb_image.h"
 
+#include "core/Env.h"
+#if defined(SS_BUILD_SAM) || defined(SS_TOOL_SFM) || defined(SS_BACKEND_VULKAN)
+#include "core/VulkanDeviceSelection.h"
+#endif
+
 #include "imgui.h"
 #include "imgui_stdlib.h"
+
+// Side-effect-free native listing; it must not publish the engine selection.
+#if defined(SS_BUILD_SAM)
+#include "nn/Device.h"
+#include "nn/vk/Context.h"
+#elif defined(SS_TOOL_SFM)
+#include "sfm/vk/VkContext.h"
+#endif
 
 #include <algorithm>
 #include <cfloat>
@@ -58,6 +71,26 @@ const ImVec4 kOk(0.35f, 0.85f, 0.45f, 1.0f);
 const ImVec4 kErr(1.0f, 0.42f, 0.42f, 1.0f);
 const ImVec4 kWarn(0.95f, 0.75f, 0.30f, 1.0f);
 const ImVec4 kDim(0.6f, 0.6f, 0.6f, 1.0f);
+#if defined(SS_BUILD_SAM) || defined(SS_TOOL_SFM) || defined(SS_BACKEND_VULKAN)
+inline const Msg& device_detail(spirula::vkselect::ResolveStatus s) {
+    switch (s) {
+        case spirula::vkselect::ResolveStatus::Malformed:
+            return msg::device_detail_malformed;
+        case spirula::vkselect::ResolveStatus::OutOfRange:
+            return msg::device_detail_out_of_range;
+        case spirula::vkselect::ResolveStatus::Ambiguous:
+            return msg::device_detail_ambiguous;
+        case spirula::vkselect::ResolveStatus::Unusable:
+            return msg::device_unusable_native;
+        case spirula::vkselect::ResolveStatus::NoDevice:
+            return msg::device_detail_no_device;
+        case spirula::vkselect::ResolveStatus::Missing:
+        case spirula::vkselect::ResolveStatus::Ok:
+            break;
+    }
+    return msg::device_detail_missing;
+}
+#endif
 
 std::string format_gib(uint64_t bytes) {
     char buf[32];
@@ -443,9 +476,16 @@ void GuiApp::write_run_settings(std::ofstream& f) {
     section(msg::runlog_section_run.get());
     line("run_started", run_log_stamp());
     line("engine", effective_engine() == Engine::BuiltIn ? "builtin" : "colmap");
+#if defined(SS_BUILD_SAM) || defined(SS_TOOL_SFM) || defined(SS_BACKEND_VULKAN)
+    line("native_device", _native_device_uuid.empty() ? "auto" : _native_device_uuid);
+    if (!_native_device_name.empty()) line("native_device_name", _native_device_name);
+#endif
+#ifndef SS_BACKEND_VULKAN
+    if (_cuda_device_index >= 0)
+        line("cuda_device", std::to_string(_cuda_device_index));
+#endif
     line("preset", _preset);
     if (!_preset_file.empty()) line("preset_file", _preset_file);
-
     section(msg::runlog_section_prep.get());
     line("workspace", _workspace);
     line("photo_import", photo_import_name(_photo_import));
@@ -739,12 +779,15 @@ void GuiApp::request_go_home() {
 // frame() attaches the viewport once the splats are on the device.
 void GuiApp::open_splat(std::string path) {
     if (path.empty()) return;
-    app::set_crash_note("opening model " + path);
     clear_log();
+#ifdef SS_BACKEND_VULKAN
+    if (!freeze_native_device()) return;
+#else
+    if (!freeze_cuda_device()) return;
+#endif
+    app::set_crash_note("opening model " + path);
     close_mesh_preview();
     detach_session_views();
-    // Opening a file resets the engine; a finished run's session cannot be
-    // rendered from once that has happened.
     _runner.note_engine_taken();
     _compare.open(path);
     add_model_recent(path);
@@ -755,6 +798,11 @@ void GuiApp::open_splat(std::string path) {
 
 void GuiApp::add_splat(std::string path) {
     if (path.empty()) return;
+#ifdef SS_BACKEND_VULKAN
+    if (!freeze_native_device()) return;
+#else
+    if (!freeze_cuda_device()) return;
+#endif
     _compare.add(path);
     add_model_recent(path);
     remember_dir("model", path);
@@ -781,19 +829,19 @@ void GuiApp::close_splat() {
 
 void GuiApp::launch_training(const TrainConfig& cfg, const std::string& preset) {
     if (cfg.data.empty()) return;
+#ifdef SS_BACKEND_VULKAN
+    if (!freeze_native_device()) return;
+#else
+    if (!freeze_cuda_device()) return;
+#endif
     app::set_crash_note("training " + cfg.data);
     close_mesh_preview();
-    close_splat();      // the engine is one object; the viewer has to let go
+    close_splat();
     detach_session_views();
-    // Engine setup initializes the backend on the selected device; from
-    // here on the device combo is display-only (one device per process).
-    _device_locked = true;
     std::string data_dir = cfg.data;
     if (fs::path(data_dir).filename() == "images")
         data_dir = fs::path(data_dir).parent_path().string();
     open_run_log(_train_log, data_dir, "train", run_log_stamp());
-    // A stale unregistered-list target from an earlier prep run must not be
-    // written by anything this run spawns.
     set_ss_env("UNREG_LOG", "");
     write_run_settings(_train_log);
     _runner.start_training(cfg, preset);
@@ -1962,6 +2010,15 @@ void GuiApp::draw_menu_bar() {
         ImGui::EndMenu();
     }
     draw_language_menu();
+#if defined(SS_BUILD_SAM) || defined(SS_TOOL_SFM) || defined(SS_BACKEND_VULKAN)
+    {
+        // Native choice is reachable before previews and engine work.
+        if (ui::BeginMenu(msg::menu_device)) {
+            draw_device_picker(/*as_menu=*/true);
+            ImGui::EndMenu();
+        }
+    }
+#endif
     if (ui::BeginMenu(msg::menu_help)) {
         if (ui::BeginMenu(msg::menu_about)) {
             ui::Text(spirula::i18n::msg::brand::product);
@@ -2332,11 +2389,18 @@ void GuiApp::sync_dataset_jobs() {
     prep.force_external_masking = _sfm_job.prep.force_external_masking;
     if (const ModelEntry* e = find_model(_model_id))
         prep.mask_model_name = e->legacy_name;
+    // The one frozen choice, re-applied here because this function rebuilds
+    // prep from panel state and would otherwise drop it. Empty before the
+    // freeze, which is exactly what an unstarted job wants.
+    prep.device = _native_device_uuid;
     _sfm_job.prep = prep;
 
     _colmap_job.inputs = prep.inputs;
     _colmap_job.workspace = prep.workspace;
     _colmap_job.resume = prep.resume;
+    // The frozen choice, so a later edit cannot drop the UUID the run has
+    // already committed to. Empty before the freeze.
+    _colmap_job.device = _native_device_uuid;
     _colmap_job.video_fps = prep.video_fps;
     _colmap_job.sharp_window = prep.sharp_window;
     _colmap_job.pano = prep.pano;
@@ -2369,6 +2433,13 @@ void GuiApp::sync_dataset_jobs() {
     _sfm_job.geometry = _colmap_job.geometry = _geometry;
     _sfm_job.geometry.overwrite = _colmap_job.geometry.overwrite =
         _geometry.overwrite || _redo_geometry;
+    // The frozen choice survives the copy above, so a later panel edit cannot
+    // drop the UUID a run already committed to.
+    _sfm_job.geometry.device_uuid = _colmap_job.geometry.device_uuid =
+        _geometry.device_uuid = _native_device_uuid;
+    // ... and the reconstruction's own selector, which SfmRunner::update must
+    // not be able to overwrite once the run has started.
+    _sfm_job.device_selector = _native_device_uuid;
     // A settings file written by a build that HAS the inference layer must not
     // make a run on one that has not fail at the last step.
     _sfm_job.geometry.enable = _colmap_job.geometry.enable =
@@ -2393,6 +2464,10 @@ void GuiApp::update_dataset_job() {
 }
 
 void GuiApp::start_dataset_job() {
+    // The first GPU-consuming operation of this session freezes the one native
+    // choice, before any preview, decode or child is dispatched. A rejected or
+    // conflicting request is reported and the run does not start.
+    if (!freeze_native_device()) return;
     app::set_crash_note("building dataset " + _workspace);
     sync_dataset_jobs();
     const std::string stamp = run_log_stamp();
@@ -3089,6 +3164,9 @@ PreviewSource GuiApp::preview_source(size_t input) const {
     src.builtin_decode =
         !_sfm_job.prep.force_external_decode && backends().builtin_video;
     src.tracks = std::max(in.video_tracks, 1);
+    // The one frozen choice, so a preview decodes and segments on the GPU the
+    // run will use; empty leaves the panel's own precedence in charge.
+    src.device = _native_device_uuid;
     src.look.auto_rotate = _sfm_job.prep.auto_rotate;
     if (in.eac360.valid() && _sfm_job.prep.pano.mode != app::Pano360Mode::Off) {
         src.look.eac = in.eac360;
@@ -3097,11 +3175,317 @@ PreviewSource GuiApp::preview_source(size_t input) const {
     return src;
 }
 
+// ---------------------------------------------------------------------------
+// The one native GPU choice
+//
+// A session-level choice: freeze one canonical UUID before native work and
+// pass it to every native job and child. No persisted preference.
+// ---------------------------------------------------------------------------
+
+void GuiApp::load_native_devices() {
+    if (_native_devices_loaded) return;
+    _native_devices.clear();
+#if defined(SS_BUILD_SAM)
+    // The inference layer's own side-effect-free enumeration.
+    for (const nn::DeviceInfo& d : nn::list_devices()) {
+        NativeDeviceRow r;
+        r.name = d.name;
+        r.type = d.type;
+        r.uuid = d.uuid;
+        r.vram_bytes = d.vram_bytes;
+        r.usable = d.usable;
+        _native_devices.push_back(std::move(r));
+    }
+#elif defined(SS_TOOL_SFM)
+    // No inference layer, but SfM carries its own Vulkan context: a listing
+    // that creates nothing. A build with neither has no native GPU work to
+    // choose a device for, and an empty list is the honest answer.
+    for (const VkDeviceRecord& d : VkContext::listDevices()) {
+        NativeDeviceRow r;
+        r.name = d.name;
+        r.type = d.type;
+        r.uuid = spirula::vkselect::selectorFor(d);
+        r.vram_bytes = d.vram_bytes;
+        r.usable = d.usable;
+        _native_devices.push_back(std::move(r));
+    }
+#elif defined(SS_BACKEND_VULKAN)
+    // Engine-only Vulkan build: the backend's own enumeration, which is also
+    // side-effect free. Its identity helpers exist only on this backend, so
+    // the whole branch is Vulkan-guarded.
+    for (int i = 0; i < backend::device_count(); i++) {
+        const backend::DeviceInfo d = backend::device_info(i);
+        NativeDeviceRow r;
+        r.name = d.name;
+        r.type = d.type;
+        r.vram_bytes = d.vram_bytes;
+        r.usable = d.usable;
+        r.uuid = d.uuid;
+        _native_devices.push_back(std::move(r));
+    }
+#endif
+    _native_devices_loaded = true;
+}
+
+void GuiApp::draw_device_picker(bool as_menu) {
+    load_native_devices();
+
+    const bool frozen = _native_device_frozen;
+    const bool no_devices = std::none_of(
+        _native_devices.begin(), _native_devices.end(),
+        [](const NativeDeviceRow& d) { return d.usable && !d.uuid.empty(); });
+    const bool disabled = frozen || no_devices;
+
+    // Driver names and the UUID are identifiers, not sentences: they are shown
+    // exactly as the runtime reports them, through the raw wrappers, and the
+    // same string is what `--device` takes.
+    auto row_label = [](const NativeDeviceRow& d, size_t index, char* buf, size_t n) {
+        std::snprintf(buf, n, "%s (%s, %llu MB)##native_device_%zu",
+                      d.name.c_str(), d.type.c_str(),
+                      (unsigned long long)(d.vram_bytes >> 20), index);
+    };
+    // Auto is selected only after the user chooses it; an untouched picker
+    // inherits the environment instead.
+    const bool auto_sel =
+        !frozen && _native_device_choice_set && _native_device_request.empty();
+    const char* env_sel = spirula::env("VK_DEVICE");
+    const bool inherited = !frozen && !_native_device_choice_set &&
+                           env_sel && env_sel[0];
+    const std::string inherited_label =
+        inherited ? spirula::i18n::format(msg::device_inherited_env, {env_sel})
+                  : std::string();
+
+    if (as_menu) {
+        ImGui::BeginDisabled(disabled);
+        if (ui::MenuItem(msg::device_auto, nullptr, auto_sel)) {
+            _native_device_choice_set = true;
+            _native_device_request.clear();
+        }
+        ui::help_on_hover(msg::device_auto_help);
+        for (size_t i = 0; i < _native_devices.size(); ++i) {
+            const NativeDeviceRow& d = _native_devices[i];
+            char label[400];
+            row_label(d, i, label, sizeof label);
+            const bool sel = !_native_device_request.empty() &&
+                             _native_device_request == d.uuid;
+            ImGui::BeginDisabled(!d.usable || d.uuid.empty());
+            // The canonical UUID is what the request carries; a device the
+            // driver reported no UUID for cannot be selected by identity.
+            if (ui::MenuItemRaw(label, sel) && !d.uuid.empty()) {
+                _native_device_choice_set = true;
+                _native_device_request = d.uuid;
+            }
+            ImGui::EndDisabled();
+            ui::help_on_hover_raw(d.uuid.empty() ? "" : d.uuid.c_str());
+        }
+        ImGui::EndDisabled();
+    } else {
+        ImGui::BeginDisabled(disabled);
+        ImGui::SetNextItemWidth(px(-8.0f));
+        const std::string shown =
+            frozen ? _native_device_name
+                   : (_native_device_request.empty()
+                          ? (inherited ? inherited_label : msg::device_auto.get())
+                          : _native_device_request);
+        if (ui::BeginComboRaw("##native_device",
+                              no_devices ? msg::no_device_found.get()
+                                         : shown.c_str())) {
+            if (ui::Selectable(msg::device_auto, auto_sel)) {
+                _native_device_choice_set = true;
+                _native_device_request.clear();
+            }
+            ui::help_on_hover(msg::device_auto_help);
+            for (size_t i = 0; i < _native_devices.size(); ++i) {
+                const NativeDeviceRow& d = _native_devices[i];
+                char label[400];
+                row_label(d, i, label, sizeof label);
+                const bool sel = !_native_device_request.empty() &&
+                                 _native_device_request == d.uuid;
+                ImGui::BeginDisabled(!d.usable || d.uuid.empty());
+                if (ui::SelectableRaw(label, sel) && !d.uuid.empty()) {
+                    _native_device_choice_set = true;
+                    _native_device_request = d.uuid;
+                }
+                if (sel) ImGui::SetItemDefaultFocus();
+                ImGui::EndDisabled();
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::EndDisabled();
+    }
+
+    if (frozen) {
+        // The resolved identity, and why it cannot move. The name and the UUID
+        // come from the driver and stay as they are.
+        ui::TextColoredWrapped(kDim, msg::device_frozen_at, {_native_device_name});
+        ui::TextColoredWrappedRaw(kDim, _native_device_uuid);
+        ui::TextColoredWrapped(kDim, msg::device_restart_required);
+    } else if (no_devices) {
+        ui::TextColoredWrapped(kWarn, msg::device_none_native);
+    } else if (inherited) {
+        ui::TextColoredWrappedRaw(kDim, inherited_label);
+    }
+    if (!_native_device_error.empty()) {
+        // A complete localized sentence.
+        ui::TextColoredWrappedRaw(kErr, _native_device_error);
+    }
+    if (!as_menu) ui::help_on_hover(msg::device_help);
+}
+
+bool GuiApp::freeze_native_device() {
+#if !defined(SS_BUILD_SAM) && !defined(SS_TOOL_SFM) && !defined(SS_BACKEND_VULKAN)
+    _native_device_frozen = true;
+    return true;
+#else
+    if (_native_device_frozen) {
+        // Already frozen: the request must name the same device or the app has
+        // to be restarted. This is the invariant, not a new winner.
+        if (_native_device_request.empty() || _native_device_uuid.empty()) return true;
+        if (_native_device_request == _native_device_uuid) return true;
+        _native_device_error = spirula::i18n::format(
+            msg::device_conflict, {_native_device_request, _native_device_uuid});
+        return false;
+    }
+    load_native_devices();
+
+    const bool explicit_set = _native_device_choice_set;
+    const spirula::vkselect::Request req =
+        spirula::vkselect::requestFrom(_native_device_request, explicit_set);
+
+    std::string uuid, name;
+    const std::string requested = req.text.empty() ? "auto" : req.text;
+    std::string diagnostic;
+    const Msg* detail = nullptr;
+#if defined(SS_BUILD_SAM)
+    spirula::vkselect::Resolution res;
+    if (req.kind == spirula::vkselect::Request::Kind::Malformed) {
+        detail = &msg::device_detail_malformed;
+    } else {
+        try {
+            res = nn::vk::Context::resolveSelector(req);
+        } catch (const std::exception&) {
+            detail = &msg::device_detail_no_device;
+        }
+    }
+    if (!detail && !res.ok()) {
+        detail = &device_detail(res.status);
+    } else if (!detail) {
+        std::string live = nn::configured_device_selector();
+        if (live.empty()) live = nn::current_device_selector();
+        if (!live.empty() && live != res.selector) {
+            _native_device_error = spirula::i18n::format(
+                msg::device_conflict, {res.selector, live});
+            log(_native_device_error);
+            return false;
+        }
+#ifdef SS_BACKEND_VULKAN
+        if (!backend::device_select_identity(res.selector.c_str())) {
+            diagnostic = backend::device_selection_error();
+            if (diagnostic.empty()) detail = &msg::device_unusable_native;
+        }
+#endif
+        if (!detail && diagnostic.empty()) {
+            try {
+                nn::configure_device(res.selector);
+            } catch (const std::exception& e) {
+                _native_device_error = spirula::i18n::format(
+                    msg::device_error, {requested, e.what()});
+                log(_native_device_error);
+                return false;
+            }
+            uuid = nn::configured_device_selector();
+        }
+    }
+#elif defined(SS_TOOL_SFM)
+    const spirula::vkselect::Resolution res = VkContext::resolveSelector(req);
+    if (!res.ok()) detail = &device_detail(res.status);
+    else           uuid = res.selector;
+#elif defined(SS_BACKEND_VULKAN)
+    if (req.kind == spirula::vkselect::Request::Kind::Malformed) {
+        detail = &msg::device_detail_malformed;
+    } else if (!backend::device_select_identity(requested.c_str())) {
+        diagnostic = backend::device_selection_error();
+        if (diagnostic.empty()) detail = &msg::device_unusable_native;
+    } else {
+        uuid = backend::device_current_selector();
+    }
+#endif
+#if defined(SS_BACKEND_VULKAN)
+    if (!detail && !uuid.empty() &&
+        !backend::device_select_identity(uuid.c_str())) {
+        diagnostic = backend::device_selection_error();
+        if (diagnostic.empty()) detail = &msg::device_unusable_native;
+    }
+#endif
+    if (!detail && !diagnostic.empty()) {
+        _native_device_error = spirula::i18n::format(
+            msg::device_error, {requested, diagnostic});
+        log(_native_device_error);
+        return false;
+    }
+    if (!detail && uuid.empty())
+        detail = &msg::device_detail_no_device;
+    if (detail) {
+        _native_device_error = spirula::i18n::format(
+            msg::device_error, {requested, detail->get()});
+        log(_native_device_error);
+        return false;
+    }
+
+    _native_device_uuid = uuid;
+    // The driver's name for the resolved device, for the display line and the
+    // startup log. Falls back to the UUID when a listing is unavailable.
+    for (const NativeDeviceRow& d : _native_devices)
+        if (d.uuid == uuid) { name = d.name; break; }
+    _native_device_name = name.empty() ? uuid : name;
+    _native_device_frozen = true;
+    _native_device_error.clear();
+    propagate_frozen_device();
+    // The actual resolved identity at workload start, through the log the
+    // screen already shows -- not only the argv a child was handed.
+    log(spirula::i18n::format(
+        msg::device_frozen_at, {_native_device_name + " [" + uuid + "]"}));
+    return true;
+#endif
+}
+bool GuiApp::freeze_cuda_device() {
+#ifdef SS_BACKEND_VULKAN
+    return true;
+#else
+    if (_cuda_device_locked) return true;
+    const int n = backend::device_count();
+    const int current = backend::device_current();
+    if (n <= 0 || current < 0 || current >= n ||
+        !backend::device_select(current)) {
+        log(msg::no_device_found.get());
+        return false;
+    }
+    _cuda_device_index = current;
+    _cuda_device_locked = true;
+    return true;
+#endif
+}
+
+void GuiApp::propagate_frozen_device() {
+    const std::string& uuid = _native_device_uuid;
+    // Copy the frozen UUID into every native job and child launch field.
+    _sfm_job.prep.device = uuid;
+    _colmap_job.device = uuid;
+    _sfm_job.device_selector = uuid;
+    _sfm_job.geometry.device_uuid = uuid;
+    _colmap_job.geometry.device_uuid = uuid;
+    _geometry.device_uuid = uuid;
+    _mesh_job.device_uuid = uuid;
+}
+
 void GuiApp::open_mask_preview() {
     if (_sources.empty()) {
         log(dmsg::mask_pick_input_first.get());
         return;
     }
+    // A preview decodes and segments on the GPU, so it is a GPU-consuming
+    // operation like the run itself: it freezes the same one choice first.
+    if (!freeze_native_device()) return;
     // One backbone on the device at a time; see open_geometry_preview.
     _geometry_panel.close();
     _segment.open(preview_source((size_t)_mask_preview_input),
@@ -3342,6 +3726,9 @@ void GuiApp::request_geometry_download() {
 }
 
 void GuiApp::open_geometry_preview() {
+    // The preview loads a depth backbone, so it is a GPU-consuming operation
+    // and freezes the one choice before the panel starts.
+    if (!freeze_native_device()) return;
     // One multi-gigabyte backbone at a time: the mask preview holds SAM and
     // this one holds Metric3D, and the inference layer's pool is process-wide.
     _segment.close();
@@ -4383,6 +4770,13 @@ void GuiApp::draw_dataset_form(float height, bool running) {
 
     ImGui::Spacing();
     ui::SeparatorText(dmsg::section_settings);
+    // The GPU choice sits at the top of the settings it constrains: a preview,
+    // a masking step and the reconstruction all run on it, so it is offered
+    // before any of them can be started.
+#if defined(SS_BUILD_SAM) || defined(SS_TOOL_SFM) || defined(SS_BACKEND_VULKAN)
+    draw_device_picker();
+    ImGui::Spacing();
+#endif
     draw_dataset_basics();
     ImGui::Spacing();
     ImGui::BeginDisabled(dataset_locked(Stage::Masks));
@@ -4800,13 +5194,8 @@ bool GuiApp::mesh_dataset_found() {
     _mesh_data_probe_found = false;
     std::error_code ec;
     if (!_mesh_job.data_dir.empty()) {
-        // Exactly the child's test: a folder that is not there is no dataset,
-        // and it meshes without one rather than failing.
         _mesh_data_probe_found = fs::exists(_mesh_job.data_dir, ec);
     } else if (!_mesh_job.checkpoint.empty()) {
-        // Empty field: the child reads `data` out of the run's config.json,
-        // relative to the run directory. Both steps throw on a path that is
-        // not a checkpoint at all, which simply means no dataset.
         try {
             auto [ply, run_dir] = spirula::find_splat_ply(_mesh_job.checkpoint);
             (void)ply;
@@ -4828,6 +5217,14 @@ bool GuiApp::mesh_dataset_found() {
 
 void GuiApp::start_meshing() {
     if (_mesh_job.checkpoint.empty()) return;
+#ifdef SS_BACKEND_VULKAN
+    if (!freeze_native_device()) return;
+#else
+    if (!freeze_cuda_device()) return;
+#endif
+#ifndef SS_BACKEND_VULKAN
+    _mesh_job.cuda_device = _cuda_device_index;
+#endif
     close_mesh_preview();
     _mesh.start(_mesh_job);
 }
@@ -4839,14 +5236,16 @@ void GuiApp::close_mesh_preview() {
 }
 
 void GuiApp::open_mesh_preview() {
+    const std::string out = _mesh.output_path();
+    if (out.empty()) return;
+#ifdef SS_BACKEND_VULKAN
+    if (!freeze_native_device()) return;
+#else
+    if (!freeze_cuda_device()) return;
+#endif
     // Whatever else had the engine (a file opened from the viewer screen) has
     // to let go before the splats take it.
     close_splat();
-    const std::string out = _mesh.output_path();
-    if (out.empty()) return;
-    // The model the mesh came from goes FIRST, which puts the surface in the
-    // splats' frame rather than one fitted to itself. Skipped only while a run
-    // is USING the engine -- requiring an IDLE one hid every train-then-mesh.
     if (!training_busy()) {
         detach_session_views();
         _runner.note_engine_taken();
@@ -5413,13 +5812,16 @@ void GuiApp::draw_train_settings() {
     }
     ImGui::EndDisabled();
 
-    // ---- device ----
+    // Vulkan builds share the native picker with every built-in workflow.
+#ifdef SS_BACKEND_VULKAN
+    draw_device_picker();
+#else
     ui::SeparatorText(msg::section_device);
     {
         int n_dev = backend::device_count();
         int cur = backend::device_current();
         backend::DeviceInfo curd = backend::device_info(cur);
-        ImGui::BeginDisabled(_device_locked || busy || n_dev == 0);
+        ImGui::BeginDisabled(_cuda_device_locked || busy || n_dev == 0);
         ImGui::SetNextItemWidth(px(-8.0f));
         // Device names come from the driver; only the "none found" and
         // "unsupported" notes are ours.
@@ -5441,9 +5843,10 @@ void GuiApp::draw_train_settings() {
             ImGui::EndCombo();
         }
         ImGui::EndDisabled();
-        if (_device_locked)
-            ui::TextColoredWrapped(kDim, msg::device_locked);
+        if (_cuda_device_locked)
+            ui::TextColoredWrapped(kDim, msg::device_cuda_locked);
     }
+#endif
 
     // ---- preset + options ----
     // A batch owns the config while it runs -- each row's comes from its own

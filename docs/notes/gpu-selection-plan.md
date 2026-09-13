@@ -1,6 +1,23 @@
 # GPU selection: native workflows first
 
-Status: proposed; implementation has not started.
+Status: native routing implemented; acceptance matrix partially verified; external compatibility tail deferred.
+## Current implementation status
+
+Phase A-C native routing is integrated. Vulkan selection resolves one canonical
+UUID per process and carries it through built-in SfM, SAM/masking, geometry,
+training, rendering, mesh children, and GUI workers. CUDA training remains a
+separate ordinal selection, rebound on each CUDA worker thread.
+
+The resolver/lifecycle smoke passed, including failed-init recovery and a real
+NN upload/download round trip. Targeted MSVC C++17 compiles passed for the
+Vulkan and CUDA GUI/CLI guards. Real SfM, SAM, geometry, training, and desktop
+GUI acceptance remain unverified because this checkout has no model weights or
+bounded capture fixtures and no GUI launch was performed.
+
+The external compatibility tail is intentionally not implemented. COLMAP is
+not installed, the external Python masking dependencies are unavailable, and
+the installed ffmpeg path has no application-level GPU routing in this plan.
+Do not describe external COLMAP/Python work as honoring the native selector.
 
 ## Goal and scope
 

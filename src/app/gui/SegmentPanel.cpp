@@ -353,6 +353,7 @@ void SegmentPanel::start_job(const MaskSettings& s, const app::FrameMask& stenci
                                                    : dmsg::preview_loading_model);
                 sam::MaskOptions mo;
                 mo.model = model;
+                mo.device = src.device;
                 mo.text = settings.prompt;
                 mo.neg_text = settings.negative_prompt;
                 mo.keep_prompted = settings.keep_subject;

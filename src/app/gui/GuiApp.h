@@ -327,6 +327,19 @@ private:
     void draw_batch_issues();
     void draw_batch_progress();      // the running-job block on the trainer screen
     void draw_train_settings();      // left panel
+    // Native picker and frozen identity, available from shared settings/View menu.
+    void draw_device_picker(bool as_menu = false);
+    // Lists the native devices once per session. Enumeration is side-effect
+    // free (a throwaway Vulkan instance) and never creates a logical device.
+    void load_native_devices();
+    // Resolve and register the canonical UUID without creating the inference
+    // context; reject later conflicting requests as restart-required.
+    bool freeze_native_device();
+    bool freeze_cuda_device();
+    // Copies the frozen UUID into every native job field this session owns, so
+    // one choice reaches the dataset, mask/geometry previews, reconstruction,
+    // geometry child and mesh child. Called from the freeze point.
+    void propagate_frozen_device();
     void draw_preset_picker();       // built-in + saved presets, save / load
     void draw_preset_save_modal();
     void draw_preset_delete_modal();
@@ -389,7 +402,32 @@ private:
     bool _pending_batch_skip = false;  // Pending::StartBatch's argument
     bool _parse_dirty = false;       // dataparser option edited -> reload
     bool _color_space_touched = false;  // see adopt_exr_color_space
-    bool _device_locked = false;     // backend initialized -> device fixed
+
+    // ---- the one frozen native GPU choice ----
+    // Typed request, including explicit Auto; frozen flag makes it immutable.
+    std::string _native_device_request;
+    bool _native_device_choice_set = false;
+    std::string _native_device_uuid;   // canonical uuid:<hex>, "" before freeze
+    std::string _native_device_name;   // driver name of the frozen device
+    std::string _native_device_error;  // last rejected request, shown inline
+    bool _native_device_frozen = false;
+
+    // The session-level CUDA engine picker is an ordinal the native side never
+    // sees. Enforced here because CUDA's device_select cannot reject a later
+    // change.
+    bool _cuda_device_locked = false;
+    int _cuda_device_index = -1;
+
+    // What the picker lists: the native Vulkan records when the build has one,
+    // backend rows otherwise. Cached: enumeration spins up a throwaway
+    // instance, and the machine's device set does not change under a session.
+    struct NativeDeviceRow {
+        std::string name, type, uuid;   // uuid canonical, "" when unreported
+        uint64_t vram_bytes = 0;
+        bool usable = false;
+    };
+    std::vector<NativeDeviceRow> _native_devices;
+    bool _native_devices_loaded = false;
 
     // Config being edited + the preset baseline it diffs against.
     TrainConfig _cfg;
