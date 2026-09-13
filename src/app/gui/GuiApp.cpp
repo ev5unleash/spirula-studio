@@ -129,6 +129,11 @@ std::vector<std::string> video_dialog_filters() {
     return std::vector<std::string>(kVideoExtensions,
                                     kVideoExtensions + kNumVideoExtensions);
 }
+Stage recovery_boundary(const dataset_recovery::State& state) {
+    for (int i = 0; i < kNumStages; i++)
+        if (!state.completed[(size_t)i]) return (Stage)i;
+    return state.current;
+}
 
 }  // namespace
 
@@ -918,6 +923,7 @@ bool GuiApp::open_dataset_recovery(const dataset_recovery::State& state) {
         }
     }
 
+    const Stage restart = recovery_boundary(state);
     const bool saved_redo_frames = builtin
         ? _sfm_job.prep.redo_frames : _colmap_job.redo_frames;
     const bool saved_redo_masks = builtin
@@ -932,24 +938,24 @@ bool GuiApp::open_dataset_recovery(const dataset_recovery::State& state) {
         !state.completed[(size_t)Stage::Features] ||
         !state.completed[(size_t)Stage::Matching] ||
         !state.completed[(size_t)Stage::Mapping];
-    const bool before_geometry = state.current == Stage::Frames ||
-                                 state.current == Stage::Masks ||
-                                 state.current == Stage::Features ||
-                                 state.current == Stage::Matching ||
-                                 state.current == Stage::Mapping;
+    const bool before_geometry = restart == Stage::Frames ||
+                                 restart == Stage::Masks ||
+                                 restart == Stage::Features ||
+                                 restart == Stage::Matching ||
+                                 restart == Stage::Mapping;
     _engine = builtin ? Engine::BuiltIn : Engine::Colmap;
     _sfm_job.prep.resume = _colmap_job.resume = true;
     _redo_frames =
         _photo_import != PhotoImport::Move &&
         ((saved_redo_frames && frames_pending) ||
-         state.current == Stage::Frames);
+         restart == Stage::Frames);
     _redo_masks = (saved_redo_masks && masks_pending) ||
-                  state.current == Stage::Frames ||
-                  state.current == Stage::Masks;
+                  restart == Stage::Frames ||
+                  restart == Stage::Masks;
     _redo_model = (saved_redo_model && model_pending) || before_geometry ||
-                  (!builtin && state.current == Stage::Finishing &&
+                  (!builtin && restart == Stage::Finishing &&
                    _colmap_job.final_bundle_adjust);
-    _redo_geometry = state.current == Stage::Geometry;
+    _redo_geometry = restart == Stage::Geometry;
     _sfm_job.redo_model = _colmap_job.redo_model = _redo_model;
     _sfm_job.prep.redo_frames = _colmap_job.redo_frames = _redo_frames;
     _sfm_job.prep.redo_masks = _colmap_job.redo_masks = _redo_masks;
@@ -2728,27 +2734,34 @@ bool GuiApp::persist_dataset_recovery(bool force) {
         return true;
     _dataset_recovery_bootstrap = false;
     std::array<bool, kNumStages> completed{};
-    bool changed = current != _dataset_recovery->current;
     for (int i = 0; i < kNumStages; i++) {
         const StageStatus status = progress->stage((Stage)i).status;
         completed[(size_t)i] = status == StageStatus::Done ||
                                status == StageStatus::Skipped;
+    }
+    Stage boundary = current;
+    for (int i = 0; i < kNumStages; i++)
+        if (!completed[(size_t)i]) {
+            boundary = (Stage)i;
+            break;
+        }
+    bool changed = boundary != _dataset_recovery->current;
+    for (int i = 0; i < kNumStages; i++)
         changed = changed ||
                   completed[(size_t)i] != _dataset_recovery->completed[(size_t)i];
-    }
     const double now = ImGui::GetTime();
     if (!force && !changed && _dataset_recovery_saved_at >= 0.0 &&
         now - _dataset_recovery_saved_at < 1.0)
         return true;
 
     dataset_recovery::State next = *_dataset_recovery;
-    next.current = current;
+    next.current = boundary;
     next.completed = completed;
     const bool model_pending =
         !completed[(size_t)Stage::Features] ||
         !completed[(size_t)Stage::Matching] ||
         !completed[(size_t)Stage::Mapping] ||
-        (next.engine == 1 && current == Stage::Finishing &&
+        (next.engine == 1 && boundary == Stage::Finishing &&
          next.colmap.final_bundle_adjust);
     if (next.engine == 0) {
         next.sfm = _sfm_job;
@@ -2836,7 +2849,8 @@ void GuiApp::start_dataset_job() {
                 return false;
         return true;
     };
-    const bool resumed = _dataset_recovery_resume && _dataset_recovery &&
+    const bool resumed = _resume && _dataset_recovery_resume &&
+                         _dataset_recovery &&
                          _dataset_recovery->engine == engine &&
                          _workspace ==
                              (engine == 0
@@ -2849,6 +2863,7 @@ void GuiApp::start_dataset_job() {
                                  : _dataset_recovery->colmap.inputs);
     dataset_recovery::State recovery =
         resumed ? *_dataset_recovery : dataset_recovery::State{};
+    if (resumed) recovery.current = recovery_boundary(recovery);
     recovery.engine = engine;
     recovery.sfm = _sfm_job;
     recovery.colmap = _colmap_job;
@@ -4388,6 +4403,9 @@ void GuiApp::draw_clear_project_modal() {
             if (ec) log(i18n::format(dmsg::clear_project_failed,
                                      {path, ec.message()}));
         }
+        dataset_recovery::clear();
+        _dataset_recovery.reset();
+        _dataset_recovery_resume = false;
         log(i18n::format(dmsg::clear_project_done, {_workspace}));
         _clear_targets.clear();
         _ws_state_at = -1.0;      // the answer changed; do not wait a second
@@ -6842,8 +6860,6 @@ void GuiApp::draw_recovery_modal() {
                       false, ImGuiWindowFlags_HorizontalScrollbar);
     ui::TextDisabledRaw(path);
     ImGui::EndChild();
-    if (dataset && !_resume_error.empty())
-        ui::TextColoredWrappedRaw(kErr, _resume_error);
     ImGui::Spacing();
 
     const float bw = px(120.0f);

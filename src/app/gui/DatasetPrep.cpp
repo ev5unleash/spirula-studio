@@ -1806,25 +1806,29 @@ bool DatasetPrep::gather_photos(const PrepJob& job, const PrepInput& in,
     const fs::path src = fs::absolute(in.path, ec);
     const int existing = count_images(images);
     const int existing_masks = count_images(masks);
+    const bool move_resume =
+        job.resume && !job.redo_frames &&
+        job.photo_import == PhotoImport::Move;
     const std::string source_skip =
         inside(fs::path(images), src) ? images : std::string();
     const bool source_has_images =
         fs::is_directory(src, ec) &&
         count_images(src.string(), source_skip) > 0;
-    const bool source_masks_present =
-        in.mask_dir.empty() || count_images(in.mask_dir) > 0;
+    const bool source_has_masks =
+        !in.mask_dir.empty() && count_images(in.mask_dir) > 0;
     const bool destination_complete =
         existing > 0 && (in.mask_dir.empty() || existing_masks > 0);
     // A moved source can be empty after a completed frame stage. The workspace
     // tree is the recovery input in that case.
-    if (job.resume && !job.redo_frames && destination_complete &&
-        (!source_has_images || !source_masks_present)) {
+    if (move_resume && destination_complete &&
+        !source_has_images && !source_has_masks) {
         enter(Stage::Frames, fmt(lmsg::resume_keep_frames_dir, {images}));
         have_masks = existing_masks > 0 &&
-                     (!in.mask_dir.empty() || !job.redo_masks);
+                     (!in.mask_dir.empty() ||
+                      (job.mask_enable && !job.redo_masks));
         return true;
     }
-    if (!fs::is_directory(src, ec)) {
+    if (!fs::is_directory(src, ec) && !(move_resume && existing > 0)) {
         error = fmt(lmsg::err_not_a_folder, {in.path});
         return false;
     }
@@ -1872,6 +1876,8 @@ bool DatasetPrep::gather_photos(const PrepJob& job, const PrepInput& in,
         const std::vector<fs::path> files =
             walk_images(t.from, inside(t.to, t.from) ? t.to : fs::path());
         if (files.empty()) {
+            if (move_resume && count_images(t.to.string()) > 0)
+                continue;
             error = fmt(*t.empty, {t.from.string()});
             return false;
         }
