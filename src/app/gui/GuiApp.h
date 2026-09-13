@@ -199,10 +199,8 @@ private:
     // Which step a running job is on, or nullptr when none is. Both runners
     // report through the same object, so the screen reads one thing.
     RunProgress* dataset_steps();
-    // Has the running job already read what `s` decides? A section of the form
-    // is greyed only once the step that consumes it has started -- the whole
-    // form used to grey the moment a run began, which left nothing to do for
-    // the twenty minutes a capture takes to extract.
+    // A running job locks a stage after consuming it; recovery locks stages
+    // completed before its restart boundary.
     bool dataset_locked(Stage s);
     void start_dataset_job();
     void cancel_dataset_job();

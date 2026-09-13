@@ -2564,6 +2564,9 @@ RunProgress* GuiApp::dataset_steps() {
 }
 
 bool GuiApp::dataset_locked(Stage s) {
+    if (_dataset_recovery_resume && _dataset_recovery &&
+        (int)s < (int)recovery_boundary(*_dataset_recovery))
+        return true;
     if (!dataset_busy()) return false;
     const bool builtin = _sfm.state() == SfmRunner::State::Running;
     return (builtin ? _sfm.steps() : _colmap.steps()).ran(s);
@@ -2850,6 +2853,18 @@ void GuiApp::update_dataset_job() {
 }
 
 void GuiApp::start_dataset_job() {
+    const Stage restart =
+        _dataset_recovery_resume && _dataset_recovery
+            ? recovery_boundary(*_dataset_recovery)
+            : Stage::Frames;
+    const bool redo_masks = _redo_frames || _redo_masks;
+    const bool redo_model = _redo_frames || _redo_masks || _redo_model;
+    if ((redo_masks || (int)restart <= (int)Stage::Masks) &&
+            mask_model_missing() ||
+        (redo_model || (int)restart <= (int)Stage::Matching) &&
+            feature_model_missing() ||
+        geometry_model_missing())
+        return;
     app::set_crash_note("building dataset " + _workspace);
     _dataset_recovery_suppressed = false;
     sync_dataset_jobs();
@@ -3079,19 +3094,24 @@ void GuiApp::draw_dataset_source() {
     bool any_photos = false;
     for (const PrepInput& s : _sources) any_photos = any_photos || !s.is_video;
     if (any_photos) {
-        if (ui::Checkbox(dmsg::use_found_masks, &_use_found_masks))
+        if (ui::Checkbox(dmsg::use_found_masks, &_use_found_masks)) {
             rescan_found_masks();
+            _dataset_recovery_resume = false;
+        }
         ui::help_on_hover(dmsg::use_found_masks_help);
         // Which way round they are is a property of those files, so it is asked
         // here rather than per stage: everything the run writes comes out in
         // the one convention, whatever the folder arrived in.
         if (_use_found_masks && any_found_masks()) {
             ImGui::Indent();
-            ui::Checkbox(dmsg::flip_found_masks, &_flip_found_masks);
+            if (ui::Checkbox(dmsg::flip_found_masks, &_flip_found_masks))
+                _dataset_recovery_resume = false;
             ui::help_on_hover(dmsg::flip_found_masks_help);
             ImGui::Unindent();
         }
+        const PhotoImport previous_import = _photo_import;
         photo_import_combo(&_photo_import, _sources.size() > 1);
+        if (_photo_import != previous_import) _dataset_recovery_resume = false;
     }
 
     ImGui::SetNextItemWidth(px(-220.0f));
@@ -3115,7 +3135,8 @@ void GuiApp::draw_dataset_source() {
     // not count as either (probe_workspace).
     const WorkspaceState& prior = workspace_state();
     if (prior.resumable()) {
-        ui::Checkbox(dmsg::resume_previous, &_resume);
+        if (ui::Checkbox(dmsg::resume_previous, &_resume))
+            _dataset_recovery_resume = false;
         ui::help_on_hover(dmsg::resume_previous_help);
         ImGui::SameLine();
         ui::TextDisabled(dmsg::unfinished_run_detected);
@@ -3127,7 +3148,8 @@ void GuiApp::draw_dataset_source() {
         ui::TextColoredWrapped(_redo_model ? kWarn : kOk,
                                _redo_model ? dmsg::model_will_be_replaced
                                            : dmsg::model_found_reuse);
-        ui::Checkbox(dmsg::reconstruct_again, &_redo_model);
+        if (ui::Checkbox(dmsg::reconstruct_again, &_redo_model))
+            _dataset_recovery_resume = false;
         ui::help_on_hover(dmsg::reconstruct_again_help);
     }
 }
@@ -4361,6 +4383,7 @@ void GuiApp::reset_recon_options() {
     apply_source_presets();
     normalize_source_lenses();
     _redo_frames = _redo_masks = _redo_model = _redo_geometry = false;
+    _dataset_recovery_resume = false;
     _resume = true;
     log(dmsg::reset_options_done.get());
 }
@@ -4859,13 +4882,9 @@ void GuiApp::draw_dataset_form(float height, bool running) {
     // tall it is depends on what it is saying.
     ImGui::BeginChild("##dsform", ImVec2(0, height - _ds_action_h));
 
-    // What is greyed out is decided per section, by whether the step that
-    // reads it has started -- see dataset_locked. The whole form used to grey
-    // the instant a run began, which left nothing to do for the twenty minutes
-    // a capture takes to extract, and nothing to look at but the log.
-    //
-    // The inputs and the engine define the run and are the exception: they are
-    // fixed the moment it starts.
+    // dataset_locked fixes each consumed stage while running and each completed
+    // stage before an interrupted run's restart boundary. Inputs and engine are
+    // fixed when the run starts.
     ImGui::BeginDisabled(running);
     draw_dataset_source();
 
@@ -4926,12 +4945,15 @@ void GuiApp::draw_dataset_form(float height, bool running) {
             _dataset_recovery_resume && _dataset_recovery
                 ? recovery_boundary(*_dataset_recovery)
                 : Stage::Frames;
+        const bool redo_masks = _redo_frames || _redo_masks;
+        const bool redo_model = _redo_frames || _redo_masks || _redo_model;
         const bool need_mask_model =
-            (int)restart <= (int)Stage::Masks && mask_model_missing();
+            (redo_masks || (int)restart <= (int)Stage::Masks) &&
+            mask_model_missing();
         const bool need_feat_model =
-            (int)restart <= (int)Stage::Mapping && feature_model_missing();
-        const bool need_geom_model =
-            (int)restart <= (int)Stage::Geometry && geometry_model_missing();
+            (redo_model || (int)restart <= (int)Stage::Matching) &&
+            feature_model_missing();
+        const bool need_geom_model = geometry_model_missing();
         const bool need_model = need_mask_model || need_feat_model ||
                                 need_geom_model;
         // The button names what pressing it does: a folder that already holds
