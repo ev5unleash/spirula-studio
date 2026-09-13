@@ -202,32 +202,89 @@ the comment on the option in `cmake/SsOptions.cmake` before changing it.
 
 ## Stacked upstream work
 
-Treat dependent changes as a branch graph, not a sequence of tasks. Before
-editing, identify the lowest pending PR the work requires and use a dedicated
-child branch rooted at that PR's head. Never put the child's commits on the
-parent PR branch. Work that does not require the parent starts from the
-upstream default branch instead.
+Treat dependent changes as a branch graph, not a sequence of tasks. Keep two
+kinds of branch apart: **fork integration** (the fork's `master`, which
+accumulates work and is moved only by merging) and **upstream topic branches**
+(the only branches that may ever be a PR base or head). `origin` is the
+contributor fork; `upstream` is the canonical repository.
 
-Each branch contains only one reviewable layer. Rebase a child when its parent
-changes; do not merge the parent into it. Keep parent branches until every
-child has been rebased, and land the stack from the bottom up.
+### What a topic is based on
 
-When the parent branch exists only in a contributor fork:
+- **Independently upstreamable** work starts from a freshly fetched
+  `upstream/<default>` and is proposed there directly.
+- **Dependent** work gets a dedicated child branch rooted at the published head
+  of the lowest pending PR it requires.
+- **Fork-only** work (local tooling, datasets, experiments) starts from
+  integration and stays out of every upstream PR.
+
+The flow into integration is one way: merge an upstream topic, or
+`upstream/<default>`, into integration. Never merge integration into a topic,
+never offer integration as an upstream PR base or head, and never push
+integration's `master` as an upstream PR. Documentation about the fork's own
+workflow belongs to integration, not to an upstream layer.
+
+Integration is fast-forward-only on push. Move it by merging, never by reset or
+rebase, because it is shared; a rejected push means merge again, not rewrite.
+
+### Before you touch a ref
+
+- Record the current branch, working-tree status and `git stash list` before
+  editing, rebasing or pushing.
+- Preserve dirty work first: commit it on a dedicated WIP/plan branch, or put
+  it in an explicitly named stash entry. Nothing is discarded to get a clean
+  tree.
+- Fetch before trusting any ref. When a local branch diverges from its
+  published counterpart, the published PR head is canonical: preserve the
+  local ref under its own name, start a fresh working ref at the published
+  head, and review the local-only commits separately with `git range-diff`.
+- Record each layer's **old parent tip** (its current base OID) before any
+  rebase; `--onto` needs that OID, not the parent's new one.
+
+### Rebasing a stack
+
+Each branch contains only one reviewable layer. Never put the child's commits
+on the parent PR branch. Rebase a child when its parent changes; do not merge
+the parent into it. Keep parent branches until every child has been rebased,
+and land the stack from the bottom up.
+
+Rebase each layer with
+`git rebase --onto <new-parent-tip> <old-parent-tip> <child>`, bottom-up, so no
+layer is rebased onto a parent that has not settled. Verify before publishing:
+
+- `git merge-base --is-ancestor <parent> <child>` holds for every pair;
+- `git log --oneline <base>..<head>` and `git diff <base>...<head>` show the
+  layer's commits and nothing else;
+- `git range-diff <old-base>..<old-head> <new-base>..<new-head>` shows only the
+  intended rebase.
+
+Republish a rewritten published branch only with an explicit expected-OID
+lease, `git push --force-with-lease=<branch>:<expected-old-oid>`; a bare
+`--force-with-lease` trusts whatever the local remote-tracking ref happens to
+be.
+
+### When the parent branch exists only in a contributor fork
 
 1. Push the child as a separate branch in that fork.
 2. Open a draft PR in the fork with the parent branch as its base, and mark it
    `Depends on <upstream-owner>/<repo>#<PR>`.
 3. After the parent merges upstream, close the fork-only PR. GitHub generally
    cannot move a PR to another base repository.
-4. Rebase the child onto the fetched upstream default branch, using
-   `git rebase --onto upstream/<default> <parent> <child>` after a squash
-   merge, then push with `--force-with-lease`.
+4. Rebase the child onto the fetched upstream default branch with the recorded
+   old parent OID: `git rebase --onto upstream/<default> <old-parent-tip>
+   <child>`. After a squash merge that OID is the pre-squash parent head the
+   child still sits on, so record it before the parent lands. Push with
+   `git push --force-with-lease=<child>:<expected-old-oid>`.
 5. Open a new upstream PR from the child to the upstream default branch.
 
 If the parent branch exists in the upstream repository, the child may instead
 be opened there immediately with the parent branch as its base. Every agent
 handoff must name the child branch, its parent branch and PR, and whether the
 next submission is the fork-only draft or the final upstream PR.
+
+Run the layer's scoped validation before committing or pushing. Checks that
+inspect only uncommitted work -- `tools/check_comment_length.py`, a linter over
+the current diff -- are not evidence for a range that is already committed or
+has just been rebased; re-run them over the final commits.
 
 ## Codegen — the invariants that bite
 
