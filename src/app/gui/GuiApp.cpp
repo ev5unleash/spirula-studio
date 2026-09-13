@@ -2729,15 +2729,29 @@ bool GuiApp::persist_dataset_recovery(bool force) {
     RunProgress* progress =
         _dataset_recovery->engine == 0 ? &_sfm.steps() : &_colmap.steps();
     const Stage current = progress->current();
-    if (_dataset_recovery_bootstrap &&
-        (int)current < (int)_dataset_recovery->current)
-        return true;
+    const StageStatus current_status = progress->stage(current).status;
+    const bool bootstrap =
+        _dataset_recovery_bootstrap &&
+        (int)current < (int)_dataset_recovery->current;
+    const bool cancelled = _dataset_recovery->engine == 0
+        ? _sfm.state() == SfmRunner::State::Cancelled
+        : _colmap.state() == ColmapRunner::State::Cancelled;
+    if (bootstrap && !force) return true;
     _dataset_recovery_bootstrap = false;
     std::array<bool, kNumStages> completed{};
     for (int i = 0; i < kNumStages; i++) {
         const StageStatus status = progress->stage((Stage)i).status;
-        completed[(size_t)i] = status == StageStatus::Done ||
-                               status == StageStatus::Skipped;
+        completed[(size_t)i] =
+            (status == StageStatus::Done || status == StageStatus::Skipped) &&
+            !(cancelled && i == (int)current);
+    }
+    if (bootstrap && force) {
+        for (int i = 0; i < (int)_dataset_recovery->current; i++)
+            completed[(size_t)i] = _dataset_recovery->completed[(size_t)i];
+        if (current_status == StageStatus::Running ||
+            current_status == StageStatus::Failed ||
+            current_status == StageStatus::Skipped)
+            completed[(size_t)current] = false;
     }
     Stage boundary = current;
     for (int i = 0; i < kNumStages; i++)
