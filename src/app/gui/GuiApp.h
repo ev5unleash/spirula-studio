@@ -24,11 +24,13 @@
 #include "app/gui/ModelCache.h"
 #include "app/gui/SegmentPanel.h"
 #include "app/gui/SfmRunner.h"
+#include "app/gui/SourceProbe.h"
 #include "app/gui/TelemetryProbe.h"
 #include "app/gui/TrainPreset.h"
 #include "app/gui/TrainRunner.h"
 #include "app/gui/ViewportPanel.h"
 
+#include <cstdint>
 #include <deque>
 #include <fstream>
 #include <map>
@@ -131,6 +133,8 @@ private:
     // Give the engine back and leave the screen. Called before anything that
     // needs the engine for itself.
     void close_splat();
+    // Close GPU-backed previews before another native handoff.
+    void close_native_previews();
 
 public:
     // Drag-and-drop entry (GLFW drop callback, main thread): auto-detects
@@ -191,6 +195,7 @@ private:
     void draw_pano360_options();
     void draw_pano360_size();
     bool dataset_busy() const;
+    bool native_work_busy() const;
     // Which step a running job is on, or nullptr when none is. Both runners
     // report through the same object, so the screen reads one thing.
     RunProgress* dataset_steps();
@@ -261,7 +266,7 @@ private:
     int preview_for_stage();
     // Release everything the preview holds -- GL buffers, the watcher thread,
     // the snapshot. Called when the screen is left and at shutdown.
-    void reset_dataset_preview();
+    void reset_dataset_preview(bool sweep = true);
     // "Re-run masking only" and friends: what probe_workspace already knows,
     // as the actions it implies.
     void draw_dataset_rerun(const WorkspaceState& prior);
@@ -364,14 +369,15 @@ private:
     void draw_confirm_modal();
     void draw_data_error_modal();
     void handle_dialog_result(const std::vector<std::string>& paths);
-    // Take paths onto the input list, `replace` clearing what was there (a
-    // fresh pick from Home) rather than adding to it (the panel's Add buttons).
-    // Sets the per-input defaults and, unless the user has edited it, the
-    // output folder.
-    void add_sources(const std::vector<std::string>& paths, bool replace);
+    // Take paths onto the input list; `replace` clears a fresh pick's inputs.
+    // Sets defaults and the output folder; false means no input was accepted.
+    bool add_sources(const std::vector<std::string>& paths, bool replace);
+    void replace_source(size_t input, const std::string& path);
     // Re-derive what is a function of the list: the sub-folder each input's
     // images go into, and the default workspace.
     void refresh_sources();
+    void pump_source_probes();
+    void mark_source_metadata_dirty();
     void rescan_found_masks();
     // Did any input arrive with masks of its own?
     bool any_found_masks() const;
@@ -541,6 +547,12 @@ private:
     // that runs instead of a parallel copy of it: a video file or photo folder
     // each, plus the sub-folder and the lens that belong to it.
     std::vector<PrepInput> _sources;
+    // Keep the committed source stable while a path is edited.
+    std::vector<std::string> _source_path_edits;
+    // Video headers are read off the UI thread; the results are applied in
+    // pump_source_probes().
+    SourceProbe _source_probe;
+    bool _source_probes_ready = true;
     // What each input's IMU / GPS holds, read on its own thread and keyed by
     // path, so re-choosing a file already read costs nothing.
     TelemetryProbe _telemetry;

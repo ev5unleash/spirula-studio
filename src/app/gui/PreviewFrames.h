@@ -14,6 +14,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -50,6 +51,10 @@ struct PreviewSource {
     // other way.
     std::string device_error;
     int tracks = 1;         // video tracks in the file
+    // The same input color metadata passed to dataset masking.
+    std::string image_gamut;
+    std::optional<bool> image_is_linear;
+
     // Photos read as the file STORES them rather than as it asks to be shown.
     // For a panel whose frames come with a camera: the camera describes the
     // stored pixels, and turning them would leave the two disagreeing.

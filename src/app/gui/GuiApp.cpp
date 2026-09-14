@@ -197,13 +197,13 @@ void GuiApp::shutdown() {
     _compare.destroy_gl();
     _compare.close();
     _mesh_preview_open = false;
-    _segment.close();
+    close_native_previews();
     _segment.destroy_gl();
-    _geometry_panel.close();
     _geometry_panel.destroy_gl();
     _colmap.cancel();
     _sfm.cancel();
     reset_dataset_preview();
+    _source_probe.stop();
     _download.cancel();
     _geom_download.cancel();
     _feat_download.cancel();
@@ -610,6 +610,7 @@ bool GuiApp::training_busy() const {
 }
 
 void GuiApp::apply_preset(const std::string& preset) {
+    if (native_work_busy() || _batch_active) return;
     TrainConfig fresh;
     train_apply_preset(fresh, preset);
     // Keep GUI-managed context across preset switches.
@@ -638,6 +639,7 @@ void GuiApp::apply_preset(const std::string& preset) {
 // built-in preset does -- but the same four fields stay out of its reach
 // (SS_PRESET_CONTEXT_FIELDS), because a preset is "how", not "where".
 void GuiApp::apply_user_preset(const TrainPreset& p) {
+    if (native_work_busy() || _batch_active) return;
     const TrainConfig stock;
     TrainConfig fresh = p.cfg;
     fresh.data = _cfg.data;
@@ -670,9 +672,9 @@ void GuiApp::apply_user_preset(const TrainPreset& p) {
 
 void GuiApp::load_preset_file(const std::string& path) {
     if (path.empty()) return;
-    // Applying a preset re-parses the dataset, which takes the live session
-    // down with it. Refuse rather than kill a run somebody is watching.
-    if (training_busy() || _batch_active) {
+    // Applying a preset re-parses the dataset, which takes a live session
+    // down with it. Refuse while native work is running.
+    if (native_work_busy() || _batch_active) {
         _preset_msg = dmsg::log_drop_while_training.get();
         _preset_msg_err = true;
         log(_preset_msg);
@@ -704,8 +706,9 @@ void GuiApp::refresh_presets() {
 void GuiApp::open_dataset(std::string dir, std::string image_dir,
                           std::string mask_dir, bool mask_flipped,
                           bool keep_log) {
-    if (dir.empty()) return;
+    if (dir.empty() || native_work_busy()) return;
     app::set_crash_note("opening dataset " + dir);
+    close_native_previews();
     close_mesh_preview();
     close_splat();
     // A different dataset means the log so far is about something else --
@@ -751,24 +754,39 @@ void GuiApp::open_dataset(std::string dir, std::string image_dir,
 }
 
 void GuiApp::request_open_dataset(std::string dir) {
-    if (training_busy()) {
+    const bool loading = _runner.phase() == TrainRunner::Phase::Loading;
+    if (training_busy() || loading) {
         _pending = Pending::OpenDataset;
         _pending_path = dir;
-        _open_confirm = true;
+        if (loading) {
+            _stop_confirmed = true;
+            _runner.request_stop();
+        } else {
+            _open_confirm = true;
+        }
         return;
     }
+    if (native_work_busy()) return;
     open_dataset(dir);
 }
 
 void GuiApp::request_go_home() {
-    if (training_busy()) {
+    const bool loading = _runner.phase() == TrainRunner::Phase::Loading;
+    if (training_busy() || loading) {
         _pending = Pending::GoHome;
-        _open_confirm = true;
+        if (loading) {
+            _stop_confirmed = true;
+            _runner.request_stop();
+        } else {
+            _open_confirm = true;
+        }
         return;
     }
+    if (native_work_busy()) return;
     // The mesh preview holds the engine through _splat and two attached
     // viewports; leaving the screen by ANY route (the button, the menu, the
     // deferred confirmation) has to hand them back.
+    close_native_previews();
     close_mesh_preview();
     close_splat();
     _screen = Screen::Home;
@@ -778,8 +796,10 @@ void GuiApp::request_go_home() {
 // asynchronous (a large model is a few hundred MB), so this only starts it;
 // frame() attaches the viewport once the splats are on the device.
 void GuiApp::open_splat(std::string path) {
-    if (path.empty()) return;
+    if (path.empty() || native_work_busy()) return;
     clear_log();
+    close_native_previews();
+    close_splat();
 #ifdef SS_BACKEND_VULKAN
     if (!freeze_native_device()) return;
 #else
@@ -797,7 +817,8 @@ void GuiApp::open_splat(std::string path) {
 }
 
 void GuiApp::add_splat(std::string path) {
-    if (path.empty()) return;
+    if (path.empty() || native_work_busy()) return;
+    close_native_previews();
 #ifdef SS_BACKEND_VULKAN
     if (!freeze_native_device()) return;
 #else
@@ -816,6 +837,7 @@ void GuiApp::request_open_splat(std::string path) {
         _open_confirm = true;
         return;
     }
+    if (native_work_busy()) return;
     open_splat(std::move(path));
 }
 
@@ -826,9 +848,15 @@ void GuiApp::close_splat() {
     _compare.close();
     _mesh_preview_open = false;
 }
+void GuiApp::close_native_previews() {
+    _segment.close();
+    _geometry_panel.close();
+}
 
 void GuiApp::launch_training(const TrainConfig& cfg, const std::string& preset) {
-    if (cfg.data.empty()) return;
+    if (cfg.data.empty() || native_work_busy()) return;
+    close_native_previews();
+    close_splat();
 #ifdef SS_BACKEND_VULKAN
     if (!freeze_native_device()) return;
 #else
@@ -836,7 +864,6 @@ void GuiApp::launch_training(const TrainConfig& cfg, const std::string& preset) 
 #endif
     app::set_crash_note("training " + cfg.data);
     close_mesh_preview();
-    close_splat();
     detach_session_views();
     std::string data_dir = cfg.data;
     if (fs::path(data_dir).filename() == "images")
@@ -871,7 +898,7 @@ void GuiApp::request_close() {
 }
 
 void GuiApp::run_pending_if_stopped() {
-    if (_pending == Pending::None || training_busy()) return;
+    if (_pending == Pending::None || native_work_busy()) return;
     // Only fire once the user confirmed the stop (or training was never
     // busy); a dismissed modal must not leave a delayed action armed.
     if (!_stop_confirmed) { _pending = Pending::None; return; }
@@ -932,6 +959,7 @@ void GuiApp::request_start_batch(bool skip_invalid) {
         _open_confirm = true;
         return;
     }
+    if (native_work_busy()) return;
     start_batch(skip_invalid);
 }
 
@@ -1098,7 +1126,7 @@ void GuiApp::handle_drop(const std::vector<std::string>& paths) {
     // after looking at the first is exactly how someone works through a
     // folder of runs. (A run in flight does -- its inputs are already gone
     // to the child.)
-    if (_screen == Screen::Mesh && !_mesh.busy() && paths.size() == 1) {
+    if (_screen == Screen::Mesh && !native_work_busy() && paths.size() == 1) {
         const fs::path p(paths[0]);
         std::string ext = p.extension().string();
         for (char& c : ext) c = (char)std::tolower((unsigned char)c);
@@ -1164,7 +1192,7 @@ void GuiApp::handle_drop(const std::vector<std::string>& paths) {
             models.push_back(p);
         }
         if (models.size() == paths.size() && models.size() > 1 &&
-            !training_busy()) {
+            !native_work_busy()) {
             open_splat(models[0]);
             for (size_t i = 1; i < models.size() &&
                                i < (size_t)CompareView::kMaxModels; i++)
@@ -1226,14 +1254,14 @@ void GuiApp::handle_drop(const std::vector<std::string>& paths) {
         }
     }
     if (sources.empty()) return;
-    if (training_busy()) {
-        log(dmsg::log_drop_while_training.get());
+    if (native_work_busy()) {
+        if (training_busy()) log(dmsg::log_drop_while_training.get());
         return;
     }
     // Dropping onto the dataset screen adds to what is already listed there;
     // dropping from anywhere else starts a new dataset.
-    add_sources(sources, /*replace=*/_screen != Screen::NewDataset);
-    _screen = Screen::NewDataset;
+    if (add_sources(sources, /*replace=*/_screen != Screen::NewDataset))
+        _screen = Screen::NewDataset;
 }
 
 // Default COLMAP workspace: never point at an existing non-empty directory
@@ -1452,6 +1480,57 @@ void GuiApp::refresh_sources() {
         _workspace_auto = _workspace;
     }
 }
+void GuiApp::mark_source_metadata_dirty() {
+    _source_probe.invalidate();
+    _source_probes_ready = true;
+    for (const PrepInput& s : _sources) {
+        if (s.is_video && !s.path.empty()) {
+            _source_probes_ready = false;
+            return;
+        }
+    }
+}
+void GuiApp::pump_source_probes() {
+    if (native_work_busy()) return;
+    bool pending = false;
+    bool pano_changed = false;
+    for (size_t i = 0; i < _sources.size(); i++) {
+        PrepInput& s = _sources[i];
+        if (!s.is_video || s.path.empty()) continue;
+        const std::string path = s.path;
+        const SourceProbeInfo info = _source_probe.get(path, _ffmpeg_exe);
+        if (!info.done) {
+            pending = true;
+            continue;
+        }
+        if (_sources[i].path != path || !_sources[i].is_video) continue;
+        if (info.width > 0 && info.height > 0)
+            _input_size[path] = {info.width, info.height};
+        if (s.video_tracks == 0 && info.video_tracks > 0)
+            s.video_tracks = info.video_tracks;
+        if (!s.eac360.valid() && info.eac360.valid()) {
+            s.eac360 = info.eac360;
+            pano_changed = true;
+        }
+        if (s.rig == kRigNone && info.video_tracks >= 2)
+            s.rig = kRigOwn;
+    }
+    if (native_work_busy()) return;
+    _source_probes_ready = !pending;
+    if (!pano_changed) return;
+
+    _sfm_job.pairs = 0;
+    _colmap_job.matcher = 2;
+    bool all_pano = true;
+    for (const PrepInput& s : _sources)
+        all_pano = all_pano && s.eac360.valid();
+    _sfm_job.camera_mode = all_pano ? 0 : 1;
+    _colmap_job.camera_mode = all_pano ? 0 : 1;
+    if (_sfm_job.prep.pano.mode == app::Pano360Mode::Off)
+        _sfm_job.prep.pano.mode = app::Pano360Mode::Faces;
+    reset_pano_size();
+    apply_pano_lens();
+}
 
 // Every input carries a concrete lens, so a list holding a 360 camera and a
 // phone cannot end up applying one of them to the other. An Insta360 .insv
@@ -1521,7 +1600,26 @@ void GuiApp::rescan_found_masks() {
     refresh_sources();
 }
 
-void GuiApp::add_sources(const std::vector<std::string>& paths, bool replace) {
+void GuiApp::replace_source(size_t input, const std::string& path) {
+    if (input >= _sources.size() || native_work_busy()) return;
+    close_native_previews();
+    close_splat();
+    _sources[input] = path.empty() ? PrepInput{}
+                                   : make_source(path, _use_found_masks);
+    if (input >= _source_path_edits.size())
+        _source_path_edits.resize(input + 1);
+    _source_path_edits[input] = _sources[input].path;
+    mark_source_metadata_dirty();
+    apply_source_presets();
+    if (!_color_space_touched) {
+        _sfm_job.image_gamut.clear();
+        _sfm_job.image_is_linear.reset();
+    }
+    adopt_exr_color_space();
+    refresh_sources();
+}
+bool GuiApp::add_sources(const std::vector<std::string>& paths, bool replace) {
+    if (paths.empty() || native_work_busy()) return false;
     // A folder of masks is not an input of its own: it belongs to one, and the
     // images half may be in the same pick, in either order. Split before
     // anything else so that picking masks alone cannot clear the list.
@@ -1533,8 +1631,16 @@ void GuiApp::add_sources(const std::vector<std::string>& paths, bool replace) {
         else
             inputs.push_back(path);
     }
+    if (inputs.empty() && _sources.empty()) {
+        for (const std::string& masks : mask_folders)
+            log(i18n::format(dmsg::log_masks_orphaned, {masks}));
+        return false;
+    }
+    close_native_previews();
+    close_splat();
     if (replace && !inputs.empty()) {
         _sources.clear();
+        _source_path_edits.clear();
         _mask_preview_input = 0;
         // A different capture is a different job, and the geometry options
         // are remembered nowhere: a run must never quietly cost an hour of
@@ -1545,21 +1651,10 @@ void GuiApp::add_sources(const std::vector<std::string>& paths, bool replace) {
         _sfm_job.image_is_linear.reset();
         _color_space_touched = false;
     }
-    for (const std::string& path : inputs) _sources.push_back(make_source(path, _use_found_masks));
-    // What a .360 actually holds, asked once per input: the plan below and the
-    // lens both follow from the packing, not from the extension.
-    for (PrepInput& s : _sources) {
-        if (!s.is_video || s.eac360.valid() || !is_pano360_path(s.path)) continue;
-        static const std::atomic<bool> never{false};
-        s.eac360 = probe_eac360(_ffmpeg_exe, s.path, never);
-    }
-    // A file with several lenses starts as a rig of its own; the row can
-    // still say otherwise.
-    for (PrepInput& s : _sources) {
-        if (!s.is_video || s.video_tracks > 0) continue;
-        static const std::atomic<bool> never{false};
-        s.video_tracks = std::max(1, probe_video_tracks(_ffmpeg_exe, s.path, never));
-        if (s.eac360.valid() || s.video_tracks >= 2) s.rig = kRigOwn;
+    for (const std::string& path : inputs) {
+        PrepInput source = make_source(path, _use_found_masks);
+        _sources.push_back(std::move(source));
+        _source_path_edits.push_back(_sources.back().path);
     }
     for (const std::string& masks : mask_folders) {
         if (attach_mask_folder(_sources, masks))
@@ -1567,11 +1662,13 @@ void GuiApp::add_sources(const std::vector<std::string>& paths, bool replace) {
         else
             log(i18n::format(dmsg::log_masks_orphaned, {masks}));
     }
-    if (_sources.empty()) return;
+    if (!inputs.empty()) mark_source_metadata_dirty();
+    if (_sources.empty()) return false;
     apply_source_presets();
     if (_mask_preview_input >= (int)_sources.size()) _mask_preview_input = 0;
     adopt_exr_color_space();
     refresh_sources();
+    return true;
 }
 
 // The engine-wide settings the list itself decides. A video is a capture in
@@ -1747,15 +1844,13 @@ void GuiApp::handle_dialog_result(const std::vector<std::string>& paths) {
             break;
         case PickAction::SourceImages:
         case PickAction::SourceVideo:
-            add_sources(paths, /*replace=*/_screen != Screen::NewDataset);
-            _screen = Screen::NewDataset;
+            if (add_sources(paths, /*replace=*/_screen != Screen::NewDataset))
+                _screen = Screen::NewDataset;
             break;
         case PickAction::SourceReplace:
             if (!path.empty() && _pick_source >= 0 &&
-                _pick_source < (int)_sources.size()) {
-                _sources[_pick_source] = make_source(path, _use_found_masks);
-                refresh_sources();
-            }
+                _pick_source < (int)_sources.size())
+                replace_source((size_t)_pick_source, path);
             _pick_source = -1;
             break;
         case PickAction::Workspace:
@@ -1862,6 +1957,7 @@ void GuiApp::frame() {
     // are queues, stepped on from somewhere that runs whatever screen is up.
     _geom_download.pump();
     _feat_download.pump();
+    pump_source_probes();
     // Before the reload check below: between two batch rows the runner is
     // briefly idle, and a stale _parse_dirty would start a dataset parse right
     // where the next row wants the engine.
@@ -1882,9 +1978,8 @@ void GuiApp::frame() {
 
     // Dataset-parsing option changed: re-parse once the user finishes
     // editing (no active widget), so the preview / camera counts stay in
-    // sync with the config. Never fires while training (options are locked).
-    if (_parse_dirty && !training_busy() && !_batch_active &&
-        _runner.phase() != TrainRunner::Phase::Loading &&
+    // sync with the config. Never fires while native work is active.
+    if (_parse_dirty && !native_work_busy() && !_batch_active &&
         !ImGui::IsAnyItemActive()) {
         _parse_dirty = false;
         if (!_cfg.data.empty()) {
@@ -1955,13 +2050,17 @@ void GuiApp::draw_menu_bar() {
             open_pick(PickAction::OpenDataset, msg::menu_open_dataset.get(),
                       FileDialog::Mode::Folder);
         }
-        if (ui::MenuItem(msg::menu_new_dataset)) _screen = Screen::NewDataset;
+        if (ui::MenuItem(msg::menu_new_dataset) && !native_work_busy()) {
+            close_splat();
+            _screen = Screen::NewDataset;
+        }
         if (ui::MenuItem(msg::menu_open_splat)) {
             open_pick(PickAction::SplatFile, msg::viewer_pick_file.get(),
                       FileDialog::Mode::File, {".ply"});
         }
         ImGui::Separator();
-        if (ui::MenuItem(msg::menu_batch)) _screen = Screen::Batch;
+        if (ui::MenuItem(msg::menu_batch) && !native_work_busy())
+            _screen = Screen::Batch;
         ImGui::Separator();
         if (ui::MenuItem(msg::menu_quit)) request_close();
         ImGui::EndMenu();
@@ -2210,8 +2309,13 @@ void GuiApp::draw_home() {
     // Photos and video are one screen and one input list: a capture can hold
     // both, so splitting the entry point in two only asked a question with no
     // right answer. The list is added to there, or dropped onto the window.
-    if (ui::Button(msg::home_new_dataset, ImVec2(-1, bh)))
+    ImGui::BeginDisabled(native_work_busy());
+    if (ui::Button(msg::home_new_dataset, ImVec2(-1, bh)) &&
+        !native_work_busy()) {
+        close_splat();
         _screen = Screen::NewDataset;
+    }
+    ImGui::EndDisabled();
     ui::help_on_hover(msg::home_new_dataset_help);
 
     if (ui::Button(msg::home_open_splat, ImVec2(-1, bh))) {
@@ -2281,6 +2385,13 @@ GuiApp::Engine GuiApp::effective_engine() const {
 bool GuiApp::dataset_busy() const {
     return _sfm.state() == SfmRunner::State::Running ||
            _colmap.state() == ColmapRunner::State::Running;
+}
+bool GuiApp::native_work_busy() const {
+    const TrainRunner::Phase phase = _runner.phase();
+    return _mesh.busy() || dataset_busy() ||
+           phase == TrainRunner::Phase::Loading ||
+           phase == TrainRunner::Phase::Preparing ||
+           phase == TrainRunner::Phase::Training;
 }
 
 RunProgress* GuiApp::dataset_steps() {
@@ -2467,6 +2578,14 @@ void GuiApp::start_dataset_job() {
     // The first GPU-consuming operation of this session freezes the one native
     // choice, before any preview, decode or child is dispatched. A rejected or
     // conflicting request is reported and the run does not start.
+    if (native_work_busy()) return;
+    pump_source_probes();
+    if (!_source_probes_ready) {
+        log(dmsg::sensors_reading.get());
+        return;
+    }
+    close_native_previews();
+    close_splat();
     if (!freeze_native_device()) return;
     app::set_crash_note("building dataset " + _workspace);
     sync_dataset_jobs();
@@ -2485,9 +2604,7 @@ void GuiApp::start_dataset_job() {
     write_run_settings(_prep_log);
     // The preview holds a multi-gigabyte backbone; the run about to start
     // wants that VRAM for reconstruction.
-    _segment.close();
-    _geometry_panel.close();
-    reset_dataset_preview();
+    reset_dataset_preview(effective_engine() != Engine::BuiltIn);
     const RunFilms films{&_film_frames, &_film_masks, &_film_geometry};
     if (effective_engine() == Engine::BuiltIn) _sfm.start(_sfm_job, films);
     else                                      _colmap.start(_colmap_job, films);
@@ -2567,24 +2684,24 @@ void GuiApp::draw_dataset_source() {
     // its own folder of frames under images/, and so its own camera.
     int remove = -1;
     bool edited = false;
+    if (_source_path_edits.size() != _sources.size()) {
+        const size_t old = _source_path_edits.size();
+        _source_path_edits.resize(_sources.size());
+        for (size_t i = old; i < _sources.size(); i++)
+            _source_path_edits[i] = _sources[i].path;
+    }
     for (size_t i = 0; i < _sources.size(); i++) {
         PrepInput& s = _sources[i];
         ImGui::PushID((int)i);
         // Room for Browse + Remove + where the frames go + what sensors it
         // carries, which is longer than any other row on the screen.
         ImGui::SetNextItemWidth(px(-500.0f));
-        if (ui::InputTextRaw("##in", &s.path)) {
-            std::error_code ec;
-            s.is_video = !fs::is_directory(s.path, ec) && is_video_path(s.path);
-            edited = true;
-        }
+        std::string& path_edit = _source_path_edits[i];
+        ui::InputTextRaw("##in", &path_edit);
         // A typed path is only worth resolving once it is finished -- rewriting
         // `<folder>` to `<folder>/images` under the cursor is not helpful.
-        if (ImGui::IsItemDeactivatedAfterEdit() && !s.is_video) {
-            resolve_photo_folder(s.path, s.path, s.mask_dir);
-            if (!_use_found_masks) s.mask_dir.clear();
-            edited = true;
-        }
+        if (ImGui::IsItemDeactivatedAfterEdit() && path_edit != s.path)
+            replace_source(i, path_edit);
         ImGui::SameLine();
         if (ui::Button(dmsg::browse)) {
             _pick_source = (int)i;
@@ -2621,8 +2738,12 @@ void GuiApp::draw_dataset_source() {
         draw_sensor_badge(s);
         ImGui::PopID();
     }
-    if (remove >= 0) {
+    if (remove >= 0 && !native_work_busy()) {
+        close_native_previews();
+        close_splat();
         _sources.erase(_sources.begin() + remove);
+        _source_path_edits.erase(_source_path_edits.begin() + remove);
+        mark_source_metadata_dirty();
         edited = true;
     }
     if (edited) refresh_sources();
@@ -3097,23 +3218,14 @@ bool GuiApp::input_pixel_size(const std::string& path, bool is_video,
                               int& w, int& h) {
     w = h = 0;
     if (path.empty()) return false;
-    const std::string& s_path = path;
     auto it = _input_size.find(path);
     if (it == _input_size.end()) {
+        if (is_video) return false;
         std::pair<int, int> size{0, 0};
         std::error_code ec;
-        if (is_video) {
-            // One `ffmpeg -i`, and only for a file that is already there:
-            // this runs from the draw, and a path being typed names nothing.
-            if (fs::is_regular_file(s_path, ec)) {
-                static const std::atomic<bool> never{false};
-                VideoFacts f;
-                if (ffmpeg_probe_video(_ffmpeg_exe, s_path, f, never))
-                    size = {f.width, f.height};
-            }
-        } else if (fs::is_directory(s_path, ec)) {
+        if (fs::is_directory(path, ec)) {
             int iw = 0, ih = 0;
-            if (DatasetPrep::first_image_dims(s_path, iw, ih)) size = {iw, ih};
+            if (DatasetPrep::first_image_dims(path, iw, ih)) size = {iw, ih};
         }
         it = _input_size.emplace(path, size).first;
     }
@@ -3167,6 +3279,8 @@ PreviewSource GuiApp::preview_source(size_t input) const {
     // The one frozen choice, so a preview decodes and segments on the GPU the
     // run will use; empty leaves the panel's own precedence in charge.
     src.device = _native_device_uuid;
+    src.image_gamut = _sfm_job.image_gamut;
+    src.image_is_linear = _sfm_job.image_is_linear;
     src.look.auto_rotate = _sfm_job.prep.auto_rotate;
     if (in.eac360.valid() && _sfm_job.prep.pano.mode != app::Pano360Mode::Off) {
         src.look.eac = in.eac360;
@@ -3236,24 +3350,55 @@ void GuiApp::draw_device_picker(bool as_menu) {
         [](const NativeDeviceRow& d) { return d.usable && !d.uuid.empty(); });
     const bool disabled = frozen || no_devices;
 
-    // Driver names and the UUID are identifiers, not sentences: they are shown
-    // exactly as the runtime reports them, through the raw wrappers, and the
-    // same string is what `--device` takes.
-    auto row_label = [](const NativeDeviceRow& d, size_t index, char* buf, size_t n) {
-        std::snprintf(buf, n, "%s (%s, %llu MB)##native_device_%zu",
-                      d.name.c_str(), d.type.c_str(),
-                      (unsigned long long)(d.vram_bytes >> 20), index);
+    auto row_label = [](const NativeDeviceRow& d, size_t index, bool with_id,
+                         char* buf, size_t n) {
+        char suffix[32] = {};
+        if (with_id)
+            std::snprintf(suffix, sizeof suffix, "##native_device_%zu", index);
+        std::snprintf(buf, n, "%s [%zu]%s", d.name.c_str(), index, suffix);
     };
-    // Auto is selected only after the user chooses it; an untouched picker
-    // inherits the environment instead.
+
     const bool auto_sel =
         !frozen && _native_device_choice_set && _native_device_request.empty();
     const char* env_sel = spirula::env("VK_DEVICE");
     const bool inherited = !frozen && !_native_device_choice_set &&
                            env_sel && env_sel[0];
-    const std::string inherited_label =
-        inherited ? spirula::i18n::format(msg::device_inherited_env, {env_sel})
-                  : std::string();
+
+    size_t selected = _native_devices.size();
+    const std::string* selected_selector =
+        frozen ? &_native_device_uuid
+               : !_native_device_request.empty() ? &_native_device_request
+                                                 : nullptr;
+    if (selected_selector && !selected_selector->empty()) {
+        for (size_t i = 0; i < _native_devices.size(); ++i) {
+            if (_native_devices[i].uuid == *selected_selector) {
+                selected = i;
+                break;
+            }
+        }
+    } else if (inherited) {
+        for (size_t i = 0; i < _native_devices.size(); ++i) {
+            if (_native_devices[i].uuid == env_sel) {
+                selected = i;
+                break;
+            }
+        }
+    }
+
+    char selected_label[400];
+    const char* shown = nullptr;
+    if (selected < _native_devices.size()) {
+        row_label(_native_devices[selected], selected, false, selected_label,
+                  sizeof selected_label);
+        shown = selected_label;
+    } else if (frozen) {
+        shown = !_native_device_name.empty() ? _native_device_name.c_str()
+                                              : msg::no_device_found.get();
+    } else if (selected_selector) {
+        shown = msg::no_device_found.get();
+    } else {
+        shown = msg::device_auto.get();
+    }
 
     if (as_menu) {
         ImGui::BeginDisabled(disabled);
@@ -3265,12 +3410,10 @@ void GuiApp::draw_device_picker(bool as_menu) {
         for (size_t i = 0; i < _native_devices.size(); ++i) {
             const NativeDeviceRow& d = _native_devices[i];
             char label[400];
-            row_label(d, i, label, sizeof label);
+            row_label(d, i, true, label, sizeof label);
             const bool sel = !_native_device_request.empty() &&
                              _native_device_request == d.uuid;
             ImGui::BeginDisabled(!d.usable || d.uuid.empty());
-            // The canonical UUID is what the request carries; a device the
-            // driver reported no UUID for cannot be selected by identity.
             if (ui::MenuItemRaw(label, sel) && !d.uuid.empty()) {
                 _native_device_choice_set = true;
                 _native_device_request = d.uuid;
@@ -3281,15 +3424,9 @@ void GuiApp::draw_device_picker(bool as_menu) {
         ImGui::EndDisabled();
     } else {
         ImGui::BeginDisabled(disabled);
-        ImGui::SetNextItemWidth(px(-8.0f));
-        const std::string shown =
-            frozen ? _native_device_name
-                   : (_native_device_request.empty()
-                          ? (inherited ? inherited_label : msg::device_auto.get())
-                          : _native_device_request);
-        if (ui::BeginComboRaw("##native_device",
-                              no_devices ? msg::no_device_found.get()
-                                         : shown.c_str())) {
+        ImGui::SetNextItemWidth(px(220.0f));
+        if (ui::BeginCombo(msg::menu_device,
+                           no_devices ? msg::no_device_found.get() : shown)) {
             if (ui::Selectable(msg::device_auto, auto_sel)) {
                 _native_device_choice_set = true;
                 _native_device_request.clear();
@@ -3298,7 +3435,7 @@ void GuiApp::draw_device_picker(bool as_menu) {
             for (size_t i = 0; i < _native_devices.size(); ++i) {
                 const NativeDeviceRow& d = _native_devices[i];
                 char label[400];
-                row_label(d, i, label, sizeof label);
+                row_label(d, i, true, label, sizeof label);
                 const bool sel = !_native_device_request.empty() &&
                                  _native_device_request == d.uuid;
                 ImGui::BeginDisabled(!d.usable || d.uuid.empty());
@@ -3314,22 +3451,8 @@ void GuiApp::draw_device_picker(bool as_menu) {
         ImGui::EndDisabled();
     }
 
-    if (frozen) {
-        // The resolved identity, and why it cannot move. The name and the UUID
-        // come from the driver and stay as they are.
-        ui::TextColoredWrapped(kDim, msg::device_frozen_at, {_native_device_name});
-        ui::TextColoredWrappedRaw(kDim, _native_device_uuid);
-        ui::TextColoredWrapped(kDim, msg::device_restart_required);
-    } else if (no_devices) {
-        ui::TextColoredWrapped(kWarn, msg::device_none_native);
-    } else if (inherited) {
-        ui::TextColoredWrappedRaw(kDim, inherited_label);
-    }
-    if (!_native_device_error.empty()) {
-        // A complete localized sentence.
+    if (!_native_device_error.empty())
         ui::TextColoredWrappedRaw(kErr, _native_device_error);
-    }
-    if (!as_menu) ui::help_on_hover(msg::device_help);
 }
 
 bool GuiApp::freeze_native_device() {
@@ -3479,15 +3602,22 @@ void GuiApp::propagate_frozen_device() {
 }
 
 void GuiApp::open_mask_preview() {
+    if (native_work_busy()) return;
     if (_sources.empty()) {
         log(dmsg::mask_pick_input_first.get());
         return;
     }
+    pump_source_probes();
+    if (!_source_probes_ready) {
+        log(dmsg::sensors_reading.get());
+        return;
+    }
     // A preview decodes and segments on the GPU, so it is a GPU-consuming
     // operation like the run itself: it freezes the same one choice first.
+    // The other preview owns the same process-wide inference pool.
+    close_native_previews();
+    close_splat();
     if (!freeze_native_device()) return;
-    // One backbone on the device at a time; see open_geometry_preview.
-    _geometry_panel.close();
     _segment.open(preview_source((size_t)_mask_preview_input),
                   _mask_enable ? selected_model_path() : "");
 }
@@ -3592,10 +3722,14 @@ void GuiApp::draw_masking_options() {
         ui::help_on_hover_raw(backends().masking_reason.c_str());
     }
 
-    // One button for both halves: it is the same panel on the same input, and
-    // the stencil half of it needs no model, so it must not sit behind one.
+    const bool mask_preview_busy = native_work_busy();
+    const bool mask_preview_blocked = mask_preview_busy || !_source_probes_ready;
+    ImGui::BeginDisabled(mask_preview_blocked);
     if (ui::Button(dmsg::mask_try)) open_mask_preview();
-    ui::help_on_hover(dmsg::mask_try_help);
+    ImGui::EndDisabled();
+    ui::help_on_hover_disabled(
+        mask_preview_busy ? dmsg::step_locked
+        : !_source_probes_ready ? dmsg::sensors_reading : dmsg::mask_try_help);
     // Which input it opens, and so which input a NEW click prompts; the ones
     // already made stay with their own (MaskClick::source).
     if (_sources.size() > 1) {
@@ -3728,10 +3862,17 @@ void GuiApp::request_geometry_download() {
 void GuiApp::open_geometry_preview() {
     // The preview loads a depth backbone, so it is a GPU-consuming operation
     // and freezes the one choice before the panel starts.
-    if (!freeze_native_device()) return;
+    if (native_work_busy()) return;
+    pump_source_probes();
+    if (!_source_probes_ready) {
+        log(dmsg::sensors_reading.get());
+        return;
+    }
     // One multi-gigabyte backbone at a time: the mask preview holds SAM and
     // this one holds Metric3D, and the inference layer's pool is process-wide.
-    _segment.close();
+    close_native_previews();
+    close_splat();
+    if (!freeze_native_device()) return;
     const size_t idx =
         _sources.empty() ? 0
                          : std::min((size_t)_mask_preview_input,
@@ -3813,11 +3954,16 @@ void GuiApp::draw_geometry_options() {
     // Behind the checkpoint, unlike "Try the mask": there is no half of this
     // panel that works without one, and opening it would have the panel fetch
     // the weights itself.
-    ImGui::BeginDisabled(geometry_model_missing());
+    const bool geometry_preview_busy = native_work_busy();
+    const bool geometry_preview_blocked =
+        geometry_preview_busy || !_source_probes_ready || geometry_model_missing();
+    ImGui::BeginDisabled(geometry_preview_blocked);
     if (ui::Button(dmsg::geom_try)) open_geometry_preview();
     ImGui::EndDisabled();
-    ui::help_on_hover_disabled(geometry_model_missing() ? dmsg::geom_model_first
-                                                        : dmsg::geom_try_help);
+    ui::help_on_hover_disabled(
+        geometry_preview_busy ? dmsg::step_locked
+        : !_source_probes_ready ? dmsg::sensors_reading
+        : geometry_model_missing() ? dmsg::geom_model_first : dmsg::geom_try_help);
 
     if (ui::CollapsingHeader(dmsg::geom_advanced)) {
         ImGui::SetNextItemWidth(px(220.0f));
@@ -4015,9 +4161,10 @@ void GuiApp::poll_sfm_progress() {
 // the files behind them. The run leaves its features and its matches on disk
 // precisely so that this screen can go on reading them after it ends, so this
 // -- the screen being done with them -- is where they go.
-void GuiApp::reset_dataset_preview() {
-    _sfm.sweep_intermediates();
+void GuiApp::reset_dataset_preview(bool sweep) {
+    close_native_previews();
     _features.stop();
+    if (sweep) _sfm.sweep_intermediates();
     _model_view.detach();
     _model_view.destroy_gl();
     _model_attached = false;
@@ -4252,7 +4399,7 @@ void GuiApp::draw_dataset_reset() {
     if (!ui::CollapsingHeader(dmsg::reset_section)) return;
     ImGui::Indent();
     ui::TextDisabledWrapped(dmsg::reset_section_help);
-    ImGui::BeginDisabled(dataset_busy());
+    ImGui::BeginDisabled(native_work_busy());
     // A transforms.json or a Metashape export is not on the list -- it is the
     // dataset somebody handed over, not something a run here wrote -- so a
     // folder can hold a model and still have nothing to delete.
@@ -4292,7 +4439,8 @@ void GuiApp::draw_clear_project_modal() {
     for (const std::string& path : _clear_targets) ui::TextDisabledRaw(path);
     ImGui::Spacing();
 
-    if (ui::Button(dmsg::clear_project_button, ImVec2(px(150.0f), 0))) {
+    if (ui::Button(dmsg::clear_project_button, ImVec2(px(150.0f), 0)) &&
+        !native_work_busy()) {
         // The screen is reading several of these; it has to let go first.
         reset_dataset_preview();
         for (const std::string& path : _clear_targets) {
@@ -4355,6 +4503,7 @@ void GuiApp::draw_drop_intermediate_modal() {
 
 void GuiApp::draw_color_space_options(bool with_point_color) {
     ui::SeparatorText(dmsg::section_color_space);
+    bool source_changed = false;
 
     // Item 0 of both pickers means "leave it to the file", which is what the
     // child processes do when the flag is absent; anything else is stated on
@@ -4370,6 +4519,7 @@ void GuiApp::draw_color_space_options(bool with_point_color) {
                    &dmsg::gamut_dcip3})) {
         _sfm_job.image_gamut = gamut == 0 ? "" : colorspace::kGamuts[gamut - 1];
         _color_space_touched = true;
+        source_changed = true;
     }
     ui::help_on_hover(dmsg::input_gamut_help);
 
@@ -4382,8 +4532,10 @@ void GuiApp::draw_color_space_options(bool with_point_color) {
         _sfm_job.image_is_linear =
             transfer == 0 ? std::optional<bool>{} : std::optional<bool>(transfer == 1);
         _color_space_touched = true;
+        source_changed = true;
     }
     ui::help_on_hover(dmsg::input_is_linear_help);
+    if (source_changed) close_native_previews();
 
     // COLMAP writes its own point cloud, so the choice is the built-in SfM's.
     if (!with_point_color) return;
@@ -4716,13 +4868,16 @@ void GuiApp::draw_tool_locations() {
             ch |= ui::InputText(dmsg::colmap_executable, &_colmap_exe);
         }
         ImGui::SetNextItemWidth(px(300.0f));
-        ch |= ui::InputText(dmsg::ffmpeg_executable, &_ffmpeg_exe);
+        const bool ffmpeg_changed =
+            ui::InputText(dmsg::ffmpeg_executable, &_ffmpeg_exe);
+        ch |= ffmpeg_changed;
         ui::help_on_hover(backends().builtin_video
                               ? dmsg::ffmpeg_executable_help_fallback
                               : dmsg::ffmpeg_executable_help_always);
         ImGui::SetNextItemWidth(px(300.0f));
         ch |= ui::InputText(dmsg::python_executable, &_python_exe);
         ui::help_on_hover(dmsg::python_executable_help);
+        if (ffmpeg_changed) mark_source_metadata_dirty();
         if (ch) save_settings();
     }
 }
@@ -4745,7 +4900,7 @@ void GuiApp::draw_dataset_form(float height, bool running) {
     //
     // The inputs and the engine define the run and are the exception: they are
     // fixed the moment it starts.
-    ImGui::BeginDisabled(running);
+    ImGui::BeginDisabled(native_work_busy());
     draw_dataset_source();
 
     // The selector appears only when both engines are usable: a Vulkan user
@@ -4805,8 +4960,10 @@ void GuiApp::draw_dataset_form(float height, bool running) {
     const float action_y0 = ImGui::GetCursorPosY();
     ImGui::Spacing();
     if (!running) {
-        bool ready = !_sources.empty() && !_workspace.empty();
-        for (const PrepInput& s : _sources) ready = ready && !s.path.empty();
+        bool input_missing = _sources.empty() || _workspace.empty();
+        for (const PrepInput& s : _sources)
+            input_missing = input_missing || s.path.empty();
+        const bool ready = !input_missing && _source_probes_ready;
         const bool need_mask_model = mask_model_missing();
         const bool need_feat_model = feature_model_missing();
         const bool need_geom_model = geometry_model_missing();
@@ -4814,14 +4971,17 @@ void GuiApp::draw_dataset_form(float height, bool running) {
         // The button names what pressing it does: a folder that already holds
         // a reconstruction is added to, not built.
         const bool adding = workspace_state().model && !_redo_model;
-        ImGui::BeginDisabled(!ready || need_model);
+        ImGui::BeginDisabled(!ready || need_model || native_work_busy());
         if (ui::Button(adding ? dmsg::update_dataset : dmsg::create_dataset,
                        ImVec2(px(200.0f), px(34.0f))))
             start_dataset_job();
         ImGui::EndDisabled();
-        if (!ready) {
+        if (input_missing) {
             ImGui::SameLine();
             ui::TextDisabled(dmsg::pick_input_first);
+        } else if (!_source_probes_ready) {
+            ImGui::SameLine();
+            ui::TextDisabled(dmsg::sensors_reading);
         } else if (need_model) {
             // The options above carry the same buttons, but they are a scroll
             // away by the time somebody is reaching for this one. One missing
@@ -4905,12 +5065,14 @@ void GuiApp::draw_dataset_form(float height, bool running) {
 void GuiApp::draw_new_dataset() {
     const bool running = dataset_busy();
 
+    ImGui::BeginDisabled(native_work_busy());
     if (ui::Button(msg::back_home)) {
         _screen = Screen::Home;
         // The preview holds GL buffers and a decoding thread for a screen that
         // is no longer up.
-        if (!dataset_busy()) reset_dataset_preview();
+        if (!native_work_busy()) reset_dataset_preview();
     }
+    ImGui::EndDisabled();
     ImGui::SameLine();
     ImGui::SetWindowFontScale(1.2f);
     const bool from_video = !_sources.empty() && _sources[0].is_video;
@@ -5216,7 +5378,9 @@ bool GuiApp::mesh_dataset_found() {
 }
 
 void GuiApp::start_meshing() {
-    if (_mesh_job.checkpoint.empty()) return;
+    if (_mesh_job.checkpoint.empty() || native_work_busy()) return;
+    close_native_previews();
+    close_splat();
 #ifdef SS_BACKEND_VULKAN
     if (!freeze_native_device()) return;
 #else
@@ -5238,6 +5402,8 @@ void GuiApp::close_mesh_preview() {
 void GuiApp::open_mesh_preview() {
     const std::string out = _mesh.output_path();
     if (out.empty()) return;
+    close_native_previews();
+    close_splat();
 #ifdef SS_BACKEND_VULKAN
     if (!freeze_native_device()) return;
 #else
@@ -5245,7 +5411,6 @@ void GuiApp::open_mesh_preview() {
 #endif
     // Whatever else had the engine (a file opened from the viewer screen) has
     // to let go before the splats take it.
-    close_splat();
     if (!training_busy()) {
         detach_session_views();
         _runner.note_engine_taken();

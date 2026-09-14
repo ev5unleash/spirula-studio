@@ -590,7 +590,8 @@ private:
     bool apply_stencil(const PrepJob& job, const PrepInput& in,
                        const std::string& images, const std::string& masks,
                        const std::string& merge_from, std::string& error);
-    int exec(const std::vector<std::string>& argv);
+    int exec(const std::vector<std::string>& argv,
+             const std::function<void(const std::string&)>& on_line = {});
     // What this input is expected to put in images/, for the step's bar: the
     // container's frame count at the run's sampling rate for a video, the file
     // count for photos, and what is already there for an input a resumed run

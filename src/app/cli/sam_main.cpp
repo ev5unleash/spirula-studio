@@ -769,6 +769,12 @@ int sam_cli_extract(int argc, char** argv);
 
 int spirula_sam_main(int argc, char** argv) {
     app::set_program_name(argc > 0 ? argv[0] : nullptr, "spirula sam");
+    if (argc >= 2 &&
+        (std::strcmp(argv[1], "--help") == 0 ||
+         std::strcmp(argv[1], "-h") == 0)) {
+        usage();
+        return 0;
+    }
     if (argc >= 2 && std::strcmp(argv[1], "extract") == 0) {
 #ifdef SS_HAVE_VIDEO
         int rc = sam_cli_extract(argc - 1, argv + 1);

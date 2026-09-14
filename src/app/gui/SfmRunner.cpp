@@ -121,6 +121,19 @@ void remove_tree(const fs::path& p) {
     std::filesystem::remove_all(p, ec);
 #endif
 }
+void sweep_sfm_intermediates(const std::string& ws) {
+    if (ws.empty()) return;
+    const fs::path dir(ws);
+    remove_tree(dir / ".progress");
+    // Recursive: the feature files MIRROR the image tree, so a capture with
+    // camera folders puts them in features/cam0/... and a single-level sweep
+    // removed nothing and left the directory.
+    remove_tree(dir / "features");
+    remove_tree(dir / sfm::resume::kDir);
+    std::error_code ec;
+    fs::remove(dir / "matches.bin", ec);
+}
+
 
 // The mapper only writes a model when it finishes, so any model on disk is
 // from a completed run.
@@ -192,11 +205,14 @@ void SfmRunner::start(const SfmJob& job, RunFilms films) {
     _cancel = false;
     _partial = false;
     _not_metric = false;
+    _have_status = false;
+    _status_mtime = 0;
     _films = films;
     _prog.reset();
     if (_films.frames) _films.frames->clear();
     if (_films.masks) _films.masks->clear();
     if (_films.geometry) _films.geometry->clear();
+    std::string sweep;
     {
         std::lock_guard<std::mutex> lk(_mu);
         _error.clear();
@@ -208,11 +224,14 @@ void SfmRunner::start(const SfmJob& job, RunFilms films) {
         _matches_path.clear();
         _sfm_image_dir.clear();
         _sfm_mask_dir.clear();
-        _sweep_dir.clear();
+        sweep.swap(_sweep_dir);
         _live = job;
     }
     _state = State::Running;
-    _worker = std::thread([this, job] { run(job); });
+    _worker = std::thread([this, job, sweep = std::move(sweep)] {
+        sweep_sfm_intermediates(sweep);
+        run(job);
+    });
 }
 
 void SfmRunner::update(const SfmJob& job) {
@@ -276,6 +295,8 @@ void SfmRunner::take_masking(PrepJob& prep) {
     prep.mask_model_path = _live.prep.mask_model_path;
     prep.mask_model_name = _live.prep.mask_model_name;
     prep.force_external_masking = _live.prep.force_external_masking;
+    prep.image_gamut = _live.prep.image_gamut;
+    prep.image_is_linear = _live.prep.image_is_linear;
     prep.python_exe = _live.prep.python_exe;
 }
 
@@ -345,16 +366,7 @@ void SfmRunner::sweep_intermediates() {
         std::lock_guard<std::mutex> lk(_mu);
         ws.swap(_sweep_dir);
     }
-    if (ws.empty()) return;
-    const fs::path dir(ws);
-    remove_tree(dir / ".progress");
-    // Recursive: the feature files MIRROR the image tree, so a capture with
-    // camera folders puts them in features/cam0/... and a single-level sweep
-    // removed nothing and left the directory.
-    remove_tree(dir / "features");
-    remove_tree(dir / sfm::resume::kDir);
-    std::error_code ec;
-    fs::remove(dir / "matches.bin", ec);
+    sweep_sfm_intermediates(ws);
 }
 void SfmRunner::log(const std::string& line, bool detail) {
     _prog.note(line, detail);

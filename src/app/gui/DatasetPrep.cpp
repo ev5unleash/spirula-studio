@@ -962,12 +962,16 @@ void DatasetPrep::enter(Stage s, const std::string& text) {
     _prog->enter(s, text);
 }
 
-int DatasetPrep::exec(const std::vector<std::string>& argv) {
+int DatasetPrep::exec(
+        const std::vector<std::string>& argv,
+        const std::function<void(const std::string&)>& on_line) {
     std::string cmd;
     for (const auto& a : argv) cmd += (cmd.empty() ? "$ " : " ") + a;
     log(cmd);
-    return run_process(argv, "", [this](const std::string& l) { log(l); },
-                       _cancel);
+    return run_process(argv, "", [this, &on_line](const std::string& line) {
+        log(line);
+        if (on_line) on_line(line);
+    }, _cancel);
 }
 
 int64_t DatasetPrep::estimate_frames(const PrepJob& job, const PrepInput& in,
@@ -1457,9 +1461,11 @@ bool DatasetPrep::extract_video_ffmpeg(const PrepJob& job, const PrepInput& in,
             }
             track_path = tmp_track.string();
         }
-
         enter(Stage::Frames, window > 1 ? lmsg::stage_extract_candidates.get()
                                        : lmsg::stage_extract_ffmpeg.get());
+        RateLimitedProgress progress(_prog, Stage::Frames,
+                                     lmsg::noun_frames_written, _frames_tally);
+        progress.update(0, /*force=*/true);
         const fs::path cand = ws / "frames_tmp";
         remove_tree(cand);
         std::error_code ec;
@@ -1472,7 +1478,19 @@ bool DatasetPrep::extract_video_ffmpeg(const PrepJob& job, const PrepInput& in,
         if (!job.auto_rotate) argv.push_back("-noautorotate");
         argv.insert(argv.end(), {"-i", track_path, "-vf", vf, "-qscale:v", "2",
                                  (cand / "c_%06d.jpg").string()});
-        int rc = exec(argv);
+        const int max_frames = job.max_frames;
+        int rc = exec(argv, [&progress, window, max_frames](const std::string& line) {
+            const size_t at = line.find_first_not_of(" \t");
+            if (at == std::string::npos || line.compare(at, 6, "frame=") != 0)
+                return;
+            const char* first = line.c_str() + at + 6;
+            char* end = nullptr;
+            const long long frame = std::strtoll(first, &end, 10);
+            if (end == first || frame < 0) return;
+            int64_t projected = (frame + window - 1) / window;
+            if (max_frames > 0) projected = std::min<int64_t>(projected, max_frames);
+            progress.update(projected);
+        });
         if (rc == kCancelled) { error = lmsg::err_cancelled.get(); return false; }
         if (rc != 0) {
             error = lmsg::err_ffmpeg_extract_failed.get();
@@ -1484,6 +1502,7 @@ bool DatasetPrep::extract_video_ffmpeg(const PrepJob& job, const PrepInput& in,
         const int kept = select_sharpest_frames(
             cand.string(), out_dir.string(), "", window, job.max_frames,
             [this](const std::string& l) { log(l); }, _cancel);
+        progress.update(std::max<int64_t>(kept, 0), /*force=*/true);
         remove_tree(cand);
         if (streams.size() > 1) fs::remove(track_path, ec);
         if (kept < 0) {
