@@ -99,6 +99,11 @@ GUI (Basic Options) for remote monitoring.
 | `gui/SfmRunner.h/.cpp` | images/video → dataset with the built-in SfM, by re-running this executable as `spirula sfm auto` (see SfmRunner.h for why it is a child process). Runs `DatasetPrep` first, then maps the panel onto flags. Per-input lenses become **`--camera-model DIR=MODEL` / `--focal DIR=PX`** overrides, `DIR` being the group's path under `images/` — the input's sub-folder, or a camera folder inside it at any depth (`1/cam0`), which is exactly how `--camera-mode folder` groups. A video input keeps one row: a dual-lens file's `cam0/`+`cam1/` sit under its prefix and are still two camera groups. The rows are built once (`camera_groups` in DatasetPrep), so what the panel draws and what the child is handed cannot drift, and an **empty model on a row means "same as above"** — a dozen clips off one camera are one choice, and the overrides come out fully resolved. The focal is carried as a fraction of the image width and resolved to pixels once the frames exist (`first_image_dims`); an explicit focal typed into Advanced wins for a lone input. Masks reach the run as `--masks <dir>` (or `--no-masks`, so a stale `masks/` beside the images is never picked up silently); `PrepResult::mask_dir_cfg` and `image_dir_cfg` are handed to `GuiApp::open_dataset` in memory, so photos read where they are keep both their image and mask folders when the dataset opens in the trainer. Camera sharing switches to per-folder on its own when `images/` came out with sub-folders. Exit code 3 = reconstructed but partial (reported, not failed). |
 | `gui/Subprocess.h/.cpp` | Cross-platform subprocess with merged stdout/stderr line streaming + kill-on-cancel (fork/execvp + process group on POSIX, CreateProcess + pipe on Windows). Bare `\r` ends a log line (ffmpeg/curl progress). |
 
+Scheduled batch rows use `../JobScheduler` and isolated `spirula worker`
+processes. The Batch screen shows worker state, target device, output path and
+logs; its rows do not attach to the foreground viewport. Scheduler ownership
+locks, native dataset phases and restart recovery remain pending.
+
 The frustum-size control also reaches the web viewer: viewer.html gained a
 "Camera Size" slider sending `camera_size_scale` per /render; the render
 worker applies it via the new `engine_viewer_set_camera_size()` (Engine.h /
@@ -257,16 +262,8 @@ agree. Only the C++ exists now, so the table said nothing the code does not.
 
 ## ⚠️ Gotchas
 
-- **libtorch interposes `std::filesystem`**: any exe linked against `csrc`
-  binds `std::filesystem::remove_all` to libtorch.so's ABI-incompatible copy
-  → segfault (jump to null). `-static-libstdc++` does NOT fix it (torch libs
-  precede the archive on the link line). Checkpoint pruning uses POSIX
-  `nftw` instead. Other fs calls (create_directories, directory_iterator,
-  exists) currently bind compatibly but carry the same risk until no-torch.
-- `libpython` is linked only because csrc's pybind layer leaves CPython
-  symbols undefined; drops out with no-torch.
-- Engine auto-resolves `split_batch`+FPBO conflicts via
-  `max_input_batch_size` (prints a warning) — pass both through as Python does.
+- Engine resolves `split_batch`+FPBO conflicts through
+  `max_input_batch_size` and prints a warning.
 - **Pre-existing**: the process can dump core during exit teardown after a
   completed run (observed on both pre- and post-refactor `spirula train`
   2026-07-12; likely a DataManager/engine thread racing static destruction).
@@ -314,17 +311,32 @@ appearance channels exist as restore targets.
 A checkpoint saved without `--save-full-checkpoint` holds no world/optimizer
 state and is refused up front, before any loading.
 
+Autosaves are written and validated in a unique sibling staging directory,
+then published by rename before older checkpoints are pruned. `state.tar`
+records every serialized array's type and byte length; resumable saves must
+also contain the complete world, densification, splat optimizer, and enabled
+appearance optimizer state.
+Run-directory resume rejects incomplete archives and falls back to the newest
+valid `step-*.ckpt`, so an interrupted save does not hide the last usable one.
+
 Resuming into a **different layout** — smaller `cap_max`, a different
-`sh_degree`, bilagrid/PPISP added, dropped or resized — is handled by
-`src/checkpoint/Adapt.h`, which rewrites the checkpoint's buffers to the
-target layout on the host and hands the engine an ordinary `state.tar`. It
-runs buffer-at-a-time and allocates no VRAM, because the motivating case is
+`sh_degree`, a resized bilagrid, or bilagrid/PPISP dropped — is handled by
+`src/checkpoint/Adapt.h`, which rewrites the checkpoint's buffers and nested
+layout metadata on the host and hands the engine an ordinary `state.tar`.
+It runs buffer-at-a-time and allocates no VRAM, because the motivating case is
 resuming a run that just ran out of it. Splat reduction drops the tail by up
 to the checkpoint's unsaturated slack, then the lowest-opacity remainder.
 Quantized buffers are decoded and re-encoded through the engine's own codecs
 in `core/Tensor.h` — those are `__device__` functions, but `__device__` is an
 empty macro in host translation units, so the host path calls the same code
 the kernels do rather than a copy of it.
+
+Optimizer/quantization storage, bilagrid type/codec/optimizer, background SH
+mode/degree, and PPISP parameter type/optimizer must match the saved layout;
+resume rejects overrides that would silently discard their state.
+
+Appearance channels may be dropped during resume; adding one requires a new
+run because no saved parameters exist to initialize it.
 
 ## Eval
 

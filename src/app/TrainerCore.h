@@ -21,6 +21,7 @@
 #include "engine/Engine.h"
 #include "core/ColorSpace.h"
 #include "data/DatasetParser.h"
+#include "app/OutputLease.h"
 #include "app/webviewer/RenderWorker.h"
 #include "config/TrainConfig.h"
 #include "i18n/TimeFormat.h"
@@ -192,6 +193,7 @@ public:
 
     // Filled by setup_engine().
     std::filesystem::path out_dir;
+    app::OutputLease output_lease;
     RunState st;
     // Step the restored checkpoint stopped at; train() starts here. 0 unless
     // setup_engine() resumed.

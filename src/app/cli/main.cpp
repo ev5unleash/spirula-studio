@@ -21,6 +21,7 @@
 #include "i18n/catalog/TrainFields.h"
 
 #include <algorithm>
+#include <atomic>
 #include <charconv>
 #include <chrono>
 #include <cmath>
@@ -33,6 +34,15 @@
 #include <thread>
 #include <vector>
 #include "core/Env.h"
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
+#include <cerrno>
+#include <poll.h>
+#include <unistd.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -491,8 +501,65 @@ int spirula_train_main(int argc, char** argv) {
         session.cfg = cfg;
         session.preset = preset;
 
+        const bool worker_control = spirula::env_on("WORKER_CONTROL");
+        std::atomic<bool> worker_listener_stop{false};
+        std::thread worker_listener;
+        if (worker_control) {
+            worker_listener = std::thread([&] {
+#ifdef _WIN32
+                HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
+                for (;;) {
+                    if (worker_listener_stop.load()) return;
+                    DWORD available = 0;
+                    if (!in || !PeekNamedPipe(in, nullptr, 0, nullptr,
+                                               &available, nullptr))
+                        break;
+                    if (available == 0) {
+                        Sleep(25);
+                        continue;
+                    }
+                    char buf[16];
+                    DWORD n = 0;
+                    if (!ReadFile(in, buf, sizeof buf, &n, nullptr) || n == 0)
+                        break;
+                    session.save_on_stop.store(true);
+                    session.stop_requested.store(true);
+                    return;
+                }
+#else
+                pollfd input{STDIN_FILENO, POLLIN | POLLHUP | POLLERR, 0};
+                for (;;) {
+                    if (worker_listener_stop.load()) return;
+                    const int ready = ::poll(&input, 1, 50);
+                    if (ready < 0 && errno == EINTR) continue;
+                    if (ready <= 0) {
+                        if (ready < 0) break;
+                        continue;
+                    }
+                    char buf[16];
+                    if (::read(STDIN_FILENO, buf, sizeof buf) <= 0) break;
+                    session.save_on_stop.store(true);
+                    session.stop_requested.store(true);
+                    return;
+                }
+#endif
+                session.save_on_stop.store(true);
+                session.stop_requested.store(true);
+            });
+        }
+        struct ListenerGuard {
+            std::atomic<bool>& stop;
+            std::thread& thread;
+            ~ListenerGuard() {
+                stop.store(true);
+                if (thread.joinable()) thread.join();
+            }
+        } listener_guard{worker_listener_stop, worker_listener};
+
         session.check_config();
         session.load_dataset();
+        if (worker_control && session.stop_requested.load())
+            return session.save_on_stop.load() ? 42 : 43;
 
         // Hidden debug flag (set via env to avoid polluting the config):
         // dump parsed + post-split arrays as JSON and exit, for numeric
@@ -504,6 +571,8 @@ int spirula_train_main(int argc, char** argv) {
         }
 
         session.setup_engine();
+        if (worker_control && session.stop_requested.load())
+            return session.save_on_stop.load() ? 42 : 43;
 
         // ---- Web viewer ------------------------------------------------------
         ViewerServer viewer;
@@ -542,10 +611,19 @@ int spirula_train_main(int argc, char** argv) {
             }
         };
         session.train(cb);
-        // Held-out eval. Replaces the engine's DataManager, so nothing may
-        // train afterwards -- and the viewer, which only reads splats, is
-        // unaffected. TODO: early stopping on the validation split.
-        session.eval();
+        // A worker asks for cooperative stop by writing STOP\n to our stdin
+        // (see app/cli/worker_main.cpp). Distinguish that from finishing so
+        // the parent can tell "complete" from "stopped early, saved".
+        const bool stopped = worker_control && session.stop_requested.load();
+        if (!stopped) {
+            // Held-out eval replaces DataManager, so it belongs only to a
+            // completed run.
+            session.eval();
+        } else if (session.save_on_stop.load()) {
+            return 42;
+        } else {
+            return 43;
+        }
 
         if (viewer_on && cfg.keep_viewer_alive) {
             std::printf("%s\n", cmsg::train_done_viewer.get());

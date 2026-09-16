@@ -70,11 +70,16 @@ static npy::shape_t _ckpt_shape_5d(const DeviceTensor5D<T>& t) {
 // the loader needs that config.json cannot supply (cur_num_splats, active SH
 // bands, allocated appearance dims) plus fields to fail-fast on a config /
 // checkpoint mismatch. Deliberately NOT a config duplicate.
-static std::string _build_state_json(EngineState& s, int step, bool full) {
+static std::string _build_state_json(
+    EngineState& s,
+    int step,
+    bool full,
+    const std::vector<DevicePool::SavedSlot>& slots
+) {
     std::ostringstream j;
     auto b = [](bool v) { return v ? 1 : 0; };
     j << "{\n";
-    j << "  \"format_version\": 1,\n";
+    j << "  \"format_version\": 2,\n";
     j << "  \"full_resume\": " << b(full) << ",\n";
     j << "  \"quant_codec\": \"joint_u_log_sqrt_g2_v1\",\n";
     j << "  \"quant_block_size\": 256,\n";
@@ -117,12 +122,28 @@ static std::string _build_state_json(EngineState& s, int step, bool full) {
     emit_bg("bilagrid_rgb",    s.bilagrid_rgb,    &s.bilagrid_rgb.type, s.bilagrid_rgb.C);
     emit_bg("bilagrid_depth",  s.bilagrid_depth,  nullptr, 0);
     emit_bg("bilagrid_normal", s.bilagrid_normal, nullptr, 0);
+    const bool background_sh =
+        s.background.enabled && s.background.mode == EngineBackground::Mode::Sh;
+    j << "  \"background_sh\": {\"enabled\": " << b(background_sh);
+    if (background_sh) j << ", \"degree\": " << s.background.sh_degree;
+    j << "},\n";
     j << "  \"ppisp\": {\"enabled\": " << b(s.ppisp.enabled);
     if (s.ppisp.enabled)
         j << ", \"param_type\": \"" << s.ppisp.param_type << "\""
           << ", \"num_params\": " << s.ppisp.num_params
           << ", \"use_adagrad\": " << b(s.ppisp.use_adagrad);
-    j << "}\n}\n";
+    j << "},\n";
+    j << "  \"arrays\": [";
+    for (size_t i = 0; i < slots.size(); ++i) {
+        const char* descr =
+            npy_scalar_descr((NpyScalar)slots[i].dtype_tag).first;
+        if (i != 0) j << ',';
+        j << "\n    {\"name\": \"" << slots[i].name
+          << "\", \"descr\": \"" << descr
+          << "\", \"bytes\": " << slots[i].nbytes << '}';
+    }
+    if (!slots.empty()) j << '\n';
+    j << "  ]\n}\n";
     return j.str();
 }
 
@@ -158,9 +179,40 @@ static std::string _json_str(const std::string& s, const std::string& key) {
 void engine_save_checkpoint(
     std::string output_dir,
     bool full_dump,
-    int step
+    int step,
+    const OptimConfig* intended_optim
 ) {
     EngineState& s = engine();
+    if (full_dump) {
+        if (intended_optim && s.optim.initialized) {
+            if (s.optim.sh_optim_bits != intended_optim->sh_optim_bits ||
+                s.world.sh_value_bits != intended_optim->sh_value_bits ||
+                s.optim.non_sh_optim_bits !=
+                    intended_optim->non_sh_optim_bits ||
+                s.optim.fused_state_active !=
+                    intended_optim->use_fused_proj_bwd_optim ||
+                s.optim.use_per_splat_bias_correction !=
+                    intended_optim->use_per_splat_bias_correction)
+                throw std::runtime_error(
+                    "engine_save_checkpoint: optimizer layout changed");
+        } else if (intended_optim) {
+            s.optim.use_fused_proj_bwd_optim =
+                intended_optim->use_fused_proj_bwd_optim;
+            engine_ensure_optim_state(
+                intended_optim->sh_optim_bits,
+                intended_optim->sh_value_bits,
+                intended_optim->non_sh_optim_bits,
+                intended_optim->use_per_splat_bias_correction);
+        } else if (!s.optim.initialized) {
+            engine_ensure_optim_state(s.optim.sh_optim_bits,
+                                      s.world.sh_value_bits,
+                                      s.optim.non_sh_optim_bits,
+                                      s.optim.use_per_splat_bias_correction);
+        }
+        _ensure_bilagrid_optim_state();
+        _ensure_ppisp_optim_state();
+        _ensure_bg_sh_optim_state();
+    }
 
     fs::path out_root(output_dir);
     _ckpt_mkdir(out_root);
@@ -349,11 +401,18 @@ void engine_save_checkpoint(
             if (rows_in_buf == ROWS_PER_FLUSH) flush();
         }
         flush();
+        ply.flush();
+        if (!ply)
+            throw std::runtime_error("Failed to write PLY: " + ply_path.string());
+        ply.close();
+        if (!ply)
+            throw std::runtime_error("Failed to close PLY: " + ply_path.string());
     }
 
     // --- state.tar: metadata-driven resume payload (see file header) ---------
     // Which buffers to serialize: Always (base) or Always+Resume (full resume).
     const SaveClass save_min = full_dump ? SaveClass::Resume : SaveClass::Always;
+    const auto saved_slots = DevicePool::global().saved(save_min);
 
     std::ofstream tar((out_root / "state.tar").string(), std::ios::binary);
     if (!tar)
@@ -362,18 +421,22 @@ void engine_save_checkpoint(
 
     // state.json -- runtime + validation manifest (config lives in config.json).
     {
-        std::string sj = _build_state_json(s, step, full_dump);
+        std::string sj = _build_state_json(s, step, full_dump, saved_slots);
         ckpt::tar_write_bytes(tar, "state.json", sj.data(), sj.size());
     }
 
     // One flat typed .npy per saved pool slot. Chunked D->H copy through a small
     // reusable host buffer -- bounded host RAM, ZERO extra device memory.
     std::vector<char> host_stage;
-    for (const auto& sl : DevicePool::global().saved(save_min)) {
+    for (const auto& sl : saved_slots) {
         ckpt::tar_write_npy_device(tar, sl.name + ".npy",
                                    sl.ptr, sl.nbytes, sl.dtype_tag, host_stage);
     }
     ckpt::tar_finish(tar);
+    tar.close();
+    if (!tar)
+        throw std::runtime_error("Failed to close state.tar: "
+                                 + (out_root / "state.tar").string());
 }
 
 
@@ -443,6 +506,7 @@ int engine_load_checkpoint(std::string input_dir) {
     engine_ensure_optim_state(sh_opt_bits, sh_val_bits, non_sh_bits, bias != 0);
     _ensure_bilagrid_optim_state();
     _ensure_ppisp_optim_state();
+    _ensure_bg_sh_optim_state();
 
     // Restore each saved .npy into its pool slot by name.
     std::vector<char> host_stage;

@@ -1,26 +1,20 @@
 #pragma once
 
-// Checkpoint layout adaptation: rewrite a checkpoint's saved buffers to a
-// layout different from the one they were written at, so training can resume
-// with fewer Gaussians, a different SH degree, or with/without bilagrid/PPISP.
-// The result is an ordinary state.tar that the unchanged (exact-match)
-// engine_load_checkpoint() then loads.
+// Host checkpoint layout adaptation writes an ordinary state.tar for the
+// exact-match engine loader. It supports cap/SH changes, bilagrid resize, and
+// dropping bilagrid/PPISP; additions and storage changes are rejected.
 //
-// Everything runs on the host, buffer at a time -- the motivating case is
-// resuming a run that just ran out of VRAM, so the adaptation cannot need any.
-// Quantized buffers are decoded and re-encoded through the engine's own codecs
-// in core/Tensor.h, not a copy of them.
+// Buffers are rewritten one at a time because the motivating case has no VRAM
+// left. Quantized buffers use the engine's host-callable codecs in Tensor.h.
 //
-// Splat reduction policy (target count = min(cur_ckpt, max_new)):
-//   1. drop the tail (newest splats) by up to the checkpoint's unsaturated
-//      slack (max_ckpt - cur_ckpt), then
-//   2. drop the rest by lowest opacity.
+// Splat reduction drops unsaturated newest slots first, then lowest opacity.
 
 #include "data/Json.h"
 
 #include <array>
 #include <filesystem>
 #include <optional>
+#include <string>
 
 namespace ckpt {
 
@@ -30,12 +24,25 @@ namespace ckpt {
 struct TargetLayout {
     int64_t max_num_splats = 0;
     int     num_sh         = 0;    // SH coefficients per colour channel
+    int     sh_optim_bits = 32;
+    int     sh_value_bits = 32;
+    int     non_sh_optim_bits = 32;
+    bool    use_fused_proj_bwd_optim = false;
+    bool    use_per_splat_bias_correction = false;
     int     num_images     = 0;    // POST-split camera count
     // Grid extents as (L, H, W); unset means the target has no such channel.
     std::optional<std::array<int, 3>> bilagrid_rgb;
     std::optional<std::array<int, 3>> bilagrid_depth;
     std::optional<std::array<int, 3>> bilagrid_normal;
+    bool    background_sh = false;
+    int     background_sh_degree = 0;
+    int     bilagrid_optim_bits = 32;
+    int     bilagrid_value_bits = 32;
+    bool    bilagrid_use_adagrad = false;
+    std::string bilagrid_type;
     bool    ppisp = false;
+    std::string ppisp_param_type;
+    bool    ppisp_use_adagrad = false;
 };
 
 // True when `state` (a checkpoint's state.json) disagrees with `t` in any way

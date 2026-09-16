@@ -77,6 +77,8 @@ bool device_bind();
 bool device_select_identity(const char* selector);
 // Detail from the last failed identity selection, or empty after success.
 std::string device_selection_error();
+// Resolves a selector without changing the process-global device selection.
+std::string device_resolve_identity(const char* selector);
 // Canonical selector of device `index`, "" when the index is invalid or the
 // driver reported no UUID (the only case a caller must fall back to an ordinal).
 std::string device_selector(int index);

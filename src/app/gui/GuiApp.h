@@ -5,6 +5,7 @@
 // viewport.
 
 #include "backend/api/BackendRuntime.h"
+#include "app/JobScheduler.h"
 #include "config/TrainConfig.h"
 #include "app/gui/BatchTrain.h"
 #include "app/gui/ColmapRunner.h"
@@ -165,7 +166,11 @@ private:
     // is released here, so both the Start button and the batch queue go
     // through it.
     void launch_training(const TrainConfig& cfg, const std::string& preset);
-    bool training_busy() const;   // Preparing or Training
+    bool training_busy() const;   // Foreground training
+    bool foreground_device_in_use() const;
+    std::string desktop_device_selector() const;
+    bool reserve_foreground_device();
+    void update_scheduler_admission();
 
     // ---- batch ----
     // Append a row for this dataset, seeded with the preset the trainer
@@ -181,7 +186,7 @@ private:
     void finish_batch();
     // Give up on the queue without waiting for the current row (the stop
     // confirmation took the session away).
-    void cancel_batch();
+    void cancel_batch(bool save = true);
 
     // ---- dataset creation ----
     // Which engines this build and this machine can actually offer.
@@ -327,6 +332,14 @@ private:
     void open_mesh_preview();
     void close_mesh_preview();
     void draw_batch();
+    void draw_scheduled_device_picker();
+    void draw_batch_device_picker(BatchJob& job);
+    void draw_job_device_picker(std::string& request, const char* id);
+    bool resolve_scheduled_device(const std::string& request,
+                                  std::string& device, std::string& device_name,
+                                  std::string& error);
+    bool validate_scheduled_device(const std::string& device,
+                                   std::string& error);
     void draw_batch_table();
     void draw_batch_preset_combo(BatchJob& job, int row);
     void draw_batch_issues();
@@ -606,19 +619,16 @@ private:
     std::string _license_prompt;      // family whose modal is open
     bool _license_tick = false;
 
-    // Batch training. The queue is data; the driver is advance_batch(), so a
-    // running batch is an ordinary training session the trainer screen shows
-    // exactly as it shows a hand-started one.
+    // Batch templates map to scheduler jobs; scheduler state drives the rows.
     std::vector<BatchJob> _batch;
     bool _batch_dirty = false;        // edited -> persist once the widget is idle
     bool _batch_checked = false;      // a pre-flight has run since the last edit
     bool _batch_active = false;
-    bool _batch_launched = false;     // a row's session is in flight
     int  _batch_current = -1;         // which row that is
-    bool _batch_stop_after = false;   // finish this row, then stop
-    bool _batch_stop_now = false;     // ... and record it as stopped, not done
     std::string _batch_msg;           // already formatted; "" when there is none
     bool _batch_msg_err = false;
+    std::string _scheduled_device_request;
+    std::vector<app::sched::Job> _scheduler_jobs;
 
     FileDialog _dialog;
     PickAction _pick = PickAction::None;
@@ -639,6 +649,8 @@ private:
 #else
     std::string _python_exe = "python3";
 #endif
+
+    app::sched::JobScheduler _scheduler;
 
     // Log console. `_log_dropped` counts the lines trimmed off the front since
     // the panel was last drawn: every one of them moves the remaining text up

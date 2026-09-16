@@ -12,6 +12,7 @@
 #include "i18n/catalog/Gui.h"
 
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <set>
@@ -71,6 +72,41 @@ std::string quote(const std::string& v) {
 
 std::string batch_list_path() {
     return (fs::path(app::config_dir()) / "batch.json").string();
+}
+
+std::string cli_name(const char* name) {
+    std::string out = "--" + std::string(name);
+    for (char& c : out)
+        if (c == '_') c = '-';
+    return out;
+}
+
+std::string cli_value(bool v) { return v ? "1" : "0"; }
+std::string cli_value(int v) { return std::to_string(v); }
+std::string cli_value(float v) {
+    if (std::isinf(v)) return v > 0 ? "inf" : "-inf";
+    char buf[32];
+    std::snprintf(buf, sizeof buf, "%.9g", v);
+    return buf;
+}
+std::string cli_value(const std::string& v) { return v; }
+
+template <typename T>
+std::string cli_value(const std::optional<T>& v) {
+    return v ? cli_value(*v) : "none";
+}
+
+template <typename T, size_t N>
+void append_cli(std::vector<std::string>& out, const char* name,
+                const std::array<T, N>& value) {
+    out.push_back(cli_name(name));
+    for (const T& v : value) out.push_back(cli_value(v));
+}
+
+template <typename T>
+void append_cli(std::vector<std::string>& out, const char* name, const T& value) {
+    out.push_back(cli_name(name));
+    out.push_back(cli_value(value));
 }
 
 // Parse one of the per-row overrides. Returns false only when the text is
@@ -256,6 +292,8 @@ bool batch_build_config(const BatchJob& job, TrainConfig& cfg,
     // viewport does not go through the web viewer, so the run is still
     // watchable if anybody is there.
     cfg.disable_viewer = true;
+    cfg.keep_viewer_alive = false;
+    cfg.save_full_checkpoint = true;
 
     // The row's own overrides go on top of the preset, and count as set by
     // hand: --quality moves cap_max and num_iterations, and a number typed
@@ -285,6 +323,15 @@ bool batch_build_config(const BatchJob& job, TrainConfig& cfg,
     return true;
 }
 
+std::vector<std::string> batch_config_args(const TrainConfig& cfg) {
+    std::vector<std::string> out;
+#define SS_APPEND_CONFIG(type, member, default_, section, tier, choices) \
+    append_cli(out, #member, cfg.member);
+    SS_CONFIG_FIELDS(SS_APPEND_CONFIG)
+#undef SS_APPEND_CONFIG
+    return out;
+}
+
 
 std::vector<BatchJob> load_batch_list() {
     std::vector<BatchJob> out;
@@ -298,10 +345,13 @@ std::vector<BatchJob> load_batch_list() {
             if (const JsonValue* v = j.find("preset_path")) b.preset_path = v->as_string();
             if (const JsonValue* v = j.find("preset_name")) b.preset_name = v->as_string();
             if (const JsonValue* v = j.find("output_dir")) b.output_dir = v->as_string();
+            if (const JsonValue* v = j.find("device")) b.device = v->as_string();
             if (const JsonValue* v = j.find("cap_max")) b.cap_max_override = v->as_string();
             if (const JsonValue* v = j.find("sh_degree")) b.sh_degree_override = v->as_string();
             if (const JsonValue* v = j.find("num_iterations"))
                 b.iterations_override = v->as_string();
+            if (const JsonValue* v = j.find("scheduler_id"))
+                b.scheduler_id = v->as_string();
             if (b.preset_name.empty()) b.preset_name = "3dgs";
             out.push_back(std::move(b));
         }
@@ -321,15 +371,16 @@ void save_batch_list(const std::vector<BatchJob>& jobs) {
         const BatchJob& b = jobs[i];
         std::fprintf(f,
                      "%s\n        {\"dataset\": %s, \"preset_path\": %s, "
-                     "\"preset_name\": %s, \"output_dir\": %s, "
+                     "\"preset_name\": %s, \"output_dir\": %s, \"device\": %s, "
                      "\"cap_max\": %s, \"sh_degree\": %s, "
-                     "\"num_iterations\": %s}",
+                     "\"num_iterations\": %s, \"scheduler_id\": %s}",
                      i ? "," : "", quote(b.dataset).c_str(),
                      quote(b.preset_path).c_str(), quote(b.preset_name).c_str(),
-                     quote(b.output_dir).c_str(),
+                     quote(b.output_dir).c_str(), quote(b.device).c_str(),
                      quote(b.cap_max_override).c_str(),
                      quote(b.sh_degree_override).c_str(),
-                     quote(b.iterations_override).c_str());
+                     quote(b.iterations_override).c_str(),
+                     quote(b.scheduler_id).c_str());
     }
     std::fprintf(f, "%s]\n}\n", jobs.empty() ? "" : "\n    ");
     std::fclose(f);

@@ -10,6 +10,7 @@
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <limits>
 #include <numeric>
 #include <sstream>
 #include <stdexcept>
@@ -253,7 +254,8 @@ bool ends_with(const std::string& s, const char* p) {
 
 // Describe a per-splat slot's transform, or nothing if the slot is not
 // per-splat (appearance tables, fixed-size buffers).
-std::optional<SlotClass> classify(const std::string& name) {
+std::optional<SlotClass> classify(const std::string& name,
+                                  int sh_optim_bits) {
     for (const char* pfx : {"world.", "eng.g1_", "eng.g2_"}) {
         if (!starts_with(name, pfx)) continue;
         std::string attr = name.substr(std::strlen(pfx));
@@ -281,7 +283,7 @@ std::optional<SlotClass> classify(const std::string& name) {
     if (name == "eng.sh_quant" || name == "eng.sh_quant_fpbo") {
         SlotClass c;
         c.is_sh = true; c.quant = true; c.adam = true;
-        c.bits = 8; c.fpbo = ends_with(name, "_fpbo");
+        c.bits = sh_optim_bits; c.fpbo = ends_with(name, "_fpbo");
         return c;
     }
     // Quantized SH VALUE store.
@@ -410,21 +412,74 @@ struct BilagridState {
     std::array<int, 3> lhw{0, 0, 0};
     int C = 0;
     int value_bits = 16;
+    int optim_bits = 32;
+    bool use_adagrad = false;
+    std::string type;
 };
+
+int checked_state_int(const JsonValue& object, const char* key,
+                      int minimum, int maximum) {
+    const double raw = object.get_double(key, minimum - 1.0);
+    if (!std::isfinite(raw) || std::trunc(raw) != raw ||
+        raw < minimum || raw > maximum)
+        throw std::runtime_error(
+            "checkpoint adapt: invalid checkpoint integer " + std::string(key));
+    return (int)raw;
+}
+
+int64_t checked_grid_cells(const std::array<int, 3>& lhw, int channels) {
+    if (channels <= 0)
+        throw std::runtime_error("checkpoint adapt: invalid bilagrid channels");
+    int64_t cells = channels;
+    for (int dimension : lhw) {
+        if (dimension <= 0 ||
+            cells > std::numeric_limits<int64_t>::max() / dimension)
+            throw std::runtime_error(
+                "checkpoint adapt: invalid bilagrid dimensions");
+        cells *= dimension;
+    }
+    return cells;
+}
 
 BilagridState bilagrid_state(const JsonValue& state, const char* which) {
     BilagridState b;
     const JsonValue* g = state.find(std::string("bilagrid_") + which);
     if (!g) return b;
-    b.enabled = g->get_double("enabled", 0) != 0;
+    const double enabled = g->get_double("enabled", 0);
+    if (enabled != 0 && enabled != 1)
+        throw std::runtime_error(
+            "checkpoint adapt: invalid bilagrid enabled flag");
+    b.enabled = enabled == 1;
     if (!b.enabled) return b;
-    b.lhw = {(int)g->get_double("L", 0), (int)g->get_double("H", 0),
-             (int)g->get_double("W", 0)};
-    b.value_bits = (int)g->get_double("value_bits", 16);
-    // Only the RGB struct carries C; depth is 2 channels and normal 3.
-    if (std::strcmp(which, "rgb") == 0)      b.C = (int)g->get_double("C", 12);
+    b.lhw = {
+        checked_state_int(*g, "L", 1, std::numeric_limits<int>::max()),
+        checked_state_int(*g, "H", 1, std::numeric_limits<int>::max()),
+        checked_state_int(*g, "W", 1, std::numeric_limits<int>::max()),
+    };
+    const double value_bits = g->get_double("value_bits", 0);
+    const double optim_bits = g->get_double("optim_bits", 0);
+    const double use_adagrad = g->get_double("use_adagrad", -1);
+    if ((value_bits != 16 && value_bits != 32) ||
+        (optim_bits != 4 && optim_bits != 8 && optim_bits != 32) ||
+        (use_adagrad != 0 && use_adagrad != 1))
+        throw std::runtime_error(
+            "checkpoint adapt: invalid bilagrid storage metadata");
+    b.value_bits = (int)value_bits;
+    b.optim_bits = (int)optim_bits;
+    b.use_adagrad = use_adagrad == 1;
+    if (std::strcmp(which, "rgb") == 0) {
+        const JsonValue* type = g->find("type");
+        if (!type || type->type != JsonValue::Type::String)
+            throw std::runtime_error(
+                "checkpoint adapt: invalid bilagrid RGB type");
+        b.type = type->as_string();
+    }
+    if (std::strcmp(which, "rgb") == 0)
+        b.C = checked_state_int(*g, "C", 1,
+                                std::numeric_limits<int>::max());
     else if (std::strcmp(which, "depth") == 0) b.C = 2;
-    else                                      b.C = 3;
+    else b.C = 3;
+    checked_grid_cells(b.lhw, b.C);
     return b;
 }
 
@@ -453,26 +508,98 @@ const std::optional<std::array<int, 3>>& target_grid(const TargetLayout& t,
 // ===========================================================================
 
 bool needs_adapt(const JsonValue& state, const TargetLayout& t) {
-    if ((int64_t)state.get_double("max_num_splats", 0) != t.max_num_splats)
-        return true;
-    if ((int)state.get_double("num_sh", 0) != t.num_sh) return true;
-    if ((int64_t)state.get_double("cur_num_splats", 0) > t.max_num_splats)
-        return true;
+    bool shape_changed =
+        (int64_t)state.get_double("max_num_splats", 0) != t.max_num_splats;
+    shape_changed |= (int)state.get_double("num_sh", 0) != t.num_sh;
+    shape_changed |=
+        (int64_t)state.get_double("cur_num_splats", 0) > t.max_num_splats;
+    const double sh_optim_bits = state.get_double("sh_optim_bits", 32);
+    const double sh_value_bits = state.get_double("sh_value_bits", 32);
+    const double non_sh_optim_bits =
+        state.get_double("non_sh_optim_bits", 32);
+    const double fused =
+        state.get_double("use_fused_proj_bwd_optim", 0);
+    const double bias =
+        state.get_double("use_per_splat_bias_correction", 0);
+    if (sh_optim_bits != t.sh_optim_bits ||
+        sh_value_bits != t.sh_value_bits ||
+        non_sh_optim_bits != t.non_sh_optim_bits ||
+        fused != (t.use_fused_proj_bwd_optim ? 1 : 0) ||
+        bias != (t.use_per_splat_bias_correction ? 1 : 0))
+        throw std::runtime_error(
+            "resume: changing optimizer storage layout is unsupported");
     for (const char* which : {"rgb", "depth", "normal"}) {
         BilagridState b = bilagrid_state(state, which);
         const auto& tg = target_grid(t, which);
-        if (b.enabled != tg.has_value()) return true;
-        if (b.enabled && tg && b.lhw != *tg) return true;
+        if (b.enabled != tg.has_value()) shape_changed = true;
+        if (!b.enabled && tg)
+            throw std::runtime_error(
+                "resume: adding a bilagrid channel is unsupported");
+        if (b.enabled && tg &&
+            (b.optim_bits != t.bilagrid_optim_bits ||
+             b.value_bits != t.bilagrid_value_bits ||
+             b.use_adagrad != t.bilagrid_use_adagrad))
+            throw std::runtime_error(
+                "resume: changing bilagrid storage layout is unsupported");
+        if (b.enabled && tg && std::strcmp(which, "rgb") == 0 &&
+            b.type != t.bilagrid_type)
+            throw std::runtime_error(
+                "resume: changing bilagrid type is unsupported");
+        if (b.enabled && tg && b.lhw != *tg) shape_changed = true;
+    }
+    const JsonValue* background = state.find("background_sh");
+    if (background) {
+        const double enabled = background->get_double("enabled", -1);
+        if (enabled != 0 && enabled != 1)
+            throw std::runtime_error(
+                "resume: checkpoint has invalid background SH metadata");
+        const bool ck_background_sh = enabled == 1;
+        if (ck_background_sh != t.background_sh)
+            throw std::runtime_error(
+                "resume: changing background mode to or from SH is unsupported");
+        if (ck_background_sh) {
+            const int degree = checked_state_int(
+                *background, "degree", 0, 1024);
+            if (degree != t.background_sh_degree)
+                throw std::runtime_error(
+                    "resume: changing background SH degree is unsupported");
+        }
+    } else if (t.background_sh) {
+        throw std::runtime_error(
+            "resume: checkpoint has no background SH state");
     }
     const JsonValue* p = state.find("ppisp");
     bool ck_ppisp = p && p->get_double("enabled", 0) != 0;
-    if (ck_ppisp != t.ppisp) return true;
-    return false;
+    if (!ck_ppisp && t.ppisp)
+        throw std::runtime_error("resume: adding PPISP is unsupported");
+    if (ck_ppisp != t.ppisp) shape_changed = true;
+    if (ck_ppisp && t.ppisp) {
+        const JsonValue* type = p->find("param_type");
+        if (!type || type->type != JsonValue::Type::String)
+            throw std::runtime_error(
+                "resume: checkpoint has invalid PPISP metadata");
+        if (type->as_string() != t.ppisp_param_type)
+            throw std::runtime_error(
+                "resume: changing PPISP parameter type is unsupported");
+        const double use_adagrad = p->get_double("use_adagrad", -1);
+        if (use_adagrad != (t.ppisp_use_adagrad ? 1 : 0))
+            throw std::runtime_error(
+                "resume: changing PPISP optimizer is unsupported");
+    }
+    return shape_changed;
 }
 
 
 bool adapt_checkpoint(const fs::path& ckpt_dir, const TargetLayout& t,
                       const fs::path& out_dir) {
+    if (t.max_num_splats <= 0 ||
+        t.max_num_splats > std::numeric_limits<int32_t>::max() ||
+        t.num_sh < 0 || t.num_sh > 1024 || t.num_images < 0)
+        throw std::runtime_error("checkpoint adapt: invalid target layout");
+    for (const auto* grid :
+         {&t.bilagrid_rgb, &t.bilagrid_depth, &t.bilagrid_normal})
+        if (*grid) checked_grid_cells(**grid, 1);
+
     std::ifstream sin((ckpt_dir / "state.tar").string(), std::ios::binary);
     if (!sin) throw std::runtime_error("cannot open " +
                                        (ckpt_dir / "state.tar").string());
@@ -485,13 +612,22 @@ bool adapt_checkpoint(const fs::path& ckpt_dir, const TargetLayout& t,
 
     if (!needs_adapt(state, t)) return false;
 
-    const int64_t max_ck = (int64_t)state.get_double("max_num_splats", 0);
-    const int64_t cur_ck = (int64_t)state.get_double("cur_num_splats", 0);
-    const int     K_ck   = (int)state.get_double("num_sh", 0);
+    const int64_t max_ck = checked_state_int(
+        state, "max_num_splats", 1, std::numeric_limits<int32_t>::max());
+    const int64_t cur_ck = checked_state_int(
+        state, "cur_num_splats", 0, (int)max_ck);
+    const int K_ck = checked_state_int(state, "num_sh", 0, 1024);
     const int64_t max_new = t.max_num_splats;
     const int     K_new   = t.num_sh;
     const int64_t n_img   = t.num_images;
 
+    const double raw_sh_optim_bits =
+        state.get_double("sh_optim_bits", 32);
+    if (raw_sh_optim_bits != 4 && raw_sh_optim_bits != 8 &&
+        raw_sh_optim_bits != 32)
+        throw std::runtime_error(
+            "checkpoint adapt: unsupported SH optimizer width");
+    const int sh_optim_bits = (int)raw_sh_optim_bits;
     std::map<std::string, Buffer> arrs = read_tar_npy(ckpt_dir);
 
     // Group the ".q" / ".qb" halves of a quantized slot under one logical name.
@@ -517,7 +653,7 @@ bool adapt_checkpoint(const fs::path& ckpt_dir, const TargetLayout& t,
     std::map<std::string, Buffer> emit;
 
     for (const auto& [base, parts] : logical) {
-        std::optional<SlotClass> cls = classify(base);
+        std::optional<SlotClass> cls = classify(base, sh_optim_bits);
 
         if (cls && !cls->quant) {                       // plain per-splat float
             if (!parts.plain) continue;
@@ -602,6 +738,9 @@ bool adapt_checkpoint(const fs::path& ckpt_dir, const TargetLayout& t,
                 from_splat_major(g1n);
                 from_splat_major(g2n);
                 encode_adam(cls->bits, g1n, g2n, bbc_new, pk, bd);
+                if (cls->is_sh && cls->bits == 4)
+                    pk.resize((size_t)lin_new *
+                              QuantizedAdamState<8>::kBytesPerCell, 0);
             } else {
                 std::vector<float> v;
                 decode_linear(cls->bits, parts.q->u8(), parts.qb->f32(),
@@ -629,6 +768,12 @@ bool adapt_checkpoint(const fs::path& ckpt_dir, const TargetLayout& t,
             const auto& tg = target_grid(t, which);
             if (!tg) continue;                       // target dropped it
             BilagridState bs = bilagrid_state(state, which.c_str());
+            const int64_t target_cells = checked_grid_cells(*tg, bs.C);
+            if (n_img > 0 &&
+                target_cells > std::numeric_limits<int64_t>::max() / n_img)
+                throw std::runtime_error(
+                    "checkpoint adapt: bilagrid target is too large");
+            const int64_t target_total = target_cells * n_img;
             const bool same = bs.lhw == *tg;
 
             if (field == "scalars") {                // per-image, shape-invariant
@@ -637,7 +782,7 @@ bool adapt_checkpoint(const fs::path& ckpt_dir, const TargetLayout& t,
             }
             if (field == "grids") {
                 if (!parts.plain) continue;
-                const int64_t cells = (int64_t)bs.lhw[0] * bs.lhw[1] * bs.lhw[2] * bs.C;
+                const int64_t cells = checked_grid_cells(bs.lhw, bs.C);
                 const int64_t n_grids = (int64_t)parts.plain->numel() / cells;
                 if (n_grids != n_img) image_count_error("bilagrid", n_grids, n_img);
                 emit[base] = same ? *parts.plain
@@ -649,9 +794,14 @@ bool adapt_checkpoint(const fs::path& ckpt_dir, const TargetLayout& t,
             if (field == "grids_q") {
                 if (!parts.q || !parts.qb) continue;
                 const int bits = bs.value_bits == 16 ? 16 : 8;
-                const int64_t cells = (int64_t)bs.lhw[0] * bs.lhw[1] * bs.lhw[2] * bs.C;
+                const int64_t cells = checked_grid_cells(bs.lhw, bs.C);
+                const int bytes_per_cell = bits == 16 ? 2 : 1;
+                if (cells > std::numeric_limits<int64_t>::max() / bytes_per_cell)
+                    throw std::runtime_error(
+                        "checkpoint adapt: bilagrid source is too large");
                 const int64_t n_grids =
-                    (int64_t)parts.q->bytes.size() / (cells * (bits == 16 ? 2 : 1));
+                    (int64_t)parts.q->bytes.size() /
+                    (cells * bytes_per_cell);
                 if (n_grids != n_img) image_count_error("bilagrid", n_grids, n_img);
                 if (same) {
                     emit[base + ".q"] = *parts.q;
@@ -670,15 +820,24 @@ bool adapt_checkpoint(const fs::path& ckpt_dir, const TargetLayout& t,
                 emit[base + ".qb"] = from_floats(bd);
                 continue;
             }
-            // Optimizer state (g1/g2/accum/adagrad): keep only when the
-            // resolution is unchanged; otherwise drop and let the engine
-            // re-init it to zero.
             if (same) {
                 if (parts.plain) emit[base] = *parts.plain;
                 else if (parts.q && parts.qb) {
                     emit[base + ".q"] = *parts.q;
                     emit[base + ".qb"] = *parts.qb;
                 }
+            } else if (parts.plain) {
+                emit[base] =
+                    from_floats(std::vector<float>((size_t)target_total, 0.0f));
+            } else if (parts.q && parts.qb &&
+                       (field == "bg_ag" || field == "bg_quant")) {
+                const size_t packed_per_cell = field == "bg_quant" ? 2 : 1;
+                const size_t bounds_per_block = field == "bg_quant" ? 4 : 2;
+                const size_t cells = (size_t)target_total;
+                emit[base + ".q"] = from_bytes(
+                    std::vector<uint8_t>(cells * packed_per_cell, 0));
+                emit[base + ".qb"] = from_floats(std::vector<float>(
+                    ((cells + kBlock - 1) / kBlock) * bounds_per_block, 0.0f));
             }
             continue;
         }
@@ -704,9 +863,6 @@ bool adapt_checkpoint(const fs::path& ckpt_dir, const TargetLayout& t,
         }
     }
 
-    // state.json with the three counts retargeted. Rewriting the three numbers
-    // in place keeps every other field (quant widths, FPBO flags, camera block)
-    // exactly as the writer emitted it.
     std::string st = state_text;
     auto set_int = [&st](const char* key, int64_t v) {
         std::string pat = std::string("\"") + key + "\":";
@@ -716,9 +872,75 @@ bool adapt_checkpoint(const fs::path& ckpt_dir, const TargetLayout& t,
         size_t e = st.find_first_of(",\n}", b);
         st.replace(b, e - b, std::to_string(v));
     };
+    auto set_object_int = [&st](const std::string& object,
+                                const char* key, int64_t v) {
+        const std::string object_pat = "\"" + object + "\"";
+        const size_t object_key = st.find(object_pat);
+        const size_t begin = object_key == std::string::npos
+            ? std::string::npos : st.find('{', object_key + object_pat.size());
+        const size_t end = begin == std::string::npos
+            ? std::string::npos : st.find('}', begin + 1);
+        const std::string field_pat = std::string("\"") + key + "\":";
+        const size_t field = begin == std::string::npos
+            ? std::string::npos : st.find(field_pat, begin + 1);
+        if (field == std::string::npos || field > end)
+            throw std::runtime_error(
+                "checkpoint adapt: missing " + object + "." + key);
+        const size_t value =
+            st.find_first_not_of(" \t", field + field_pat.size());
+        const size_t value_end = st.find_first_of(",}", value);
+        if (value == std::string::npos || value_end > end)
+            throw std::runtime_error(
+                "checkpoint adapt: invalid " + object + "." + key);
+        st.replace(value, value_end - value, std::to_string(v));
+    };
+    set_int("format_version", 2);
     set_int("cur_num_splats", target_cur);
     set_int("max_num_splats", max_new);
     set_int("num_sh", K_new);
+    for (const char* which : {"rgb", "depth", "normal"}) {
+        const BilagridState source = bilagrid_state(state, which);
+        if (!source.enabled) continue;
+        const auto& grid = target_grid(t, which);
+        const std::string object = std::string("bilagrid_") + which;
+        set_object_int(object, "enabled", grid ? 1 : 0);
+        if (grid) {
+            set_object_int(object, "L", (*grid)[0]);
+            set_object_int(object, "H", (*grid)[1]);
+            set_object_int(object, "W", (*grid)[2]);
+        }
+    }
+    const JsonValue* source_ppisp = state.find("ppisp");
+    if (source_ppisp && source_ppisp->get_double("enabled", 0) == 1)
+        set_object_int("ppisp", "enabled", t.ppisp ? 1 : 0);
+
+    std::ostringstream manifest;
+    manifest << '[';
+    bool first = true;
+    for (const auto& [name, buf] : emit) {
+        if (buf.bytes.empty()) continue;
+        if (!first) manifest << ',';
+        manifest << "\n    {\"name\": \"" << name
+                 << "\", \"descr\": \"" << buf.descr
+                 << "\", \"bytes\": " << buf.bytes.size() << '}';
+        first = false;
+    }
+    if (!first) manifest << '\n';
+    manifest << "  ]";
+
+    const size_t manifest_key = st.find("\"arrays\"");
+    if (manifest_key == std::string::npos) {
+        const size_t object_end = st.find_last_of('}');
+        if (object_end == std::string::npos)
+            throw std::runtime_error("checkpoint adapt: invalid state.json");
+        st.insert(object_end, ",\n  \"arrays\": " + manifest.str() + "\n");
+    } else {
+        const size_t array_begin = st.find('[', manifest_key);
+        const size_t array_end = st.find(']', array_begin);
+        if (array_begin == std::string::npos || array_end == std::string::npos)
+            throw std::runtime_error("checkpoint adapt: invalid arrays manifest");
+        st.replace(array_begin, array_end - array_begin + 1, manifest.str());
+    }
 
     fs::create_directories(out_dir);
     std::ofstream out((out_dir / "state.tar").string(), std::ios::binary);
@@ -726,8 +948,11 @@ bool adapt_checkpoint(const fs::path& ckpt_dir, const TargetLayout& t,
                                        (out_dir / "state.tar").string());
     tar_write_bytes(out, "state.json", st.data(), st.size());
     for (const auto& [name, buf] : emit)
-        write_npy_member(out, name + ".npy", buf);
+        if (!buf.bytes.empty()) write_npy_member(out, name + ".npy", buf);
     tar_finish(out);
+    out.close();
+    if (!out) throw std::runtime_error("cannot finish " +
+                                       (out_dir / "state.tar").string());
     return true;
 }
 

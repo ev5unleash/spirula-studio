@@ -13,10 +13,8 @@
 #include "data/ImageProbe.h"
 #include "data/Knn.h"
 #include "sfm/core/Exif.h"
+#include "core/Env.h"
 
-#ifndef _WIN32
-#include <ftw.h>
-#endif
 
 #include "external/stb_image_write.h"
 
@@ -53,18 +51,8 @@ static std::string lfmt(const spirula::i18n::Msg& m,
 
 namespace spirula {
 
-// Recursive delete. Was nftw rather than std::filesystem::remove_all because
-// libtorch interposed its own std::filesystem symbols; torch is gone, so this
-// can become remove_all whenever someone wants to.
-static void remove_tree(const std::filesystem::path& p) {
-#ifndef _WIN32
-    nftw(p.string().c_str(),
-         [](const char* f, const struct stat*, int, struct FTW*) {
-             return ::remove(f);
-         }, 16, FTW_DEPTH | FTW_PHYS);
-#else
-    std::filesystem::remove_all(p);
-#endif
+static void remove_tree(const fs::path& path) {
+    fs::remove_all(path);
 }
 
 // ===========================================================================
@@ -532,13 +520,18 @@ void save_scene_transform_json(const ParsedDataset& ds, const TrainConfig& c,
 // Macro flags are written beside what they resolved to; config/TrainConfigJson.h.
 void save_config_json(const TrainConfig& c, const fs::path& out_dir,
                       const std::string& preset) {
-    FILE* f = std::fopen((out_dir / "config.json").string().c_str(), "w");
-    if (!f) throw std::runtime_error("cannot write config.json");
-    std::fprintf(f, "{\n    \"preset\": \"%s\"", preset.c_str());
-    for (const auto& [key, value] : train_config_json_pairs(c))
-        std::fprintf(f, ",\n    \"%s\": %s", key, value.c_str());
-    std::fprintf(f, "\n}\n");
-    std::fclose(f);
+    const fs::path path = out_dir / "config.json";
+    const auto pairs = train_config_json_pairs(c);
+    FILE* f = std::fopen(path.string().c_str(), "w");
+    if (!f) throw std::runtime_error("cannot write " + path.string());
+
+    bool ok = std::fprintf(f, "{\n    \"preset\": \"%s\"", preset.c_str()) >= 0;
+    for (const auto& [key, value] : pairs)
+        if (std::fprintf(f, ",\n    \"%s\": %s", key, value.c_str()) < 0)
+            ok = false;
+    if (std::fprintf(f, "\n}\n") < 0) ok = false;
+    if (std::fclose(f) != 0) ok = false;
+    if (!ok) throw std::runtime_error("cannot finish " + path.string());
 }
 
 
@@ -772,7 +765,11 @@ void TrainerSession::setup_engine() {
         out_dir = fs::path(cfg.output_dir_prefix) /
                   (fs::path(cfg.data).stem().string() + "_" + stamp);
     }
-    fs::create_directories(out_dir);
+    std::string output_error;
+    // The scheduler holds this lock across the worker process lifetime.
+    if (!spirula::env_on("OUTPUT_LEASE_HELD") &&
+        !output_lease.acquire(out_dir, output_error))
+        throw std::runtime_error("cannot acquire output directory: " + output_error);
     if (write_config_json) {
         save_config_json(cfg, out_dir, preset);
         save_scene_transform_json(ds, cfg, out_dir);
@@ -961,8 +958,22 @@ void TrainerSession::restore_checkpoint() {
     // which setup_engine() resolved into `st`.
     ckpt::TargetLayout target;
     target.max_num_splats = engine_get_max_num_splats();
-    target.num_sh         = (cfg.sh_degree + 1) * (cfg.sh_degree + 1);
+    target.num_sh         = (cfg.sh_degree + 1) * (cfg.sh_degree + 1) - 1;
     target.num_images     = (int)post.n_post;
+    target.background_sh        = cfg.background_mode == "sh";
+    target.background_sh_degree = cfg.background_sh_degree;
+    const OptimConfig target_optim = build_step_config(cfg, st, 0).optim;
+    target.sh_optim_bits = target_optim.sh_optim_bits;
+    target.sh_value_bits = target_optim.sh_value_bits;
+    target.non_sh_optim_bits = target_optim.non_sh_optim_bits;
+    target.use_fused_proj_bwd_optim =
+        target_optim.use_fused_proj_bwd_optim;
+    target.use_per_splat_bias_correction =
+        target_optim.use_per_splat_bias_correction;
+    target.bilagrid_optim_bits = target_optim.sh_optim_bits;
+    target.bilagrid_value_bits = target_optim.sh_value_bits;
+    target.bilagrid_use_adagrad = cfg.use_adagrad_bilagrid_optim;
+    target.bilagrid_type = cfg.bilagrid_type;
     auto lhw = [](const std::array<int, 3>& xyw) {
         return std::array<int, 3>{xyw[2], xyw[1], xyw[0]};   // (X,Y,W)->(L,H,W)
     };
@@ -970,6 +981,10 @@ void TrainerSession::restore_checkpoint() {
     if (st.bilagrid_depth_init)  target.bilagrid_depth  = lhw(cfg.bilagrid_shape_geometry);
     if (st.bilagrid_normal_init) target.bilagrid_normal = lhw(cfg.bilagrid_shape_geometry);
     target.ppisp = st.ppisp_init;
+    if (target.ppisp)
+        target.ppisp_param_type =
+            cfg.ppisp_param_type.empty() ? "original" : cfg.ppisp_param_type;
+    target.ppisp_use_adagrad = cfg.use_adagrad_ppisp_optim;
 
     fs::path load_from = r.ckpt_dir;
     fs::path tmp;
@@ -999,15 +1014,111 @@ void TrainerSession::restore_checkpoint() {
 void TrainerSession::save_checkpoint(int step) {
     char name[32];
     std::snprintf(name, sizeof name, "step-%09d.ckpt", step);
-    fs::path ckpt = out_dir / name;
-    fs::create_directories(ckpt);
-    engine_save_checkpoint(ckpt.string(), cfg.save_full_checkpoint, step);
+    const fs::path ckpt = out_dir / name;
+
+    auto validate = [&](const fs::path& dir) {
+        const fs::path splat = dir / "splat.ply";
+        const fs::path state = dir / "state.tar";
+        const fs::path config = dir / "config.json";
+        if (!fs::is_regular_file(splat) || fs::file_size(splat) == 0)
+            throw std::runtime_error("checkpoint splat.ply missing or empty");
+        if (!fs::is_regular_file(state) || fs::file_size(state) == 0)
+            throw std::runtime_error("checkpoint state.tar missing or empty");
+        if (!fs::is_regular_file(config) || fs::file_size(config) == 0)
+            throw std::runtime_error("checkpoint config.json missing or empty");
+        const JsonValue state_json = ckpt::read_state_json(dir);
+        if (cfg.save_full_checkpoint) ckpt::check_resumable(dir);
+        const JsonValue* state_step = state_json.find("step");
+        if (!state_step || state_step->as_int(-1) != step)
+            throw std::runtime_error("checkpoint state.json step mismatch");
+        json_parse_file(config.string());
+    };
+
+    bool published = false;
+    if (fs::exists(ckpt)) {
+        try {
+            validate(ckpt);
+            published = true;
+        } catch (...) {
+        }
+    }
+
+    fs::path staging;
+    if (!published) {
+        std::random_device random;
+        for (int attempt = 0; attempt < 16; ++attempt) {
+            const uint64_t nonce =
+                (uint64_t)std::chrono::high_resolution_clock::now()
+                    .time_since_epoch().count() ^
+                ((uint64_t)random() << 32) ^ random();
+            const fs::path candidate =
+                out_dir / (".staging-" + std::string(name) + "-" +
+                           std::to_string(nonce));
+            std::error_code ec;
+            if (fs::create_directory(candidate, ec)) {
+                staging = candidate;
+                break;
+            }
+            if (ec)
+                throw std::runtime_error(
+                    "cannot create checkpoint staging directory: " + ec.message());
+        }
+        if (staging.empty())
+            throw std::runtime_error("cannot allocate checkpoint staging directory");
+
+        try {
+            const OptimConfig checkpoint_optim =
+                build_step_config(cfg, st, step).optim;
+            engine_save_checkpoint(staging.string(), cfg.save_full_checkpoint,
+                                   step, &checkpoint_optim);
+            save_config_json(cfg, staging, preset);
+            validate(staging);
+
+            bool destination_valid = false;
+            if (fs::exists(ckpt)) {
+                try {
+                    validate(ckpt);
+                    destination_valid = true;
+                } catch (...) {
+                }
+            }
+            if (destination_valid) {
+                remove_tree(staging);
+            } else if (fs::exists(ckpt)) {
+                const fs::path backup =
+                    out_dir / (".replaced-" + staging.filename().string());
+                fs::rename(ckpt, backup);
+                try {
+                    fs::rename(staging, ckpt);
+                } catch (...) {
+                    std::error_code restore_error;
+                    fs::rename(backup, ckpt, restore_error);
+                    if (restore_error)
+                        throw std::runtime_error(
+                            "checkpoint publication failed; previous directory retained at " +
+                            backup.string());
+                    throw;
+                }
+                std::error_code ignored;
+                fs::remove_all(backup, ignored);
+            } else {
+                fs::rename(staging, ckpt);
+            }
+            published = true;
+        } catch (...) {
+            std::error_code ignored;
+            fs::remove_all(staging, ignored);
+            throw;
+        }
+    }
+
     if (cfg.save_only_latest_checkpoint) {
         std::vector<fs::path> stale;
         for (const auto& e : fs::directory_iterator(out_dir)) {
-            std::string b = e.path().filename().string();
-            if (b.rfind("step-", 0) == 0 &&
-                b.find(".ckpt") != std::string::npos && e.path() != ckpt)
+            const std::string b = e.path().filename().string();
+            if (b.rfind("step-", 0) == 0 && b.size() > 5 &&
+                b.compare(b.size() - 5, 5, ".ckpt") == 0 &&
+                e.path() != ckpt)
                 stale.push_back(e.path());
         }
         for (const auto& p : stale) remove_tree(p);
@@ -1099,6 +1210,7 @@ void TrainerSession::train(const TrainerCallbacks& cb) {
         _end_time = _pause_start = {};
         _paused_s = 0.0;
     }
+    cur_step = start_step;
 
     int step = start_step;
     for (; step < cfg.num_iterations; step++) {
@@ -1180,7 +1292,7 @@ void TrainerSession::train(const TrainerCallbacks& cb) {
     }
     engine_profile_capture_vram();
 
-    if (cfg.steps_per_save != 0 && save_on_stop.load()) {
+    if (save_on_stop.load()) {
         std::lock_guard<std::mutex> lk(engine_mutex);
         save_checkpoint(step);
         log(lfmt(lmsg::checkpoint_saved, {fs::absolute(out_dir).string()}));

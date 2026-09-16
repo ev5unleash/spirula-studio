@@ -980,6 +980,21 @@ SS_MSG(device_error,
     RU("Не удаётся использовать GPU «{0}»: {1}"),
     TR("\"{0}\" GPU'su kullanılamıyor: {1}"));
 
+SS_MSG(device_busy,
+    EN("GPU is reserved by a scheduled job"),
+    JA("GPU はスケジュール済みジョブによって予約されています"),
+    ZH_HANS("GPU 已被计划任务占用"),
+    ZH_HANT("GPU 已被排程工作佔用"),
+    KO("GPU가 예약된 작업에서 사용 중입니다"),
+    DE("Die GPU ist durch einen geplanten Auftrag reserviert"),
+    FR("Le GPU est réservé par une tâche planifiée"),
+    ES("La GPU está reservada por una tarea programada"),
+    PT("A GPU está reservada por uma tarefa agendada"),
+    IT("La GPU è riservata da un'attività pianificata"),
+    NL("De GPU is gereserveerd door een geplande taak"),
+    RU("Графический процессор занят запланированной задачей"),
+    TR("GPU planlanmış bir iş tarafından ayrıldı"));
+
 SS_MSG(device_detail_malformed,
     EN("the request is not a valid device selector"),
     JA("要求が有効なデバイス指定ではありません"),

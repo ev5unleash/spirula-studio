@@ -1,26 +1,18 @@
 #pragma once
 
-// CheckpointIO -- zero-dependency writers for the resumable-checkpoint format.
-//
-// A checkpoint's resume payload is a single POSIX ustar `state.tar` bundling:
-//   * state.json         -- small runtime/validation manifest (written by the
-//                           engine; NOT config -- config lives in config.json)
-//   * <slot_name>.npy    -- one flat, typed NumPy array per saved pool buffer,
-//                           named by its DevicePool slot ("world.means.npy",
-//                           "eng.sh_quant.q.npy", ...).
-//
-// The device->host copy is chunked through a small reusable host buffer, so
-// serializing a multi-GB buffer uses bounded host RAM and ZERO extra device
-// memory (nothing is allocated on the GPU during a save).
-//
-// Phase 2 (load/resume) will add the matching tar + .npy readers here.
+// CheckpointIO -- zero-dependency writers and readers for `state.tar`.
+// The archive contains `state.json` plus one flat, typed NumPy array per
+// saved device-pool slot. Device transfers use a reusable 32 MiB host buffer,
+// keeping checkpoint serialization bounded in host and device memory.
 
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <istream>
+#include <limits>
 #include <ostream>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -86,6 +78,7 @@ inline void tar_write_bytes(std::ostream& out, const std::string& name,
     tar_header(out, name, size);
     out.write(data, size);
     tar_pad(out, size);
+    if (!out) throw std::runtime_error("checkpoint archive write failed");
 }
 
 // --- Two zero blocks terminate the archive. ---
@@ -93,6 +86,8 @@ inline void tar_finish(std::ostream& out) {
     char z[512] = {0};
     out.write(z, 512);
     out.write(z, 512);
+    out.flush();
+    if (!out) throw std::runtime_error("checkpoint archive write failed");
 }
 
 // --- Stream a device buffer as a flat typed .npy member. Chunked D->H copy
@@ -109,17 +104,20 @@ inline void tar_write_npy_device(std::ostream& out, const std::string& name,
     size_t member   = hdr.size() + nbytes;
     tar_header(out, name, member);
     out.write(hdr.data(), (std::streamsize)hdr.size());
+    if (!out) throw std::runtime_error("checkpoint archive write failed");
 
-    constexpr size_t CHUNK = 32u << 20;   // 32 MiB host staging
+    constexpr size_t CHUNK = 32u << 20;
     if (host.size() < std::min(nbytes, CHUNK)) host.resize(std::min(nbytes, CHUNK));
     const char* src = (const char*)dptr;
     for (size_t off = 0; off < nbytes; ) {
         size_t n = std::min(CHUNK, nbytes - off);
         backend::memcpy_sync(host.data(), src + off, n, backend::MemcpyKind::DeviceToHost);
         out.write(host.data(), (std::streamsize)n);
+        if (!out) throw std::runtime_error("checkpoint archive write failed");
         off += n;
     }
     tar_pad(out, member);
+    if (!out) throw std::runtime_error("checkpoint archive write failed");
 }
 
 
@@ -138,34 +136,102 @@ struct TarMember {
 // Index every regular-file member of a ustar stream (no extraction). Handles
 // octal and GNU base-256 size fields. Leaves the stream position undefined.
 inline std::vector<TarMember> tar_index(std::istream& in) {
-    std::vector<TarMember> members;
-    in.clear();
-    in.seekg(0, std::ios::beg);
-    char h[512];
-    while (in.read(h, 512)) {
-        if (h[0] == '\0') break;                       // zero block -> end
-        std::string name(h, ::strnlen(h, 100));
-        uint64_t size = 0;
-        if ((unsigned char)h[124] & 0x80) {            // base-256
-            for (int i = 125; i < 136; ++i) size = (size << 8) | (unsigned char)h[i];
-        } else {                                       // octal
-            for (int i = 124; i < 136 && h[i] >= '0' && h[i] <= '7'; ++i)
-                size = size * 8 + (uint64_t)(h[i] - '0');
+    auto all_zero = [](const char* p) {
+        return std::all_of(p, p + 512, [](char c) { return c == '\0'; });
+    };
+    auto octal = [](const char* p, size_t n) {
+        uint64_t value = 0;
+        bool have_digit = false;
+        bool ended = false;
+        for (size_t i = 0; i < n; ++i) {
+            const unsigned char c = (unsigned char)p[i];
+            if (c == '\0' || c == ' ') {
+                if (have_digit) ended = true;
+                continue;
+            }
+            if (ended || c < '0' || c > '7' ||
+                value > (std::numeric_limits<uint64_t>::max() >> 3))
+                throw std::runtime_error("invalid checkpoint archive header");
+            value = (value << 3) + (c - '0');
+            have_digit = true;
         }
-        uint64_t data_off = (uint64_t)in.tellg();
-        members.push_back({ name, data_off, size });
-        uint64_t skip = (size + 511u) & ~((uint64_t)511u);   // pad to 512
-        in.seekg((std::streamoff)skip, std::ios::cur);
+        if (!have_digit) throw std::runtime_error("invalid checkpoint archive header");
+        return value;
+    };
+
+    in.clear();
+    in.seekg(0, std::ios::end);
+    const std::streamoff end = in.tellg();
+    if (end < 0) throw std::runtime_error("cannot size checkpoint archive");
+    const uint64_t archive_size = (uint64_t)end;
+    in.seekg(0, std::ios::beg);
+    if (!in) throw std::runtime_error("cannot read checkpoint archive");
+
+    std::vector<TarMember> members;
+    for (;;) {
+        const std::streamoff pos = in.tellg();
+        if (pos < 0 || (uint64_t)pos > archive_size ||
+            archive_size - (uint64_t)pos < 512)
+            throw std::runtime_error("truncated checkpoint archive header");
+
+        char h[512];
+        in.read(h, 512);
+        if (in.gcount() != 512)
+            throw std::runtime_error("truncated checkpoint archive header");
+        if (all_zero(h)) {
+            char end_block[512];
+            in.read(end_block, 512);
+            if (in.gcount() != 512 || !all_zero(end_block))
+                throw std::runtime_error("truncated checkpoint archive terminator");
+            break;
+        }
+        if (h[0] == '\0' || std::memcmp(h + 257, "ustar", 5) != 0)
+            throw std::runtime_error("invalid checkpoint archive header");
+
+        const uint64_t expected_checksum = octal(h + 148, 8);
+        uint64_t actual_checksum = 0;
+        for (int i = 0; i < 512; ++i)
+            actual_checksum += (i >= 148 && i < 156)
+                ? (unsigned char)' ' : (unsigned char)h[i];
+        if (actual_checksum != expected_checksum)
+            throw std::runtime_error("checkpoint archive header checksum mismatch");
+
+        uint64_t size = 0;
+        if ((unsigned char)h[124] & 0x80) {
+            for (int i = 125; i < 136; ++i) {
+                if (size > (std::numeric_limits<uint64_t>::max() >> 8))
+                    throw std::runtime_error("checkpoint archive member is too large");
+                size = (size << 8) | (unsigned char)h[i];
+            }
+        } else {
+            size = octal(h + 124, 12);
+        }
+
+        const uint64_t data_off = (uint64_t)pos + 512;
+        if (size > std::numeric_limits<uint64_t>::max() - 511)
+            throw std::runtime_error("checkpoint archive member is too large");
+        const uint64_t padded = (size + 511) & ~uint64_t{511};
+        if (data_off > archive_size || padded > archive_size - data_off)
+            throw std::runtime_error("truncated checkpoint archive member");
+
+        if (h[156] == '\0' || h[156] == '0')
+            members.push_back({std::string(h, ::strnlen(h, 100)), data_off, size});
+        in.seekg((std::streamoff)(data_off + padded), std::ios::beg);
+        if (!in) throw std::runtime_error("cannot read checkpoint archive");
     }
     return members;
 }
 
 // Read a whole small member (e.g. state.json) into a string.
 inline std::string tar_read_member(std::istream& in, const TarMember& m) {
-    std::string s(m.size, '\0');
+    if (m.size > (uint64_t)std::numeric_limits<std::streamsize>::max())
+        throw std::runtime_error("checkpoint archive member is too large");
+    std::string s((size_t)m.size, '\0');
     in.clear();
     in.seekg((std::streamoff)m.data_offset, std::ios::beg);
-    in.read(&s[0], (std::streamsize)m.size);
+    if (!in) throw std::runtime_error("cannot read checkpoint archive member");
+    if (!s.empty()) in.read(s.data(), (std::streamsize)s.size());
+    if (!in) throw std::runtime_error("truncated checkpoint archive member");
     return s;
 }
 
@@ -177,37 +243,81 @@ struct NpyInfo {
     std::string descr;         // e.g. "<f4"
 };
 inline NpyInfo npy_locate(std::istream& in, uint64_t npy_start, uint64_t member_size) {
+    if (member_size < 10)
+        throw std::runtime_error("truncated checkpoint NumPy header");
     in.clear();
     in.seekg((std::streamoff)npy_start, std::ios::beg);
+    if (!in) throw std::runtime_error("cannot read checkpoint NumPy header");
+
     char pre[10];
-    in.read(pre, 10);                                  // magic(6) + ver(2) + ...
-    uint8_t major = (uint8_t)pre[6];
+    in.read(pre, 10);
+    if (!in || std::memcmp(pre, "\x93NUMPY", 6) != 0)
+        throw std::runtime_error("invalid checkpoint NumPy header");
+    const uint8_t major = (uint8_t)pre[6];
     uint32_t hlen;
     uint32_t prefix;
-    if (major >= 2) {                                  // v2/v3: 4-byte hlen
-        // pre[8..9] are the first 2 bytes of a 4-byte length; read 2 more.
-        char more[2]; in.read(more, 2);
+    if (major == 2 || major == 3) {
+        if (member_size < 12)
+            throw std::runtime_error("truncated checkpoint NumPy header");
+        char more[2];
+        in.read(more, 2);
+        if (!in) throw std::runtime_error("truncated checkpoint NumPy header");
         hlen = (uint8_t)pre[8] | ((uint8_t)pre[9] << 8)
              | ((uint8_t)more[0] << 16) | ((uint8_t)more[1] << 24);
         prefix = 12;
-    } else {                                           // v1: 2-byte hlen
+    } else if (major == 1) {
         hlen = (uint8_t)pre[8] | ((uint8_t)pre[9] << 8);
         prefix = 10;
+    } else {
+        throw std::runtime_error("unsupported checkpoint NumPy version");
     }
+    if ((uint64_t)prefix + hlen > member_size)
+        throw std::runtime_error("truncated checkpoint NumPy header");
+
     std::string dict(hlen, '\0');
-    in.read(&dict[0], hlen);
+    if (!dict.empty()) in.read(dict.data(), hlen);
+    if (!in) throw std::runtime_error("truncated checkpoint NumPy header");
     std::string descr;
-    size_t d = dict.find("'descr':");
+    const size_t d = dict.find("'descr':");
     if (d != std::string::npos) {
-        size_t q1 = dict.find('\'', d + 8);
-        size_t q2 = (q1 == std::string::npos) ? q1 : dict.find('\'', q1 + 1);
+        const size_t q1 = dict.find('\'', d + 8);
+        const size_t q2 = q1 == std::string::npos
+            ? q1 : dict.find('\'', q1 + 1);
         if (q2 != std::string::npos) descr = dict.substr(q1 + 1, q2 - q1 - 1);
     }
-    NpyInfo info;
-    info.data_offset = npy_start + prefix + hlen;
-    info.data_bytes  = member_size - (prefix + hlen);
-    info.descr       = descr;
-    return info;
+    size_t element_size = 0;
+    for (int tag = 0; tag < (int)NpyScalar::b1 + 1; ++tag) {
+        const auto [candidate, size] = npy_scalar_descr((NpyScalar)tag);
+        if (descr == candidate) {
+            element_size = size;
+            break;
+        }
+    }
+    if (element_size == 0)
+        throw std::runtime_error("unsupported checkpoint NumPy dtype");
+
+    const std::string shape_key = "'shape': (";
+    size_t p = dict.find(shape_key);
+    if (p == std::string::npos)
+        throw std::runtime_error("invalid checkpoint NumPy shape");
+    p += shape_key.size();
+    uint64_t numel = 0;
+    bool have_digit = false;
+    while (p < dict.size() && dict[p] >= '0' && dict[p] <= '9') {
+        const uint64_t digit = (uint64_t)(dict[p++] - '0');
+        if (numel > (std::numeric_limits<uint64_t>::max() - digit) / 10)
+            throw std::runtime_error("checkpoint NumPy shape is too large");
+        numel = numel * 10 + digit;
+        have_digit = true;
+    }
+    if (!have_digit || p >= dict.size() || dict[p] != ',')
+        throw std::runtime_error("invalid checkpoint NumPy shape");
+
+    const uint64_t data_bytes = member_size - (prefix + hlen);
+    if (numel > std::numeric_limits<uint64_t>::max() / element_size ||
+        numel * element_size != data_bytes)
+        throw std::runtime_error("checkpoint NumPy shape does not match its data");
+    return {npy_start + prefix + hlen, data_bytes, descr};
 }
 
 // Stream `nbytes` from `in` (positioned via seek to `offset`) into a device
@@ -216,12 +326,14 @@ inline void read_into_device(std::istream& in, uint64_t offset,
                              void* dptr, size_t nbytes, std::vector<char>& host) {
     in.clear();
     in.seekg((std::streamoff)offset, std::ios::beg);
+    if (!in) throw std::runtime_error("cannot read checkpoint array");
     constexpr size_t CHUNK = 32u << 20;
     if (host.size() < std::min(nbytes, CHUNK)) host.resize(std::min(nbytes, CHUNK));
     char* dst = (char*)dptr;
     for (size_t off = 0; off < nbytes; ) {
         size_t n = std::min(CHUNK, nbytes - off);
         in.read(host.data(), (std::streamsize)n);
+        if (!in) throw std::runtime_error("truncated checkpoint array");
         backend::memcpy_sync(dst + off, host.data(), n, backend::MemcpyKind::HostToDevice);
         off += n;
     }

@@ -743,6 +743,22 @@ std::string device_selection_error() {
     return vk::selection_error();
 }
 
+std::string device_resolve_identity(const char* selector) {
+    if (!selector || !selector[0]) {
+        vk::set_selection_error("device selector is empty");
+        return {};
+    }
+    const auto& list = vk::enumerate_devices();
+    const spirula::vkselect::Resolution res =
+        spirula::vkselect::resolveSelector(selector, list);
+    if (!res.ok()) {
+        vk::set_selection_error(res.error);
+        return {};
+    }
+    vk::set_selection_error({});
+    return res.selector;
+}
+
 std::string device_selector(int index) {
     const auto& list = vk::enumerate_devices();
     if (index < 0 || index >= (int)list.size()) return std::string();

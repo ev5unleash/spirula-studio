@@ -85,6 +85,13 @@ endif()
 list(APPEND SS_TOOL_SOURCES ${SS_SRC}/app/cli/main.cpp)
 list(APPEND SS_TOOL_DEFS SS_TOOL_TRAIN=1)
 
+# ---- scheduler worker: one phase per process ----
+# Always on; the dispatcher stubs out phases its build lacks.
+list(APPEND SS_TOOL_SOURCES
+     ${SS_SRC}/app/cli/worker_main.cpp
+     ${SS_SRC}/app/WorkerRequest.cpp)
+list(APPEND SS_TOOL_DEFS SS_TOOL_WORKER=1)
+
 # ---- mesh extraction ----
 # Both backends: the host side is portable (mesh/OccupancyEvaluator.cpp) and
 # each has kernels (mesh/Meshing.cu, backend/vulkan/kernels/Meshing.cpp).

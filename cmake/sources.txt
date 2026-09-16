@@ -40,6 +40,9 @@ src/data/parsers/*.cpp
 src/app/webviewer/*.cpp
 src/app/TrainerCore.cpp
 src/app/EvalMetrics.cpp
+src/app/OutputLease.cpp
+src/app/Subprocess.cpp
+src/app/JobScheduler.cpp
 src/external/*.cpp
 src/external/*.c
 
@@ -56,5 +59,8 @@ src/data/parsers/*.cpp
 src/app/webviewer/*.cpp
 src/app/TrainerCore.cpp
 src/app/EvalMetrics.cpp
+src/app/OutputLease.cpp
+src/app/Subprocess.cpp
+src/app/JobScheduler.cpp
 src/external/*.cpp
 src/external/*.c

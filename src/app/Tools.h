@@ -55,6 +55,9 @@ constexpr const char* kToolSfm   = "sfm";
 constexpr const char* kToolSam   = "sam";
 constexpr const char* kToolGeometry = "geometry";
 constexpr const char* kToolGui   = "gui";
+// One scheduled phase. Not in --help: the scheduler is the producer, not a
+// human being at a terminal.
+constexpr const char* kToolWorker = "worker";
 
 }  // namespace app
 
@@ -75,4 +78,7 @@ int spirula_geometry_main(int argc, char** argv);
 #endif
 #ifdef SS_TOOL_GUI
 int spirula_gui_main(int argc, char** argv);
+#endif
+#ifdef SS_TOOL_WORKER
+int spirula_worker_main(int argc, char** argv);
 #endif

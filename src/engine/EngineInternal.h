@@ -143,6 +143,7 @@ void _engine_bilagrid_backward_hook(
     TorchTensorView v_ref_depth,
     TorchTensorView v_ref_normal);
 void _ensure_bilagrid_optim_state();
+void _ensure_bg_sh_optim_state();
 void _engine_bilagrid_tv_into(float* tv_buf3_device);
 
 // Background blend: forward runs inside forward_3dgs, out of place, so viewer

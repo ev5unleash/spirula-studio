@@ -1,42 +1,37 @@
 #pragma once
 
-// Minimal cross-platform subprocess runner for the GUI's external tools
-// (colmap, ffmpeg). Streams merged stdout+stderr line-by-line to a callback
-// and supports cooperative cancellation (the process is killed).
-
-#include <atomic>
-#include <functional>
-#include <string>
-#include <vector>
+#include "app/Subprocess.h"
 
 namespace gui {
 
-// Exit codes returned by run_process in addition to the child's own.
-constexpr int kSpawnFailed = -1;   // executable not found / spawn error
-constexpr int kCancelled   = -2;   // cancel flag was set; process killed
+constexpr int kSpawnFailed = -1;
+constexpr int kCancelled   = -2;
 
-// Runs argv[0] with argv[1..] as arguments, working directory `cwd` ("" =
-// inherit). stderr is merged into stdout; each completed line is passed to
-// on_line (without the newline). `cancel` is polled ~10x per second.
-// Blocking -- call from a worker thread.
-int run_process(const std::vector<std::string>& argv,
-                const std::string& cwd,
-                const std::function<void(const std::string&)>& on_line,
-                const std::atomic<bool>& cancel);
+inline int run_process(const std::vector<std::string>& argv,
+                       const std::string& cwd,
+                       const std::function<void(const std::string&)>& on_line,
+                       const std::atomic<bool>& cancel) {
+    app::proc::ProcessOptions opts;
+    opts.argv = argv;
+    opts.cwd = cwd;
+    opts.on_line = on_line;
+    opts.cancel = &cancel;
+    app::proc::ProcessResult res = app::proc::run_process(opts);
+    if (res.outcome == app::proc::ProcessOutcome::Cancelled) return kCancelled;
+    if (res.outcome == app::proc::ProcessOutcome::SpawnFailed) return kSpawnFailed;
+    return res.exit_code;
+}
 
-// True when `exe` resolves to an executable (PATH search like the shell).
-bool command_exists(const std::string& exe);
+inline bool command_exists(const std::string& exe) {
+    return app::proc::command_exists(exe);
+}
 
-// Splits a free-form flag string the way a shell would for the simple cases:
-// whitespace separated, with "quoted runs" kept together. Enough for
-// `--max-error 2 --masks "/path/with space"`. This is what the runners' "extra
-// arguments" fields go through before becoming argv entries.
-std::vector<std::string> split_args(const std::string& s);
+inline std::vector<std::string> split_args(const std::string& s) {
+    return app::proc::split_args(s);
+}
 
-// Hands a URL to the desktop's default browser and returns immediately. False
-// when nothing could be launched (a headless session, no xdg-open), which is
-// the caller's cue to fall back to showing the address. Never blocks and never
-// waits for the browser to exit.
-bool open_url(const std::string& url);
+inline bool open_url(const std::string& url) {
+    return app::proc::open_url(url);
+}
 
 }  // namespace gui

@@ -92,6 +92,15 @@ const Tool* find_tool(const char* name) {
     if (!name) return nullptr;
     for (const Tool& t : tools())
         if (std::strcmp(t.name, name) == 0) return &t;
+    // The worker runs exactly one phase from a JSON request -- not a human
+    // surface, so it does not appear in the table above and its summary would
+    // not translate anyway.
+#ifdef SS_TOOL_WORKER
+    if (std::strcmp(name, app::kToolWorker) == 0) {
+        static const Tool w{app::kToolWorker, nullptr, spirula_worker_main};
+        return &w;
+    }
+#endif
     return nullptr;
 }
 

@@ -69,7 +69,7 @@ void engine_init_background_sh(int sh_degree, int splat_transfer,
 // Helpers
 // ============================================================================
 
-static void _ensure_bg_sh_optim_state() {
+void _ensure_bg_sh_optim_state() {
     auto& bg = engine().background;
     if (bg.sh_optim_initialized) return;
     if (bg.mode != EngineBackground::Mode::Sh) return;

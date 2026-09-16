@@ -55,6 +55,7 @@ struct BatchJob {
     // screen picks when a dataset is opened. Each run still lands in its own
     // timestamped subfolder of this, so two rows sharing one folder is fine.
     std::string output_dir;
+    std::string device;          // canonical scheduled target; empty = auto
 
     // Per-row overrides of the three flags that get changed often enough that
     // making a whole preset for each combination is the wrong shape of work.
@@ -73,6 +74,7 @@ struct BatchJob {
     Status status = Status::Pending;
 
     // Filled as the row runs. `message` is engine text (English).
+    std::string scheduler_id;
     std::string message;
     std::string out_dir;      // where it actually wrote
     int steps = 0;
@@ -100,6 +102,10 @@ std::vector<BatchIssue> batch_check(const BatchJob& job,
 // re-checked here because the file can go away in between.
 bool batch_build_config(const BatchJob& job, TrainConfig& cfg,
                         std::string& preset_base, std::string& error);
+
+// Serialize a resolved config for `spirula worker`; every field is explicit so
+// worker parsing cannot reapply a macro or inherit GUI state.
+std::vector<std::string> batch_config_args(const TrainConfig& cfg);
 
 // The list, kept across sessions in <config_dir>/batch.json. A queue that is
 // worth setting up is worth surviving a restart, and losing it to a crash

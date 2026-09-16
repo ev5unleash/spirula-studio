@@ -52,6 +52,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 
 namespace fs = std::filesystem;
 namespace i18n = spirula::i18n;
@@ -169,9 +170,18 @@ std::vector<std::string> video_dialog_filters() {
 // Lifecycle + persistence
 // ===========================================================================
 
-GuiApp::GuiApp() {
+GuiApp::GuiApp()
+    : _scheduler(app::config_dir(), app::exe_path()) {
     load_settings();
     _batch = load_batch_list();
+    _scheduler.set_event_callback([this](const app::sched::Event& e) {
+        if (!e.line.empty()) log("[" + e.job_id + "] " + e.line, true);
+    });
+    _scheduler.set_device_validator(
+        [this](const std::string& device, std::string& error) {
+            return validate_scheduled_device(device, error);
+        });
+    _scheduler.load();
     apply_preset("3dgs");
     // Built-in when it is there, COLMAP when it is not; effective_engine()
     // overrides this anyway if the stored choice is unavailable.
@@ -185,6 +195,7 @@ GuiApp::GuiApp() {
 GuiApp::~GuiApp() = default;
 
 void GuiApp::shutdown() {
+    _scheduler.shutdown();
     save_settings();
     save_batch_list(_batch);
     _batch_active = false;
@@ -588,6 +599,7 @@ void GuiApp::append_logs() {
     for (auto& s : _mesh.drain_log()) log(s);
     for (auto& s : _download.drain_log()) log(s);
     for (auto& s : _font_download.drain_log()) log(s);
+    _scheduler.drain_events();
     // A finished font download is the one thing besides a language switch
     // that changes what the atlas should hold; GuiMain rebuilds it between
     // frames.
@@ -605,8 +617,39 @@ void GuiApp::append_logs() {
 
 bool GuiApp::training_busy() const {
     TrainRunner::Phase ph = _runner.phase();
-    return ph == TrainRunner::Phase::Training ||
-           ph == TrainRunner::Phase::Preparing;
+    if (ph == TrainRunner::Phase::Training || ph == TrainRunner::Phase::Preparing)
+        return true;
+    return false;
+}
+
+bool GuiApp::foreground_device_in_use() const {
+    return native_work_busy() || _runner.engine_ready() ||
+           _compare.holds_engine() || _mesh_preview_open ||
+           _segment.is_open() || _geometry_panel.is_open();
+}
+
+std::string GuiApp::desktop_device_selector() const {
+#ifdef SS_BACKEND_VULKAN
+    return _native_device_uuid;
+#else
+    return _cuda_device_locked && _cuda_device_index >= 0
+               ? std::to_string(_cuda_device_index) : std::string();
+#endif
+}
+
+bool GuiApp::reserve_foreground_device() {
+    const std::string device = desktop_device_selector();
+    if (device.empty() || _scheduler.try_reserve_foreground_device(device))
+        return true;
+    _native_device_error = spirula::i18n::format(
+        msg::device_error, {device, msg::device_busy.get()});
+    log(_native_device_error);
+    return false;
+}
+
+void GuiApp::update_scheduler_admission() {
+    _scheduler.set_foreground_device(
+        foreground_device_in_use() ? desktop_device_selector() : std::string());
 }
 
 void GuiApp::apply_preset(const std::string& preset) {
@@ -797,14 +840,15 @@ void GuiApp::request_go_home() {
 // frame() attaches the viewport once the splats are on the device.
 void GuiApp::open_splat(std::string path) {
     if (path.empty() || native_work_busy()) return;
-    clear_log();
-    close_native_previews();
-    close_splat();
 #ifdef SS_BACKEND_VULKAN
     if (!freeze_native_device()) return;
 #else
     if (!freeze_cuda_device()) return;
 #endif
+    if (!reserve_foreground_device()) return;
+    clear_log();
+    close_native_previews();
+    close_splat();
     app::set_crash_note("opening model " + path);
     close_mesh_preview();
     detach_session_views();
@@ -818,12 +862,13 @@ void GuiApp::open_splat(std::string path) {
 
 void GuiApp::add_splat(std::string path) {
     if (path.empty() || native_work_busy()) return;
-    close_native_previews();
 #ifdef SS_BACKEND_VULKAN
     if (!freeze_native_device()) return;
 #else
     if (!freeze_cuda_device()) return;
 #endif
+    if (!reserve_foreground_device()) return;
+    close_native_previews();
     _compare.add(path);
     add_model_recent(path);
     remember_dir("model", path);
@@ -855,13 +900,14 @@ void GuiApp::close_native_previews() {
 
 void GuiApp::launch_training(const TrainConfig& cfg, const std::string& preset) {
     if (cfg.data.empty() || native_work_busy()) return;
-    close_native_previews();
-    close_splat();
 #ifdef SS_BACKEND_VULKAN
     if (!freeze_native_device()) return;
 #else
     if (!freeze_cuda_device()) return;
 #endif
+    if (!reserve_foreground_device()) return;
+    close_native_previews();
+    close_splat();
     app::set_crash_note("training " + cfg.data);
     close_mesh_preview();
     detach_session_views();
@@ -936,6 +982,7 @@ void GuiApp::add_batch_row(const std::string& dataset) {
     j.dataset = dataset;
     j.preset_path = _preset_file;
     j.preset_name = _preset_file.empty() ? _preset : _preset_display;
+    j.device = _scheduled_device_request;
     _batch.push_back(std::move(j));
     _batch_dirty = true;
     _batch_checked = false;
@@ -982,87 +1029,136 @@ void GuiApp::start_batch(bool skip_invalid) {
     for (BatchJob& j : _batch) {
         j.status = batch_has_error(j) ? BatchJob::Status::Skipped
                                       : BatchJob::Status::Pending;
+        j.scheduler_id.clear();
         j.message.clear();
         j.out_dir.clear();
         j.steps = 0;
     }
+    int submitted = 0;
+    for (BatchJob& j : _batch) {
+        if (j.status == BatchJob::Status::Skipped) continue;
+        TrainConfig cfg;
+        std::string base, error;
+        if (!batch_build_config(j, cfg, base, error)) {
+            j.status = BatchJob::Status::Failed;
+            j.message = error;
+            continue;
+        }
+        std::error_code ec;
+        auto absolute = [&ec](std::string& path) {
+            if (path.empty()) return;
+            const fs::path p = fs::absolute(fs::u8path(path), ec);
+            if (!ec) path = p.u8string();
+            ec.clear();
+        };
+        absolute(cfg.data);
+        absolute(cfg.output_dir_prefix);
+        absolute(cfg.resume);
+
+        const std::string request = j.device.empty() ? _scheduled_device_request
+                                                      : j.device;
+        std::string device, device_name, device_error;
+        if (!resolve_scheduled_device(request, device, device_name,
+                                      device_error)) {
+            j.status = BatchJob::Status::Failed;
+            j.message = device_error;
+            continue;
+        }
+
+        app::sched::SubmitOpts o;
+        o.phase = "train";
+        o.device = device;
+        o.device_name = device_name;
+        o.work_dir = fs::current_path(ec).u8string();
+        o.args = batch_config_args(cfg);
+        j.scheduler_id = _scheduler.submit(o);
+        if (j.scheduler_id.empty()) {
+            j.status = BatchJob::Status::Failed;
+            j.message = "could not create scheduled job";
+            continue;
+        }
+        submitted++;
+    }
     _batch_dirty = false;
     save_batch_list(_batch);
 
-    _batch_active = true;
-    _batch_launched = false;
-    _batch_current = -1;
-    _batch_stop_after = false;
-    _batch_stop_now = false;
-    _batch_msg = i18n::format(msg::batch_log_started, {(long long)runnable});
-    _batch_msg_err = false;
-    log(_batch_msg);
-    // The run is worth watching even when nobody has to: same viewport, same
-    // metrics, same log as a hand-started one.
-    _screen = Screen::Train;
-}
-
-void GuiApp::advance_batch() {
-    if (!_batch_active) return;
-
-    if (_batch_launched) {
-        const TrainRunner::Phase ph = _runner.phase();
-        if (ph == TrainRunner::Phase::Preparing ||
-            ph == TrainRunner::Phase::Training)
-            return;   // still going
-        if (_batch_current < 0 || _batch_current >= (int)_batch.size()) {
-            finish_batch();   // the list moved under us; nothing to record
-            return;
-        }
-
-        BatchJob& j = _batch[_batch_current];
-        const long long n = _batch_current + 1;
-        if (ph == TrainRunner::Phase::Done && !_batch_stop_now) {
-            j.status = BatchJob::Status::Done;
-            j.steps = _runner.latest_progress().step + 1;
-            if (auto* s = _runner.session()) j.out_dir = s->out_dir.string();
-            log(i18n::format(msg::batch_log_job_done, {n, j.out_dir}));
-        } else if (ph == TrainRunner::Phase::Done) {
-            j.status = BatchJob::Status::Stopped;
-            log(i18n::format(msg::batch_log_job_stopped, {n}));
-        } else {
-            // Anything the pipeline threw: an unreadable dataset, an OOM, a
-            // driver fault. Recorded on the row and left behind -- the point
-            // of a queue is that the next dataset still gets its turn.
-            j.status = BatchJob::Status::Failed;
-            j.message = _runner.error();
-            log(i18n::format(msg::batch_log_job_failed, {n, j.message}));
-        }
-        _batch_launched = false;
-        _batch_current = -1;
-        if (_batch_stop_after) { finish_batch(); return; }
-    }
-
-    int next = -1;
-    for (int i = 0; i < (int)_batch.size(); i++)
-        if (_batch[i].status == BatchJob::Status::Pending) { next = i; break; }
-    if (next < 0) { finish_batch(); return; }
-
-    BatchJob& j = _batch[next];
-    TrainConfig cfg;
-    std::string base, error;
-    if (!batch_build_config(j, cfg, base, error)) {
-        // The preset went missing between the pre-flight and now. Same
-        // treatment as any other failure; the loop picks up the next row on
-        // the following frame.
-        j.status = BatchJob::Status::Failed;
-        j.message = error;
-        log(i18n::format(msg::batch_log_job_failed,
-                         {(long long)(next + 1), error}));
+    if (submitted == 0) {
+        _batch_msg = msg::batch_no_runnable.get();
+        _batch_msg_err = true;
         return;
     }
 
-    j.status = BatchJob::Status::Running;
-    _batch_current = next;
-    _batch_launched = true;
-    log(i18n::format(msg::batch_log_job_start,
-                     {(long long)(next + 1), j.dataset}));
-    launch_training(cfg, base);
+    _scheduler.pause_dispatch(false);
+    _batch_active = true;
+    _batch_current = -1;
+    _batch_msg = i18n::format(msg::batch_log_started, {(long long)submitted});
+    _batch_msg_err = false;
+    log(_batch_msg);
+    _screen = Screen::Batch;
+}
+
+void GuiApp::advance_batch() {
+    _scheduler_jobs = _scheduler.list();
+    int active = -1;
+    bool live = false;
+    for (size_t i = 0; i < _batch.size(); ++i) {
+        BatchJob& row = _batch[i];
+        if (row.scheduler_id.empty()) continue;
+        const app::sched::Job* scheduled = nullptr;
+        for (const auto& job : _scheduler_jobs)
+            if (job.job_id == row.scheduler_id) { scheduled = &job; break; }
+        if (!scheduled) {
+            row.status = BatchJob::Status::Failed;
+            row.message = "scheduled job was not found";
+            continue;
+        }
+        if (!scheduled->output_dir.empty()) row.out_dir = scheduled->output_dir;
+        else if (!scheduled->run_dir.empty()) row.out_dir = scheduled->run_dir;
+        switch (scheduled->state) {
+            case app::sched::JobState::Queued:
+                row.status = BatchJob::Status::Pending;
+                live = true;
+                break;
+            case app::sched::JobState::Starting:
+            case app::sched::JobState::Running:
+            case app::sched::JobState::Stopping:
+                row.status = BatchJob::Status::Running;
+                live = true;
+                if (active < 0) active = (int)i;
+                break;
+            case app::sched::JobState::Succeeded:
+                row.status = BatchJob::Status::Done;
+                break;
+            case app::sched::JobState::Stopped:
+                row.status = BatchJob::Status::Stopped;
+                row.message = scheduled->error;
+                break;
+            case app::sched::JobState::Failed:
+            case app::sched::JobState::Interrupted:
+            case app::sched::JobState::Blocked:
+                row.status = BatchJob::Status::Failed;
+                row.message = scheduled->error;
+                break;
+        }
+    }
+    if (_scheduler.dispatch_paused() && active < 0) {
+        for (const BatchJob& row : _batch) {
+            if (row.scheduler_id.empty()) continue;
+            for (const auto& job : _scheduler_jobs) {
+                if (job.job_id == row.scheduler_id &&
+                    job.state == app::sched::JobState::Queued) {
+                    _scheduler.cancel(row.scheduler_id);
+                    break;
+                }
+            }
+        }
+    }
+    _batch_current = active;
+    if (live) {
+        _batch_active = true;
+    } else if (_batch_active) {
+        finish_batch();
+    }
 }
 
 void GuiApp::finish_batch() {
@@ -1073,10 +1169,8 @@ void GuiApp::finish_batch() {
         else other++;
     }
     _batch_active = false;
-    _batch_launched = false;
+    _scheduler.pause_dispatch(false);
     _batch_current = -1;
-    _batch_stop_after = false;
-    _batch_stop_now = false;
     _batch_msg = i18n::format(msg::batch_log_summary,
                               {(long long)done, (long long)failed,
                                (long long)other});
@@ -1084,13 +1178,15 @@ void GuiApp::finish_batch() {
     log(_batch_msg);
 }
 
-void GuiApp::cancel_batch() {
+void GuiApp::cancel_batch(bool save) {
     if (!_batch_active) return;
-    if (_batch_current >= 0 && _batch_current < (int)_batch.size())
-        _batch[_batch_current].status = BatchJob::Status::Stopped;
-    _batch_launched = false;
-    _batch_current = -1;
-    finish_batch();
+    _scheduler.pause_dispatch(true);
+    for (const BatchJob& row : _batch) {
+        if (row.scheduler_id.empty()) continue;
+        _scheduler.cancel(row.scheduler_id);
+        if (save) _scheduler.stop_and_save(row.scheduler_id);
+        else      _scheduler.force_stop(row.scheduler_id);
+    }
 }
 
 static bool is_image_ext(const fs::path& p) {
@@ -1952,6 +2048,7 @@ void GuiApp::frame() {
     _scale.update(ImGui::GetIO().DisplaySize);
 
     append_logs();
+    update_scheduler_admission();
     run_pending_if_stopped();
     // vit-giant2 is two files, and so is ALIKED with LightGlue: both fetches
     // are queues, stepped on from somewhere that runs whatever screen is up.
@@ -2584,9 +2681,14 @@ void GuiApp::start_dataset_job() {
         log(dmsg::sensors_reading.get());
         return;
     }
+#ifdef SS_BACKEND_VULKAN
+    if (!freeze_native_device()) return;
+#else
+    if (!freeze_cuda_device()) return;
+#endif
+    if (!reserve_foreground_device()) return;
     close_native_previews();
     close_splat();
-    if (!freeze_native_device()) return;
     app::set_crash_note("building dataset " + _workspace);
     sync_dataset_jobs();
     const std::string stamp = run_log_stamp();
@@ -3501,23 +3603,7 @@ bool GuiApp::freeze_native_device() {
             log(_native_device_error);
             return false;
         }
-#ifdef SS_BACKEND_VULKAN
-        if (!backend::device_select_identity(res.selector.c_str())) {
-            diagnostic = backend::device_selection_error();
-            if (diagnostic.empty()) detail = &msg::device_unusable_native;
-        }
-#endif
-        if (!detail && diagnostic.empty()) {
-            try {
-                nn::configure_device(res.selector);
-            } catch (const std::exception& e) {
-                _native_device_error = spirula::i18n::format(
-                    msg::device_error, {requested, e.what()});
-                log(_native_device_error);
-                return false;
-            }
-            uuid = nn::configured_device_selector();
-        }
+        uuid = res.selector;
     }
 #elif defined(SS_TOOL_SFM)
     const spirula::vkselect::Resolution res = VkContext::resolveSelector(req);
@@ -3526,18 +3612,9 @@ bool GuiApp::freeze_native_device() {
 #elif defined(SS_BACKEND_VULKAN)
     if (req.kind == spirula::vkselect::Request::Kind::Malformed) {
         detail = &msg::device_detail_malformed;
-    } else if (!backend::device_select_identity(requested.c_str())) {
-        diagnostic = backend::device_selection_error();
-        if (diagnostic.empty()) detail = &msg::device_unusable_native;
     } else {
-        uuid = backend::device_current_selector();
-    }
-#endif
-#if defined(SS_BACKEND_VULKAN)
-    if (!detail && !uuid.empty() &&
-        !backend::device_select_identity(uuid.c_str())) {
+        uuid = backend::device_resolve_identity(requested.c_str());
         diagnostic = backend::device_selection_error();
-        if (diagnostic.empty()) detail = &msg::device_unusable_native;
     }
 #endif
     if (!detail && !diagnostic.empty()) {
@@ -3554,6 +3631,40 @@ bool GuiApp::freeze_native_device() {
         log(_native_device_error);
         return false;
     }
+
+    const bool had_foreground = foreground_device_in_use();
+    if (!_scheduler.try_reserve_foreground_device(uuid)) {
+        _native_device_error = spirula::i18n::format(
+            msg::device_error, {requested, msg::device_busy.get()});
+        log(_native_device_error);
+        return false;
+    }
+    auto release_reservation = [&] {
+        if (!had_foreground) _scheduler.set_foreground_device("");
+    };
+#if defined(SS_BACKEND_VULKAN)
+    if (!backend::device_select_identity(uuid.c_str())) {
+        diagnostic = backend::device_selection_error();
+        release_reservation();
+        _native_device_error = spirula::i18n::format(
+            msg::device_error,
+            {requested, diagnostic.empty() ? msg::device_unusable_native.get()
+                                           : diagnostic});
+        log(_native_device_error);
+        return false;
+    }
+#endif
+#if defined(SS_BUILD_SAM)
+    try {
+        nn::configure_device(uuid);
+    } catch (const std::exception& e) {
+        release_reservation();
+        _native_device_error = spirula::i18n::format(
+            msg::device_error, {requested, e.what()});
+        log(_native_device_error);
+        return false;
+    }
+#endif
 
     _native_device_uuid = uuid;
     // The driver's name for the resolved device, for the display line and the
@@ -3579,7 +3690,20 @@ bool GuiApp::freeze_cuda_device() {
     const int n = backend::device_count();
     const int current = backend::device_current();
     if (n <= 0 || current < 0 || current >= n ||
-        !backend::device_select(current)) {
+        !backend::device_info(current).usable) {
+        log(msg::no_device_found.get());
+        return false;
+    }
+    const std::string device = std::to_string(current);
+    const bool had_foreground = foreground_device_in_use();
+    if (!_scheduler.try_reserve_foreground_device(device)) {
+        _native_device_error = spirula::i18n::format(
+            msg::device_error, {device, msg::device_busy.get()});
+        log(_native_device_error);
+        return false;
+    }
+    if (!backend::device_select(current)) {
+        if (!had_foreground) _scheduler.set_foreground_device("");
         log(msg::no_device_found.get());
         return false;
     }
@@ -3612,12 +3736,17 @@ void GuiApp::open_mask_preview() {
         log(dmsg::sensors_reading.get());
         return;
     }
+#ifdef SS_BACKEND_VULKAN
+    if (!freeze_native_device()) return;
+#else
+    if (!freeze_cuda_device()) return;
+#endif
+    if (!reserve_foreground_device()) return;
     // A preview decodes and segments on the GPU, so it is a GPU-consuming
     // operation like the run itself: it freezes the same one choice first.
     // The other preview owns the same process-wide inference pool.
     close_native_previews();
     close_splat();
-    if (!freeze_native_device()) return;
     _segment.open(preview_source((size_t)_mask_preview_input),
                   _mask_enable ? selected_model_path() : "");
 }
@@ -3868,11 +3997,16 @@ void GuiApp::open_geometry_preview() {
         log(dmsg::sensors_reading.get());
         return;
     }
+#ifdef SS_BACKEND_VULKAN
+    if (!freeze_native_device()) return;
+#else
+    if (!freeze_cuda_device()) return;
+#endif
+    if (!reserve_foreground_device()) return;
     // One multi-gigabyte backbone at a time: the mask preview holds SAM and
     // this one holds Metric3D, and the inference layer's pool is process-wide.
     close_native_previews();
     close_splat();
-    if (!freeze_native_device()) return;
     const size_t idx =
         _sources.empty() ? 0
                          : std::min((size_t)_mask_preview_input,
@@ -5379,13 +5513,14 @@ bool GuiApp::mesh_dataset_found() {
 
 void GuiApp::start_meshing() {
     if (_mesh_job.checkpoint.empty() || native_work_busy()) return;
-    close_native_previews();
-    close_splat();
 #ifdef SS_BACKEND_VULKAN
     if (!freeze_native_device()) return;
 #else
     if (!freeze_cuda_device()) return;
 #endif
+    if (!reserve_foreground_device()) return;
+    close_native_previews();
+    close_splat();
 #ifndef SS_BACKEND_VULKAN
     _mesh_job.cuda_device = _cuda_device_index;
 #endif
@@ -5402,13 +5537,14 @@ void GuiApp::close_mesh_preview() {
 void GuiApp::open_mesh_preview() {
     const std::string out = _mesh.output_path();
     if (out.empty()) return;
-    close_native_previews();
-    close_splat();
 #ifdef SS_BACKEND_VULKAN
     if (!freeze_native_device()) return;
 #else
     if (!freeze_cuda_device()) return;
 #endif
+    if (!reserve_foreground_device()) return;
+    close_native_previews();
+    close_splat();
     // Whatever else had the engine (a file opened from the viewer screen) has
     // to let go before the splats take it.
     if (!training_busy()) {
@@ -5650,6 +5786,156 @@ void GuiApp::draw_mesh() {
 // can come back to rather than something you have to watch.
 // ===========================================================================
 
+bool GuiApp::resolve_scheduled_device(const std::string& request,
+                                      std::string& device,
+                                      std::string& device_name,
+                                      std::string& error) {
+    device.clear();
+    device_name.clear();
+    error.clear();
+#ifdef SS_BACKEND_VULKAN
+    load_native_devices();
+    int best = -1;
+    if (!request.empty() && request != "auto") {
+        for (size_t i = 0; i < _native_devices.size(); ++i) {
+            const NativeDeviceRow& d = _native_devices[i];
+            if (d.uuid == request) { best = (int)i; break; }
+        }
+        if (best < 0) {
+            error = i18n::format(msg::device_error,
+                                 {request, msg::no_device_found.get()});
+            return false;
+        }
+    } else {
+        auto rank = [](const std::string& type) {
+            if (type == "discrete") return 4;
+            if (type == "integrated") return 3;
+            if (type == "virtual") return 2;
+            if (type == "cpu") return 1;
+            return 0;
+        };
+        for (size_t i = 0; i < _native_devices.size(); ++i) {
+            const NativeDeviceRow& d = _native_devices[i];
+            if (!d.usable || d.uuid.empty()) continue;
+            if (best < 0 || rank(d.type) > rank(_native_devices[best].type) ||
+                (rank(d.type) == rank(_native_devices[best].type) &&
+                 d.vram_bytes > _native_devices[best].vram_bytes))
+                best = (int)i;
+        }
+    }
+    if (best < 0 || !_native_devices[best].usable ||
+        _native_devices[best].uuid.empty()) {
+        error = msg::no_device_found.get();
+        return false;
+    }
+    device = _native_devices[best].uuid;
+    device_name = _native_devices[best].name;
+    return true;
+#else
+    int index = backend::device_current();
+    if (!request.empty() && request != "auto") {
+        try {
+            size_t end = 0;
+            index = std::stoi(request, &end);
+            if (end != request.size()) throw std::invalid_argument("not an index");
+        } catch (...) {
+            error = i18n::format(msg::device_error,
+                                 {request, msg::no_device_found.get()});
+            return false;
+        }
+    }
+    if (index < 0 || index >= backend::device_count()) {
+        error = msg::no_device_found.get();
+        return false;
+    }
+    const backend::DeviceInfo d = backend::device_info(index);
+    if (!d.usable) {
+        error = i18n::format(msg::device_error,
+                             {request.empty() ? "auto" : request,
+                              msg::device_unsupported.get()});
+        return false;
+    }
+    device = std::to_string(index);
+    device_name = d.name;
+    return true;
+#endif
+}
+
+bool GuiApp::validate_scheduled_device(const std::string& device,
+                                       std::string& error) {
+#ifdef SS_BACKEND_VULKAN
+    bool found = false;
+    for (int i = 0; i < backend::device_count(); ++i) {
+        const backend::DeviceInfo d = backend::device_info(i);
+        if (d.uuid != device) continue;
+        found = true;
+        if (d.usable) return true;
+    }
+    error = i18n::format(msg::device_error,
+                         {device, found ? msg::device_unsupported.get()
+                                        : msg::no_device_found.get()});
+    return false;
+#else
+    (void)device;
+    (void)error;
+    return true;
+#endif
+}
+
+void GuiApp::draw_job_device_picker(std::string& request, const char* id) {
+#ifdef SS_BACKEND_VULKAN
+    load_native_devices();
+    std::string shown = msg::device_auto.get();
+    for (const NativeDeviceRow& d : _native_devices)
+        if (!request.empty() && d.uuid == request) { shown = d.name; break; }
+    if (ui::BeginComboRaw(id, shown.c_str())) {
+        if (ui::Selectable(msg::device_auto, request.empty())) request.clear();
+        ui::help_on_hover(msg::device_auto_help);
+        for (size_t i = 0; i < _native_devices.size(); ++i) {
+            const NativeDeviceRow& d = _native_devices[i];
+            if (!d.usable || d.uuid.empty()) continue;
+            char label[400];
+            std::snprintf(label, sizeof label, "%s [%zu]##job_device_%zu",
+                          d.name.c_str(), i, i);
+            const bool selected = request == d.uuid;
+            if (ui::SelectableRaw(label, selected)) request = d.uuid;
+            if (selected) ImGui::SetItemDefaultFocus();
+            ui::help_on_hover_raw(d.uuid.c_str());
+        }
+        ImGui::EndCombo();
+    }
+#else
+    int selected = -1;
+    if (!request.empty() && request != "auto") {
+        try { selected = std::stoi(request); } catch (...) {}
+    }
+    std::string shown = selected >= 0 && selected < backend::device_count()
+                            ? backend::device_info(selected).name
+                            : msg::device_auto.get();
+    if (ui::BeginComboRaw(id, shown.c_str())) {
+        if (ui::Selectable(msg::device_auto, request.empty())) request.clear();
+        for (int i = 0; i < backend::device_count(); ++i) {
+            const backend::DeviceInfo d = backend::device_info(i);
+            char label[400];
+            std::snprintf(label, sizeof label, "%s [%d]##job_device_%d",
+                          d.name, i, i);
+            if (ui::SelectableRaw(label, selected == i))
+                request = std::to_string(i);
+        }
+        ImGui::EndCombo();
+    }
+#endif
+}
+
+void GuiApp::draw_scheduled_device_picker() {
+    draw_job_device_picker(_scheduled_device_request, "##scheduled_device");
+    ui::help_on_hover(msg::device_auto_help);
+}
+
+void GuiApp::draw_batch_device_picker(BatchJob& job) {
+    draw_job_device_picker(job.device, "##batch_device");
+}
+
 void GuiApp::draw_batch() {
     // Keeps the saved presets warm for the rows' pickers and their tooltips
     // (rate-limited inside, so this is a no-op most frames).
@@ -5666,6 +5952,12 @@ void GuiApp::draw_batch() {
     ImGui::PushTextWrapPos();
     ui::TextDisabled(msg::batch_intro);
     ImGui::PopTextWrapPos();
+    const std::string scheduler_error = _scheduler.state_error();
+    if (!scheduler_error.empty())
+        ui::TextColoredWrappedRaw(kErr, scheduler_error);
+    ui::Text(msg::menu_device);
+    ImGui::SameLine();
+    draw_scheduled_device_picker();
 
     const float log_h = log_height(ImGui::GetContentRegionAvail().y);
     ImGui::BeginChild("##batchlist", ImVec2(0, body_height(log_h)));
@@ -5743,7 +6035,7 @@ void GuiApp::draw_batch_table() {
     const ImGuiTableFlags flags = ImGuiTableFlags_Borders |
                                   ImGuiTableFlags_RowBg |
                                   ImGuiTableFlags_SizingStretchProp;
-    if (!ImGui::BeginTable("##batch", 8, flags)) return;
+    if (!ImGui::BeginTable("##batch", 9, flags)) return;
 
     // "#" is a numeral column, not a word.
     ui::TableSetupColumnRaw("#", ImGuiTableColumnFlags_WidthFixed, 26.0f);
@@ -5751,6 +6043,8 @@ void GuiApp::draw_batch_table() {
                          ImGuiTableColumnFlags_WidthStretch, 3.0f);
     ui::TableSetupColumn(msg::batch_col_preset,
                          ImGuiTableColumnFlags_WidthStretch, 2.0f);
+    ui::TableSetupColumn(msg::menu_device,
+                         ImGuiTableColumnFlags_WidthFixed, 150.0f);
     // Wide enough for the longest of the thirteen headings, not just the
     // English one: a fixed column sized to "Max splats" truncates
     // "Максимум сплатов" and every CJK heading, whose characters are twice
@@ -5774,12 +6068,21 @@ void GuiApp::draw_batch_table() {
         ImGui::PushID(i);
         ImGui::TableNextRow();
 
+        const app::sched::Job* scheduled = nullptr;
+        for (const auto& job : _scheduler_jobs)
+            if (job.job_id == j.scheduler_id) { scheduled = &job; break; }
+        const bool scheduled_active = scheduled &&
+            (scheduled->state == app::sched::JobState::Starting ||
+             scheduled->state == app::sched::JobState::Running ||
+             scheduled->state == app::sched::JobState::Stopping);
+        const bool config_locked = _batch_active || scheduled != nullptr;
+
         ImGui::TableNextColumn();
         ui::TextDisabledRaw(std::to_string(i + 1));
 
         // A row is frozen while the batch runs: its config has already been
         // taken, and editing it would describe a run that is not happening.
-        ImGui::BeginDisabled(_batch_active);
+        ImGui::BeginDisabled(config_locked);
 
         ImGui::TableNextColumn();
         ImGui::SetNextItemWidth(-bw);
@@ -5797,6 +6100,31 @@ void GuiApp::draw_batch_table() {
 
         ImGui::TableNextColumn();
         draw_batch_preset_combo(j, i);
+        ImGui::EndDisabled();
+
+        ImGui::TableNextColumn();
+        ImGui::BeginDisabled(scheduled_active || (scheduled &&
+                                                  scheduled->state != app::sched::JobState::Queued) ||
+                             (_batch_active && !scheduled));
+        const std::string old_device = j.device;
+        draw_batch_device_picker(j);
+        if (j.device != old_device) {
+            _batch_dirty = true;
+            _batch_checked = false;
+            if (scheduled && scheduled->state == app::sched::JobState::Queued) {
+                const std::string request = j.device.empty()
+                                                ? _scheduled_device_request : j.device;
+                std::string device, name, error;
+                if (resolve_scheduled_device(request, device, name, error)) {
+                    j.device = device;
+                    _scheduler.set_device(j.scheduler_id, device, name);
+                } else {
+                    j.message = error;
+                }
+            }
+        }
+        ImGui::EndDisabled();
+        ImGui::BeginDisabled(config_locked);
 
         // The three numbers worth changing without making a preset for each
         // combination. Empty means "whatever the preset says", which is why
@@ -5852,7 +6180,24 @@ void GuiApp::draw_batch_table() {
         const std::string& detail = j.message.empty() ? j.out_dir : j.message;
         if (!detail.empty()) ui::help_on_hover_raw(detail.c_str());
         ImGui::SameLine();
-        ImGui::BeginDisabled(_batch_active);
+        if (scheduled) {
+            ImGui::BeginDisabled(scheduled->state == app::sched::JobState::Succeeded);
+            if (scheduled->state == app::sched::JobState::Queued) {
+                if (ui::Button(msg::cancel)) _scheduler.cancel(j.scheduler_id);
+            } else if (scheduled->state == app::sched::JobState::Starting ||
+                       scheduled->state == app::sched::JobState::Running ||
+                       scheduled->state == app::sched::JobState::Stopping) {
+                if (ui::Button(msg::batch_stop_now))
+                    _scheduler.stop_and_save(j.scheduler_id);
+            } else if (ui::Button(msg::data_error_retry)) {
+                _scheduler.retry(j.scheduler_id);
+                _batch_active = true;
+                _scheduler.pause_dispatch(false);
+            }
+            ImGui::EndDisabled();
+        }
+        ImGui::SameLine();
+        ImGui::BeginDisabled(config_locked);
         // The same word the dataset screen's input list uses for the same job.
         if (ui::Button(dmsg::remove)) remove = i;
         ImGui::EndDisabled();
@@ -5862,6 +6207,8 @@ void GuiApp::draw_batch_table() {
     ImGui::EndTable();
 
     if (remove >= 0) {
+        if (!_batch[remove].scheduler_id.empty())
+            _scheduler.remove(_batch[remove].scheduler_id);
         _batch.erase(_batch.begin() + remove);
         _batch_dirty = true;
         _batch_checked = false;
@@ -6300,19 +6647,22 @@ void GuiApp::draw_batch_progress() {
         ui::TextDisabled(msg::batch_running_preset, {j.preset_name});
         ImGui::PopTextWrapPos();
     }
-    if (_batch_stop_after) ui::TextColored(kWarn, msg::batch_stopping);
+    if (_scheduler.dispatch_paused()) ui::TextColored(kWarn, msg::batch_stopping);
 
     if (ui::Button(msg::batch_show_list, ImVec2(-8, 0)))
         _screen = Screen::Batch;
-    ImGui::BeginDisabled(_batch_stop_after);
+    ImGui::BeginDisabled(_scheduler.dispatch_paused());
     if (ui::Button(msg::batch_stop_after, ImVec2(-8, 0)))
-        _batch_stop_after = true;
+        _scheduler.pause_dispatch(true);
     ui::help_on_hover(msg::batch_stop_after_help);
     ImGui::EndDisabled();
     if (ui::Button(msg::batch_stop_now, ImVec2(-8, 0))) {
-        _batch_stop_after = true;
-        _batch_stop_now = true;
-        _runner.request_stop();
+        _scheduler.pause_dispatch(true);
+        for (const BatchJob& row : _batch)
+            if (!row.scheduler_id.empty()) {
+                _scheduler.cancel(row.scheduler_id);
+                _scheduler.stop_and_save(row.scheduler_id);
+            }
     }
     ui::help_on_hover(msg::batch_stop_now_help);
 }
@@ -6889,7 +7239,7 @@ void GuiApp::draw_confirm_modal() {
             // A batch is a training session too, and this is the user saying
             // they want the engine back. Give up the queue with it -- except
             // when the queue is what they are starting.
-            if (_pending != Pending::StartBatch) cancel_batch();
+            if (_pending != Pending::StartBatch) cancel_batch(save);
             resume();
             _runner.request_stop(save);
             _stop_confirmed = true;

@@ -684,7 +684,8 @@ void engine_profile_capture_vram();
 void engine_save_checkpoint(
     std::string output_dir,
     bool full_dump,
-    int step
+    int step,
+    const OptimConfig* intended_optim = nullptr
 );
 
 // Restore engine state from `input_dir`/state.tar (resume training). The engine
