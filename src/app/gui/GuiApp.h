@@ -184,13 +184,20 @@ private:
     void check_batch();                     // pre-flight every row
     void request_start_batch(bool skip_invalid);
     void start_batch(bool skip_invalid);
-    // Called once per frame while a batch is live: records the row that just
-    // finished and launches the next one.
     void advance_batch();
     void finish_batch();
-    // Give up on the queue without waiting for the current row (the stop
-    // confirmation took the session away).
-    void cancel_batch(bool save = true);
+    void cancel_batch(bool save);
+    // Refresh scheduler-backed batch and dataset rows from the UI-thread
+    // snapshot, including a completed native dataset handoff.
+    void advance_scheduler_jobs();
+    const app::sched::Job* scheduler_job(const std::string& id) const;
+    bool scheduled_dataset_active() const;
+    bool scheduled_dataset_pending() const;
+    void draw_scheduler_queue();
+    void draw_scheduler_recovery_modal();
+    void request_force_stop(const std::string& job_id);
+    void draw_force_stop_modal();
+    void handle_scheduler_dataset_done(const app::sched::Job& job);
 
     // ---- dataset creation ----
     // Which engines this build and this machine can actually offer.
@@ -635,7 +642,13 @@ private:
     bool _batch_msg_err = false;
     std::string _scheduled_device_request;
     bool _scheduled_device_choice_set = false;
+    std::string _scheduled_dataset_id;
     std::vector<app::sched::Job> _scheduler_jobs;
+    std::map<std::string, std::deque<std::string>> _scheduler_log_tail;
+    std::map<std::string, bool> _recovery_dismissed;
+    std::string _force_stop_job;
+    bool _force_stop_open = false;
+    bool _recovery_shown = false;
 
     FileDialog _dialog;
     PickAction _pick = PickAction::None;

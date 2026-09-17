@@ -1,27 +1,10 @@
 #pragma once
 
-// Batch training: a list of (dataset, preset, output folder) rows the trainer
-// works through one after another, with nobody watching.
+// Batch editor data and its pre-flight/config resolver. Execution belongs to
+// app::sched::JobScheduler; rows retain only editable inputs and issues.
 //
-// The list is data, not a runner. Driving it is a handful of lines in
-// GuiApp::frame() -- launch a row, wait for TrainRunner to leave Training,
-// record what happened, launch the next -- because that reuses the whole live
-// trainer screen: the viewport still shows the run in flight, the metrics
-// still plot, the log still scrolls. A second training driver here would be a
-// second implementation of the thing app/TrainerCore.h already is.
-//
-// Two properties an unattended queue has to have, and where they live:
-//
-//   * a row that fails does not stop the rest. TrainRunner turns any
-//     exception into Phase::TrainError, so a failing row is an ordinary
-//     transition, not a crash -- BatchJob::status records it and the queue
-//     moves on.
-//   * problems are reported BEFORE anything starts. batch_check() is the
-//     pre-flight: it answers, for every row at once, "is there a reason this
-//     is going to fail" -- a dataset folder with no reconstruction in it, a
-//     preset file that has gone missing, an option the trainer does not
-//     implement, two rows writing to the same place. Fatal issues block the
-//     start; the rest are said out loud and then ignored.
+// A row that fails pre-flight is reported before anything is submitted. The
+// resolver still owns preset loading, macro expansion and row overrides.
 
 #include "config/TrainConfig.h"
 #include "i18n/Message.h"
@@ -69,16 +52,8 @@ struct BatchJob {
     std::string cap_max_override;
     std::string sh_degree_override;
     std::string iterations_override;
-
-    enum class Status { Pending, Running, Done, Failed, Skipped, Stopped };
-    Status status = Status::Pending;
-
-    // Filled as the row runs. `message` is engine text (English).
+    // Runtime association; scheduler state remains authoritative.
     std::string scheduler_id;
-    std::string message;
-    std::string out_dir;      // where it actually wrote
-    int steps = 0;
-    double seconds = 0.0;
 
     // From the last batch_check(); empty until one has run.
     std::vector<BatchIssue> issues;

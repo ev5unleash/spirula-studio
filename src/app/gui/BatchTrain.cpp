@@ -351,8 +351,6 @@ std::vector<BatchJob> load_batch_list() {
             if (const JsonValue* v = j.find("sh_degree")) b.sh_degree_override = v->as_string();
             if (const JsonValue* v = j.find("num_iterations"))
                 b.iterations_override = v->as_string();
-            if (const JsonValue* v = j.find("scheduler_id"))
-                b.scheduler_id = v->as_string();
             if (b.preset_name.empty()) b.preset_name = "3dgs";
             out.push_back(std::move(b));
         }
@@ -374,14 +372,13 @@ void save_batch_list(const std::vector<BatchJob>& jobs) {
                      "%s\n        {\"dataset\": %s, \"preset_path\": %s, "
                      "\"preset_name\": %s, \"output_dir\": %s, \"device\": %s, "
                      "\"cap_max\": %s, \"sh_degree\": %s, "
-                     "\"num_iterations\": %s, \"scheduler_id\": %s}",
+                     "\"num_iterations\": %s}",
                      i ? "," : "", quote(b.dataset).c_str(),
                      quote(b.preset_path).c_str(), quote(b.preset_name).c_str(),
                      quote(b.output_dir).c_str(), quote(b.device).c_str(),
                      quote(b.cap_max_override).c_str(),
                      quote(b.sh_degree_override).c_str(),
-                     quote(b.iterations_override).c_str(),
-                     quote(b.scheduler_id).c_str());
+                     quote(b.iterations_override).c_str());
     }
     std::fprintf(f, "%s]\n}\n", jobs.empty() ? "" : "\n    ");
     std::fclose(f);

@@ -7604,6 +7604,237 @@ SS_MSG(runlog_settings_end,
     NL("Einde van de instellingen"),
     RU("Конец настроек"),
     TR("Ayarların sonu"));
+SS_MSG(scheduler_title,
+    EN("Scheduled jobs"), JA("スケジュール済みジョブ"), ZH_HANS("计划任务"),
+    ZH_HANT("排程工作"), KO("예약된 작업"), DE("Geplante Aufträge"),
+    FR("Tâches planifiées"), ES("Tareas programadas"), PT("Tarefas agendadas"),
+    IT("Attività pianificate"), NL("Geplande taken"), RU("Запланированные задания"),
+    TR("Zamanlanmış işler"));
+SS_MSG(scheduler_empty,
+    EN("No scheduled jobs."), JA("スケジュール済みジョブはありません。"),
+    ZH_HANS("没有计划任务。"), ZH_HANT("沒有排程工作。"), KO("예약된 작업이 없습니다."),
+    DE("Keine geplanten Aufträge."), FR("Aucune tâche planifiée."),
+    ES("No hay tareas programadas."), PT("Não há tarefas agendadas."),
+    IT("Nessuna attività pianificata."), NL("Geen geplande taken."),
+    RU("Нет запланированных заданий."), TR("Zamanlanmış iş yok."));
+SS_MSG(scheduler_state_queued,
+    EN("Queued"), JA("待機中"), ZH_HANS("排队中"), ZH_HANT("排隊中"),
+    KO("대기 중"), DE("In Warteschlange"), FR("En file"), ES("En cola"),
+    PT("Na fila"), IT("In coda"), NL("In wachtrij"), RU("В очереди"),
+    TR("Kuyrukta"));
+SS_MSG(scheduler_state_starting,
+    EN("Starting"), JA("開始中"), ZH_HANS("启动中"), ZH_HANT("啟動中"),
+    KO("시작 중"), DE("Wird gestartet"), FR("Démarrage"), ES("Iniciando"),
+    PT("Iniciando"), IT("Avvio"), NL("Starten"), RU("Запуск"),
+    TR("Başlatılıyor"));
+SS_MSG(scheduler_state_running,
+    EN("Running"), JA("実行中"), ZH_HANS("运行中"), ZH_HANT("執行中"),
+    KO("실행 중"), DE("Läuft"), FR("En cours"), ES("En ejecución"),
+    PT("Em execução"), IT("In esecuzione"), NL("Actief"), RU("Выполняется"),
+    TR("Çalışıyor"));
+SS_MSG(scheduler_state_stopping,
+    EN("Stopping"), JA("停止中"), ZH_HANS("停止中"), ZH_HANT("停止中"),
+    KO("중지 중"), DE("Wird angehalten"), FR("Arrêt"), ES("Deteniendo"),
+    PT("Parando"), IT("Arresto"), NL("Stoppen"), RU("Остановка"),
+    TR("Durduruluyor"));
+SS_MSG(scheduler_state_blocked,
+    EN("Blocked"), JA("ブロック"), ZH_HANS("已阻塞"), ZH_HANT("已封鎖"),
+    KO("차단됨"), DE("Blockiert"), FR("Bloquée"), ES("Bloqueada"),
+    PT("Bloqueada"), IT("Bloccata"), NL("Geblokkeerd"), RU("Заблокировано"),
+    TR("Engellendi"));
+SS_MSG(scheduler_state_interrupted,
+    EN("Interrupted"), JA("中断"), ZH_HANS("已中断"), ZH_HANT("已中斷"),
+    KO("중단됨"), DE("Unterbrochen"), FR("Interrompue"), ES("Interrumpida"),
+    PT("Interrompida"), IT("Interrotta"), NL("Onderbroken"), RU("Прервано"),
+    TR("Kesildi"));
+SS_MSG(scheduler_state_succeeded,
+    EN("Succeeded"), JA("成功"), ZH_HANS("成功"), ZH_HANT("成功"),
+    KO("성공"), DE("Erfolgreich"), FR("Réussie"), ES("Correcta"),
+    PT("Concluída"), IT("Riuscita"), NL("Geslaagd"), RU("Успешно"),
+    TR("Başarılı"));
+SS_MSG(scheduler_state_stopped,
+    EN("Stopped"), JA("停止"), ZH_HANS("已停止"), ZH_HANT("已停止"),
+    KO("중지됨"), DE("Angehalten"), FR("Arrêtée"), ES("Detenida"),
+    PT("Parada"), IT("Arrestata"), NL("Gestopt"), RU("Остановлено"),
+    TR("Durduruldu"));
+SS_MSG(scheduler_state_failed,
+    EN("Failed"), JA("失敗"), ZH_HANS("失败"), ZH_HANT("失敗"),
+    KO("실패"), DE("Fehlgeschlagen"), FR("Échec"), ES("Fallida"),
+    PT("Falhou"), IT("Non riuscita"), NL("Mislukt"), RU("Ошибка"),
+    TR("Başarısız"));
+SS_MSG(scheduler_job,
+    EN("Job {0}"), JA("ジョブ {0}"), ZH_HANS("任务 {0}"), ZH_HANT("工作 {0}"),
+    KO("작업 {0}"), DE("Auftrag {0}"), FR("Tâche {0}"), ES("Tarea {0}"),
+    PT("Tarefa {0}"), IT("Attività {0}"), NL("Taak {0}"), RU("Задание {0}"),
+    TR("İş {0}"));
+SS_MSG(scheduler_phase,
+    EN("Phase: {0}"), JA("フェーズ: {0}"), ZH_HANS("阶段：{0}"), ZH_HANT("階段：{0}"),
+    KO("단계: {0}"), DE("Phase: {0}"), FR("Phase : {0}"), ES("Fase: {0}"),
+    PT("Fase: {0}"), IT("Fase: {0}"), NL("Fase: {0}"), RU("Этап: {0}"),
+    TR("Aşama: {0}"));
+SS_MSG(scheduler_device,
+    EN("Device: {0}"), JA("デバイス: {0}"), ZH_HANS("设备：{0}"), ZH_HANT("裝置：{0}"),
+    KO("장치: {0}"), DE("Gerät: {0}"), FR("Appareil : {0}"), ES("Dispositivo: {0}"),
+    PT("Dispositivo: {0}"), IT("Dispositivo: {0}"), NL("Apparaat: {0}"),
+    RU("Устройство: {0}"), TR("Aygıt: {0}"));
+SS_MSG(scheduler_output,
+    EN("Output: {0}"), JA("出力: {0}"), ZH_HANS("输出：{0}"), ZH_HANT("輸出：{0}"),
+    KO("출력: {0}"), DE("Ausgabe: {0}"), FR("Sortie : {0}"), ES("Salida: {0}"),
+    PT("Saída: {0}"), IT("Output: {0}"), NL("Uitvoer: {0}"), RU("Вывод: {0}"),
+    TR("Çıktı: {0}"));
+SS_MSG(scheduler_reason,
+    EN("Reason: {0}"), JA("理由: {0}"), ZH_HANS("原因：{0}"), ZH_HANT("原因：{0}"),
+    KO("이유: {0}"), DE("Grund: {0}"), FR("Motif : {0}"), ES("Motivo: {0}"),
+    PT("Motivo: {0}"), IT("Motivo: {0}"), NL("Reden: {0}"), RU("Причина: {0}"),
+    TR("Neden: {0}"));
+SS_MSG(scheduler_log,
+    EN("Log"), JA("ログ"), ZH_HANS("日志"), ZH_HANT("記錄"),
+    KO("로그"), DE("Protokoll"), FR("Journal"), ES("Registro"),
+    PT("Registo"), IT("Registro"), NL("Logboek"), RU("Журнал"),
+    TR("Günlük"));
+SS_MSG(scheduler_outcome_partial,
+    EN("SfM outcome: partial reconstruction"), JA("SfM の結果: 部分的な再構成"),
+    ZH_HANS("SfM 结果：部分重建"), ZH_HANT("SfM 結果：部分重建"),
+    KO("SfM 결과: 부분 재구성"), DE("SfM-Ergebnis: partielle Rekonstruktion"),
+    FR("Résultat SfM : reconstruction partielle"), ES("Resultado SfM: reconstrucción parcial"),
+    PT("Resultado SfM: reconstrução parcial"), IT("Risultato SfM: ricostruzione parziale"),
+    NL("SfM-resultaat: gedeeltelijke reconstructie"),
+    RU("Результат SfM: неполная реконструкция"),
+    TR("SfM sonucu: kısmi yeniden oluşturma"));
+SS_MSG(scheduler_outcome_nonmetric,
+    EN("SfM outcome: no metric scale"), JA("SfM の結果: メートル尺度なし"),
+    ZH_HANS("SfM 结果：无度量尺度"), ZH_HANT("SfM 結果：無度量尺度"),
+    KO("SfM 결과: 미터법 규모 없음"), DE("SfM-Ergebnis: keine metrische Skala"),
+    FR("Résultat SfM : sans échelle métrique"), ES("Resultado SfM: sin escala métrica"),
+    PT("Resultado SfM: sem escala métrica"), IT("Risultato SfM: senza scala metrica"),
+    NL("SfM-resultaat: geen metrische schaal"),
+    RU("Результат SfM: нет метрического масштаба"),
+    TR("SfM sonucu: metrik ölçek yok"));
+SS_MSG(scheduler_paused,
+    EN("New jobs are paused; running jobs will finish."),
+    JA("新しいジョブを一時停止しました。実行中のジョブは完了します。"),
+    ZH_HANS("新任务已暂停；正在运行的任务会完成。"),
+    ZH_HANT("新工作已暫停；正在執行的工作會完成。"),
+    KO("새 작업은 일시 중지되며 실행 중인 작업은 완료됩니다."),
+    DE("Neue Aufträge sind pausiert; laufende Aufträge werden beendet."),
+    FR("Les nouvelles tâches sont en pause ; les tâches en cours se terminent."),
+    ES("Las tareas nuevas están pausadas; las que están en curso terminarán."),
+    PT("As novas tarefas estão pausadas; as tarefas em execução terminarão."),
+    IT("Le nuove attività sono in pausa; quelle in corso termineranno."),
+    NL("Nieuwe taken zijn gepauzeerd; actieve taken worden voltooid."),
+    RU("Новые задания приостановлены; выполняющиеся задания завершатся."),
+    TR("Yeni işler duraklatıldı; çalışan işler tamamlanacak."));
+SS_MSG(scheduler_stop_save,
+    EN("Stop and save"), JA("停止して保存"), ZH_HANS("停止并保存"),
+    ZH_HANT("停止並儲存"), KO("멈추고 저장"), DE("Anhalten und speichern"),
+    FR("Arrêter et enregistrer"), ES("Detener y guardar"), PT("Parar e guardar"),
+    IT("Arresta e salva"), NL("Stoppen en opslaan"), RU("Остановить и сохранить"),
+    TR("Durdur ve kaydet"));
+SS_MSG(scheduler_force_stop,
+    EN("Force stop"), JA("強制停止"), ZH_HANS("强制停止"), ZH_HANT("強制停止"),
+    KO("강제 중지"), DE("Sofort beenden"), FR("Forcer l’arrêt"),
+    ES("Forzar detención"), PT("Forçar paragem"), IT("Forza arresto"),
+    NL("Geforceerd stoppen"), RU("Принудительно остановить"), TR("Zorla durdur"));
+SS_MSG(scheduler_cancel,
+    EN("Cancel pending"), JA("保留中を取り消す"), ZH_HANS("取消等待任务"),
+    ZH_HANT("取消等待工作"), KO("대기 작업 취소"), DE("Wartenden Auftrag abbrechen"),
+    FR("Annuler la tâche en attente"), ES("Cancelar tarea pendiente"),
+    PT("Cancelar tarefa pendente"), IT("Annulla attività in coda"),
+    NL("Wachtende taak annuleren"), RU("Отменить ожидающее задание"),
+    TR("Bekleyen işi iptal et"));
+SS_MSG(scheduler_retry,
+    EN("Retry"), JA("再試行"), ZH_HANS("重试"), ZH_HANT("重試"),
+    KO("재시도"), DE("Erneut versuchen"), FR("Réessayer"), ES("Reintentar"),
+    PT("Tentar novamente"), IT("Riprova"), NL("Opnieuw proberen"),
+    RU("Повторить"), TR("Yeniden dene"));
+SS_MSG(scheduler_recovery_title,
+    EN("Recover scheduled jobs"), JA("スケジュール済みジョブの復旧"),
+    ZH_HANS("恢复计划任务"), ZH_HANT("復原排程工作"), KO("예약된 작업 복구"),
+    DE("Geplante Aufträge wiederherstellen"), FR("Récupérer les tâches planifiées"),
+    ES("Recuperar tareas programadas"), PT("Recuperar tarefas agendadas"),
+    IT("Recupera attività pianificate"), NL("Geplande taken herstellen"),
+    RU("Восстановление запланированных заданий"), TR("Zamanlanmış işleri kurtar"));
+SS_MSG(scheduler_recovery_intro,
+    EN("These jobs were interrupted. Retry resumes their current phase; Later "
+       "hides this prompt for this session only."),
+    JA("これらのジョブは中断されました。再試行すると現在のフェーズを再開します。「後で」は"
+       "このセッションだけこの表示を隠します。"),
+    ZH_HANS("这些任务被中断了。重试会恢复当前阶段；稍后仅在本次会话中隐藏此提示。"),
+    ZH_HANT("這些工作已中斷。重試會恢復目前階段；稍後只在本次工作階段隱藏此提示。"),
+    KO("이 작업은 중단되었습니다. 재시도하면 현재 단계를 재개하고, 나중에는 이번 세션에서만 "
+       "이 안내를 숨깁니다."),
+    DE("Diese Aufträge wurden unterbrochen. Erneut versuchen setzt die aktuelle Phase fort; "
+       "Später blendet diesen Hinweis nur in dieser Sitzung aus."),
+    FR("Ces tâches ont été interrompues. Réessayer reprend leur phase actuelle ; Plus tard "
+       "masque cette invite pour cette session uniquement."),
+    ES("Estas tareas se interrumpieron. Reintentar reanuda su fase actual; Más tarde oculta "
+       "este aviso solo durante esta sesión."),
+    PT("Estas tarefas foram interrompidas. Tentar novamente retoma a fase atual; Mais tarde "
+       "oculta este aviso apenas nesta sessão."),
+    IT("Queste attività sono state interrotte. Riprova riprende la fase corrente; Più tardi "
+       "nasconde questo avviso solo per questa sessione."),
+    NL("Deze taken zijn onderbroken. Opnieuw proberen hervat de huidige fase; Later verbergt "
+       "deze melding alleen in deze sessie."),
+    RU("Эти задания были прерваны. Повтор запускает текущий этап; «Позже» скрывает это "
+       "окно только в этом сеансе."),
+    TR("Bu işler kesildi. Yeniden dene geçerli aşamayı sürdürür; Daha sonra bu istemi yalnızca "
+       "bu oturumda gizler."));
+SS_MSG(scheduler_recovery_retry,
+    EN("Retry job"), JA("ジョブを再試行"), ZH_HANS("重试任务"), ZH_HANT("重試工作"),
+    KO("작업 재시도"), DE("Auftrag erneut versuchen"), FR("Réessayer la tâche"),
+    ES("Reintentar tarea"), PT("Tentar tarefa novamente"), IT("Riprova attività"),
+    NL("Taak opnieuw proberen"), RU("Повторить задание"), TR("İşi yeniden dene"));
+SS_MSG(scheduler_later,
+    EN("Later"), JA("後で"), ZH_HANS("稍后"), ZH_HANT("稍後"), KO("나중에"),
+    DE("Später"), FR("Plus tard"), ES("Más tarde"), PT("Mais tarde"),
+    IT("Più tardi"), NL("Later"), RU("Позже"), TR("Daha sonra"));
+SS_MSG(scheduler_force_title,
+    EN("Force-stop scheduled job?"), JA("スケジュール済みジョブを強制停止しますか？"),
+    ZH_HANS("强制停止计划任务？"), ZH_HANT("要強制停止排程工作嗎？"),
+    KO("예약된 작업을 강제로 중지할까요?"), DE("Geplanten Auftrag sofort beenden?"),
+    FR("Forcer l’arrêt de la tâche planifiée ?"), ES("¿Forzar la detención de la tarea programada?"),
+    PT("Forçar a paragem da tarefa agendada?"), IT("Forzare l’arresto dell’attività pianificata?"),
+    NL("Geplande taak geforceerd stoppen?"), RU("Принудительно остановить задание?"),
+    TR("Zamanlanmış iş zorla durdurulsun mu?"));
+SS_MSG(scheduler_force_warning,
+    EN("Force stop ends the worker immediately. Unsaved work may be lost; the "
+       "current phase will be marked for recovery."),
+    JA("強制停止するとワーカーは直ちに終了します。保存されていない作業は失われる可能性があり、"
+       "現在のフェーズは復旧対象になります。"),
+    ZH_HANS("强制停止会立即结束工作进程。未保存的工作可能丢失；当前阶段会标记为待恢复。"),
+    ZH_HANT("強制停止會立即結束工作程序。未儲存的工作可能遺失；目前階段會標記為待復原。"),
+    KO("강제 중지는 작업자를 즉시 종료합니다. 저장하지 않은 작업이 손실될 수 있으며 현재 단계는 "
+       "복구 대상으로 표시됩니다."),
+    DE("Sofortiges Beenden beendet den Worker unverzüglich. Nicht gespeicherte Arbeit kann verloren "
+       "gehen; die aktuelle Phase wird zur Wiederherstellung markiert."),
+    FR("Forcer l’arrêt termine immédiatement le processus. Les données non enregistrées peuvent être "
+       "perdues ; la phase actuelle sera marquée pour récupération."),
+    ES("Forzar la detención termina el proceso de inmediato. El trabajo no guardado puede perderse; "
+       "la fase actual se marcará para recuperación."),
+    PT("Forçar a paragem termina imediatamente o processo. O trabalho não guardado pode perder-se; "
+       "a fase atual será marcada para recuperação."),
+    IT("Forzare l’arresto termina subito il processo. Il lavoro non salvato potrebbe andare perso; "
+       "la fase corrente sarà contrassegnata per il recupero."),
+    NL("Geforceerd stoppen beëindigt het proces onmiddellijk. Niet-opgeslagen werk kan verloren gaan; "
+       "de huidige fase wordt gemarkeerd voor herstel."),
+    RU("Принудительная остановка немедленно завершает рабочий процесс. Несохранённые данные могут "
+       "быть потеряны; текущий этап будет отмечен для восстановления."),
+    TR("Zorla durdurma çalışanı hemen sonlandırır. Kaydedilmemiş işler kaybolabilir; geçerli aşama "
+       "kurtarma için işaretlenir."));
+SS_MSG(scheduler_external_interactive,
+    EN("External COLMAP and Python masking stay interactive and are not scheduled."),
+    JA("外部 COLMAP と Python マスキングは対話式のままで、スケジュールされません。"),
+    ZH_HANS("外部 COLMAP 和 Python 遮罩保持交互式，不会进入计划队列。"),
+    ZH_HANT("外部 COLMAP 與 Python 遮罩維持互動式，不會進入排程佇列。"),
+    KO("외부 COLMAP과 Python 마스킹은 대화형으로 유지되며 예약하지 않습니다."),
+    DE("Externes COLMAP und Python-Maskierung bleiben interaktiv und werden nicht geplant."),
+    FR("COLMAP externe et masquage Python restent interactifs et ne sont pas planifiés."),
+    ES("COLMAP externo y el enmascarado de Python siguen siendo interactivos y no se programan."),
+    PT("COLMAP externo e mascaramento Python permanecem interativos e não são agendados."),
+    IT("COLMAP esterno e mascheramento Python restano interattivi e non vengono pianificati."),
+    NL("Externe COLMAP en Python-maskering blijven interactief en worden niet gepland."),
+    RU("Внешние COLMAP и маскирование Python остаются интерактивными и не планируются."),
+    TR("Harici COLMAP ve Python maskeleme etkileşimli kalır ve zamanlanmaz."));
 
 }  // namespace gui
 }  // namespace msg

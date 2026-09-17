@@ -41,6 +41,10 @@ using app::DatasetPrep;
 using app::MaskClick;
 using app::PhotoImport;
 using app::PrepInput;
+using app::PrepCapture;
+using app::kRigFirstShared;
+using app::kRigOwn;
+using app::kRigShared;
 using app::PrepJob;
 using app::PrepResult;
 using app::SubCamera;
@@ -182,11 +186,14 @@ class SfmRunner {
 public:
     enum class State { Idle, Running, Done, Failed, Cancelled };
 
+    static std::string availability();
     ~SfmRunner();
 
-    // "" when spirula-sfm is available, otherwise why it is not.
-    static std::string availability();
-
+    // Arguments for one scheduled native SfM phase after prep has published
+    // its image and mask folders.
+    std::vector<std::string> scheduler_args(const SfmJob& job,
+                                            const std::string& image_dir,
+                                            const std::string& mask_dir);
     // `films` are the screen's picture reels, null for a caller with no
     // screen; they outlive the run.
     void start(const SfmJob& job, RunFilms films = {});

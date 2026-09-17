@@ -115,6 +115,22 @@ inline const Msg& device_detail(spirula::vkselect::ResolveStatus s) {
     return msg::device_detail_missing;
 }
 #endif
+const Msg& scheduler_state_label(app::sched::JobState state) {
+    switch (state) {
+        case app::sched::JobState::Queued: return msg::scheduler_state_queued;
+        case app::sched::JobState::Starting: return msg::scheduler_state_starting;
+        case app::sched::JobState::Running: return msg::scheduler_state_running;
+        case app::sched::JobState::Stopping: return msg::scheduler_state_stopping;
+        case app::sched::JobState::Blocked: return msg::scheduler_state_blocked;
+        case app::sched::JobState::Interrupted:
+            return msg::scheduler_state_interrupted;
+        case app::sched::JobState::Succeeded:
+            return msg::scheduler_state_succeeded;
+        case app::sched::JobState::Stopped: return msg::scheduler_state_stopped;
+        case app::sched::JobState::Failed: return msg::scheduler_state_failed;
+    }
+    return msg::scheduler_state_failed;
+}
 
 std::string format_gib(uint64_t bytes) {
     char buf[32];
@@ -198,13 +214,31 @@ GuiApp::GuiApp()
     load_settings();
     _batch = load_batch_list();
     _scheduler.set_event_callback([this](const app::sched::Event& e) {
-        if (!e.line.empty()) log("[" + e.job_id + "] " + e.line, true);
+        if (!e.line.empty()) {
+            auto& tail = _scheduler_log_tail[e.job_id];
+            tail.push_back(e.line);
+            while (tail.size() > 256) tail.pop_front();
+            log("[" + e.job_id + "] " + e.line, true);
+        }
+        if (!e.error.empty()) {
+            auto& tail = _scheduler_log_tail[e.job_id];
+            tail.push_back(e.error);
+            while (tail.size() > 256) tail.pop_front();
+            log("[" + e.job_id + "] " + e.error);
+        }
     });
     _scheduler.set_device_validator(
         [this](const std::string& device, std::string& error) {
             return validate_scheduled_device(device, error);
         });
     _scheduler.load();
+    for (const app::sched::Job& job : _scheduler.list()) {
+        if (job.options_payload == "gui:native-dataset:v1" &&
+            job.state == app::sched::JobState::Queued) {
+            _scheduled_dataset_id = job.job_id;
+            break;
+        }
+    }
     apply_preset("3dgs");
     // Built-in when it is there, COLMAP when it is not; effective_engine()
     // overrides this anyway if the stored choice is unavailable.
@@ -671,6 +705,10 @@ bool GuiApp::reserve_foreground_device() {
 }
 
 void GuiApp::update_scheduler_admission() {
+    if (scheduled_dataset_pending()) {
+        _scheduler.set_foreground_device("");
+        return;
+    }
     _scheduler.set_foreground_device(
         foreground_device_in_use() ? desktop_device_selector() : std::string());
 }
@@ -997,7 +1035,59 @@ void GuiApp::run_pending_if_stopped() {
 // ===========================================================================
 
 // Append a row for `dataset`, seeded with whatever preset the trainer screen
-// is on -- a queue is usually built right after tuning the settings it should
+const app::sched::Job* GuiApp::scheduler_job(const std::string& id) const {
+    if (id.empty()) return nullptr;
+    for (const app::sched::Job& job : _scheduler_jobs)
+        if (job.job_id == id) return &job;
+    return nullptr;
+}
+
+bool GuiApp::scheduled_dataset_pending() const {
+    const app::sched::Job* job = scheduler_job(_scheduled_dataset_id);
+    if (!job) return false;
+    return job->state == app::sched::JobState::Queued ||
+           job->state == app::sched::JobState::Starting ||
+           job->state == app::sched::JobState::Running ||
+           job->state == app::sched::JobState::Stopping;
+}
+
+bool GuiApp::scheduled_dataset_active() const {
+    const app::sched::Job* job = scheduler_job(_scheduled_dataset_id);
+    if (!job) return false;
+    return job->state == app::sched::JobState::Starting ||
+           job->state == app::sched::JobState::Running ||
+           job->state == app::sched::JobState::Stopping;
+}
+
+void GuiApp::handle_scheduler_dataset_done(const app::sched::Job& job) {
+    std::string image_dir, mask_dir;
+    if (!job.phases.empty()) {
+        for (const std::string& output : job.phases.front().outputs) {
+            if (image_dir.empty()) image_dir = output;
+            if (fs::path(output).filename() == "masks") mask_dir = output;
+            if (fs::path(output).filename() == "images") image_dir = output;
+        }
+        if (image_dir.empty()) image_dir = job.phases.front().output;
+    }
+    _scheduled_dataset_id.clear();
+    open_dataset(job.workspace, image_dir, mask_dir, false, true);
+}
+
+void GuiApp::advance_scheduler_jobs() {
+    _scheduler_jobs = _scheduler.list();
+    if (_scheduled_dataset_id.empty()) return;
+    const app::sched::Job* job = scheduler_job(_scheduled_dataset_id);
+    if (!job) return;
+    if (job->state == app::sched::JobState::Succeeded)
+        handle_scheduler_dataset_done(*job);
+}
+
+void GuiApp::request_force_stop(const std::string& job_id) {
+    if (job_id.empty()) return;
+    _force_stop_job = job_id;
+    _force_stop_open = true;
+}
+
 // run with. Shared by the picker, the recents menu and drag-and-drop.
 void GuiApp::add_batch_row(const std::string& dataset) {
     if (dataset.empty()) return;
@@ -1050,22 +1140,14 @@ void GuiApp::start_batch(bool skip_invalid) {
         return;
     }
 
-    for (BatchJob& j : _batch) {
-        j.status = batch_has_error(j) ? BatchJob::Status::Skipped
-                                      : BatchJob::Status::Pending;
-        j.scheduler_id.clear();
-        j.message.clear();
-        j.out_dir.clear();
-        j.steps = 0;
-    }
+    for (BatchJob& j : _batch) j.scheduler_id.clear();
     int submitted = 0;
     for (BatchJob& j : _batch) {
-        if (j.status == BatchJob::Status::Skipped) continue;
+        if (batch_has_error(j)) continue;
         TrainConfig cfg;
         std::string base, error;
         if (!batch_build_config(j, cfg, base, error)) {
-            j.status = BatchJob::Status::Failed;
-            j.message = error;
+            log(error);
             continue;
         }
         std::error_code ec;
@@ -1085,8 +1167,7 @@ void GuiApp::start_batch(bool skip_invalid) {
         if (!resolve_scheduled_device(
                 request, !j.device.empty() || _scheduled_device_choice_set,
                 device, device_name, device_error)) {
-            j.status = BatchJob::Status::Failed;
-            j.message = device_error;
+            log(device_error);
             continue;
         }
 
@@ -1098,8 +1179,7 @@ void GuiApp::start_batch(bool skip_invalid) {
         o.args = batch_config_args(cfg);
         j.scheduler_id = _scheduler.submit(o);
         if (j.scheduler_id.empty()) {
-            j.status = BatchJob::Status::Failed;
-            j.message = "could not create scheduled job";
+            log("could not create scheduled job");
             continue;
         }
         submitted++;
@@ -1123,59 +1203,24 @@ void GuiApp::start_batch(bool skip_invalid) {
 }
 
 void GuiApp::advance_batch() {
-    _scheduler_jobs = _scheduler.list();
     int active = -1;
     bool live = false;
     for (size_t i = 0; i < _batch.size(); ++i) {
-        BatchJob& row = _batch[i];
-        if (row.scheduler_id.empty()) continue;
-        const app::sched::Job* scheduled = nullptr;
-        for (const auto& job : _scheduler_jobs)
-            if (job.job_id == row.scheduler_id) { scheduled = &job; break; }
-        if (!scheduled) {
-            row.status = BatchJob::Status::Failed;
-            row.message = "scheduled job was not found";
-            continue;
-        }
-        if (!scheduled->output_dir.empty()) row.out_dir = scheduled->output_dir;
-        else if (!scheduled->run_dir.empty()) row.out_dir = scheduled->run_dir;
+        const BatchJob& row = _batch[i];
+        const app::sched::Job* scheduled = scheduler_job(row.scheduler_id);
+        if (!scheduled) continue;
         switch (scheduled->state) {
             case app::sched::JobState::Queued:
-                row.status = BatchJob::Status::Pending;
                 live = true;
                 break;
             case app::sched::JobState::Starting:
             case app::sched::JobState::Running:
             case app::sched::JobState::Stopping:
-                row.status = BatchJob::Status::Running;
                 live = true;
                 if (active < 0) active = (int)i;
                 break;
-            case app::sched::JobState::Succeeded:
-                row.status = BatchJob::Status::Done;
+            default:
                 break;
-            case app::sched::JobState::Stopped:
-                row.status = BatchJob::Status::Stopped;
-                row.message = scheduled->error;
-                break;
-            case app::sched::JobState::Failed:
-            case app::sched::JobState::Interrupted:
-            case app::sched::JobState::Blocked:
-                row.status = BatchJob::Status::Failed;
-                row.message = scheduled->error;
-                break;
-        }
-    }
-    if (_scheduler.dispatch_paused() && active < 0) {
-        for (const BatchJob& row : _batch) {
-            if (row.scheduler_id.empty()) continue;
-            for (const auto& job : _scheduler_jobs) {
-                if (job.job_id == row.scheduler_id &&
-                    job.state == app::sched::JobState::Queued) {
-                    _scheduler.cancel(row.scheduler_id);
-                    break;
-                }
-            }
         }
     }
     _batch_current = active;
@@ -1185,13 +1230,21 @@ void GuiApp::advance_batch() {
         finish_batch();
     }
 }
-
 void GuiApp::finish_batch() {
     int done = 0, failed = 0, other = 0;
-    for (const BatchJob& j : _batch) {
-        if (j.status == BatchJob::Status::Done) done++;
-        else if (j.status == BatchJob::Status::Failed) failed++;
-        else other++;
+    for (const BatchJob& row : _batch) {
+        const app::sched::Job* job = scheduler_job(row.scheduler_id);
+        if (!job) {
+            other++;
+        } else if (job->state == app::sched::JobState::Succeeded) {
+            done++;
+        } else if (job->state == app::sched::JobState::Failed ||
+                   job->state == app::sched::JobState::Interrupted ||
+                   job->state == app::sched::JobState::Blocked) {
+            failed++;
+        } else {
+            other++;
+        }
     }
     _batch_active = false;
     _scheduler.pause_dispatch(false);
@@ -2073,6 +2126,7 @@ void GuiApp::frame() {
     _scale.update(ImGui::GetIO().DisplaySize);
 
     append_logs();
+    advance_scheduler_jobs();
     update_scheduler_admission();
     run_pending_if_stopped();
     // vit-giant2 is two files, and so is ALIKED with LightGlue: both fetches
@@ -2161,6 +2215,8 @@ void GuiApp::frame() {
     draw_preset_delete_modal();
     draw_confirm_modal();
     draw_data_error_modal();
+    draw_scheduler_recovery_modal();
+    draw_force_stop_modal();
 
     ImGui::End();
 }
@@ -2506,11 +2562,14 @@ GuiApp::Engine GuiApp::effective_engine() const {
 
 bool GuiApp::dataset_busy() const {
     return _sfm.state() == SfmRunner::State::Running ||
-           _colmap.state() == ColmapRunner::State::Running;
+           _colmap.state() == ColmapRunner::State::Running ||
+           scheduled_dataset_pending();
 }
 bool GuiApp::native_work_busy() const {
     const TrainRunner::Phase phase = _runner.phase();
-    return _mesh.busy() || dataset_busy() ||
+    return _mesh.busy() || scheduled_dataset_pending() ||
+           _sfm.state() == SfmRunner::State::Running ||
+           _colmap.state() == ColmapRunner::State::Running ||
            phase == TrainRunner::Phase::Loading ||
            phase == TrainRunner::Phase::Preparing ||
            phase == TrainRunner::Phase::Training;
@@ -2522,11 +2581,20 @@ RunProgress* GuiApp::dataset_steps() {
 
 bool GuiApp::dataset_locked(Stage s) {
     if (!dataset_busy()) return false;
+    if (scheduled_dataset_pending()) return true;
     const bool builtin = _sfm.state() == SfmRunner::State::Running;
     return (builtin ? _sfm.steps() : _colmap.steps()).ran(s);
 }
 
 void GuiApp::cancel_dataset_job() {
+    if (!_scheduled_dataset_id.empty()) {
+        const app::sched::Job* job = scheduler_job(_scheduled_dataset_id);
+        if (job && job->state == app::sched::JobState::Queued)
+            _scheduler.cancel(_scheduled_dataset_id);
+        else
+            _scheduler.stop_and_save(_scheduled_dataset_id);
+        return;
+    }
     _sfm.cancel();
     _colmap.cancel();
 }
@@ -2690,16 +2758,13 @@ void GuiApp::sync_dataset_jobs() {
 }
 
 void GuiApp::update_dataset_job() {
-    if (!dataset_busy()) return;
+    if (!dataset_busy() || scheduled_dataset_pending()) return;
     sync_dataset_jobs();
     if (_sfm.state() == SfmRunner::State::Running) _sfm.update(_sfm_job);
     else                                           _colmap.update(_colmap_job);
 }
 
 void GuiApp::start_dataset_job() {
-    // The first GPU-consuming operation of this session freezes the one native
-    // choice, before any preview, decode or child is dispatched. A rejected or
-    // conflicting request is reported and the run does not start.
     if (native_work_busy()) return;
     pump_source_probes();
     if (!_source_probes_ready) {
@@ -2711,32 +2776,167 @@ void GuiApp::start_dataset_job() {
 #else
     if (!freeze_cuda_device()) return;
 #endif
-    if (!reserve_foreground_device()) return;
+    sync_dataset_jobs();
+
+    const bool schedule_native =
+        effective_engine() == Engine::BuiltIn &&
+        !_sfm_job.prep.force_external_masking &&
+        (!_mask_enable || backends().builtin_masking);
+    if (!schedule_native) {
+        if (effective_engine() == Engine::Colmap ||
+            _sfm_job.prep.force_external_masking ||
+            (_mask_enable && !backends().builtin_masking))
+            log(msg::scheduler_external_interactive.get());
+        if (!reserve_foreground_device()) return;
+        close_native_previews();
+        close_splat();
+        app::set_crash_note("building dataset " + _workspace);
+        const std::string stamp = run_log_stamp();
+        const fs::path prep_log_file =
+            open_run_log(_prep_log,
+                         fs::path(planned_image_dir(_sources, _workspace,
+                                                    _photo_import)).parent_path().string(),
+                         "prep", stamp);
+        set_ss_env("UNREG_LOG", prep_log_file.empty()
+                                    ? std::string()
+                                    : (prep_log_file.parent_path() /
+                                       ("unreg_" + stamp + ".log")).string());
+        write_run_settings(_prep_log);
+        reset_dataset_preview(effective_engine() != Engine::BuiltIn);
+        const RunFilms films{&_film_frames, &_film_masks, &_film_geometry};
+        if (effective_engine() == Engine::BuiltIn) _sfm.start(_sfm_job, films);
+        else                                      _colmap.start(_colmap_job, films);
+        _redo_frames = _redo_masks = _redo_model = _redo_geometry = false;
+        return;
+    }
+
+    app::PrepJob frozen = _sfm_job.prep;
+    std::string error;
+    std::error_code ec;
+    if (!app::worker::freeze_prep_job(
+            frozen, fs::current_path(ec).u8string(), error)) {
+        _native_device_error = error;
+        log(error);
+        _scheduler.set_foreground_device("");
+        return;
+    }
+    if (app::worker::reject_external_masking(frozen, error)) {
+        log(msg::scheduler_external_interactive.get());
+        _scheduler.set_foreground_device("");
+        return;
+    }
+    SfmJob scheduled_sfm = _sfm_job;
+    scheduled_sfm.prep = frozen;
+    const std::string image_dir =
+        planned_image_dir(frozen.inputs, frozen.workspace,
+                          frozen.photo_import);
+    std::string mask_dir;
+    if (frozen.mask_enable)
+        mask_dir = (fs::path(frozen.workspace) / "masks").u8string();
+    for (const PrepInput& input : frozen.inputs) {
+        if (input.mask_dir.empty()) continue;
+        mask_dir = app::reads_photos_in_place(frozen.inputs, frozen.photo_import)
+                       ? input.mask_dir
+                       : (fs::path(frozen.workspace) / "masks").u8string();
+        break;
+    }
+
+    app::sched::WorkflowSubmitOpts submit;
+    submit.work_dir = fs::current_path(ec).u8string();
+    submit.workspace = frozen.workspace;
+    submit.source_paths.reserve(frozen.inputs.size());
+    for (const PrepInput& input : frozen.inputs)
+        submit.source_paths.push_back(input.path);
+    submit.options_payload = "gui:native-dataset:v1";
+    const app::sched::PathClaim workspace_claim{frozen.workspace, true};
+    submit.path_claims.push_back(workspace_claim);
+    for (const PrepInput& input : frozen.inputs) {
+        const app::sched::PathClaim source_claim{input.path, false};
+        if (!app::sched::path_claims_conflict(source_claim, workspace_claim))
+            submit.path_claims.push_back(source_claim);
+    }
+
+    auto device = [&](app::sched::Phase& phase) {
+        phase.planned_device = _native_device_uuid;
+        phase.planned_device_name = _native_device_name;
+    };
+    app::sched::Phase prep;
+    prep.phase = "prep";
+    if (!app::reads_photos_in_place(frozen.inputs, frozen.photo_import))
+        prep.output = image_dir;
+    device(prep);
+    prep.payload = app::worker::serialize_prep_job(frozen);
+    submit.phases.push_back(std::move(prep));
+
+    app::sched::Phase sfm;
+    sfm.phase = "sfm";
+    sfm.output = (fs::path(frozen.workspace) / "sparse" / "0").u8string();
+    device(sfm);
+    sfm.args = _sfm.scheduler_args(scheduled_sfm, image_dir, mask_dir);
+    submit.phases.push_back(std::move(sfm));
+
+    if (_geometry.enable) {
+        app::sched::Phase geometry;
+        geometry.phase = "geometry";
+        geometry.optional = true;
+        geometry.output =
+            (fs::path(frozen.workspace) /
+             (_geometry.want_normal ? "normals" : "depths")).u8string();
+        device(geometry);
+        geometry.args.push_back(frozen.workspace);
+        const std::string image_arg =
+            image_dir == (fs::path(frozen.workspace) / "images").u8string()
+                ? "images" : image_dir;
+        geometry.args.push_back("--image-dir");
+        geometry.args.push_back(image_arg);
+        geometry.args.push_back("--model");
+        geometry.args.push_back(_geometry.model);
+        geometry.args.push_back("--max-size");
+        geometry.args.push_back(std::to_string(_geometry.max_size));
+        geometry.args.push_back("--num-tokens");
+        geometry.args.push_back(std::to_string(_geometry.num_tokens));
+        if (_geometry.want_depth) geometry.args.push_back("--depth");
+        if (!_geometry.want_normal) geometry.args.push_back("--no-normal");
+        geometry.args.push_back("--normal-format");
+        geometry.args.push_back(_geometry.normal_jpg ? "jpg" : "png");
+        geometry.args.push_back("--jpeg-quality");
+        geometry.args.push_back(std::to_string(_geometry.jpeg_quality));
+        geometry.args.push_back("--depth-units");
+        geometry.args.push_back(_geometry.depth_mm ? "mm" : "relative");
+        const char* ray[] = {"auto", "yes", "no"};
+        if (_geometry.ray_depth >= 0 && _geometry.ray_depth <= 2) {
+            geometry.args.push_back("--ray-depth");
+            geometry.args.push_back(ray[_geometry.ray_depth]);
+        }
+        if (_geometry.split >= 0 && _geometry.split <= 2) {
+            geometry.args.push_back("--split");
+            geometry.args.push_back(ray[_geometry.split]);
+        }
+        if (_geometry.overwrite || _redo_geometry)
+            geometry.args.push_back("--overwrite");
+        if (!_geometry.image_gamut.empty()) {
+            geometry.args.push_back("--image-gamut");
+            geometry.args.push_back(_geometry.image_gamut);
+        }
+        if (_geometry.image_is_linear.has_value())
+            geometry.args.push_back(*_geometry.image_is_linear
+                                        ? "--image-linear"
+                                        : "--no-image-linear");
+        submit.phases.push_back(std::move(geometry));
+    }
+
+    const std::string job_id = _scheduler.submit(submit);
+    _scheduler.set_foreground_device("");
+    if (job_id.empty()) {
+        log(msg::scheduler_external_interactive.get());
+        return;
+    }
+    _scheduled_dataset_id = job_id;
+    _scheduler.pause_dispatch(false);
     close_native_previews();
     close_splat();
-    app::set_crash_note("building dataset " + _workspace);
-    sync_dataset_jobs();
-    const std::string stamp = run_log_stamp();
-    const fs::path prep_log_file =
-        open_run_log(_prep_log,
-                     fs::path(planned_image_dir(_sources, _workspace,
-                                                _photo_import)).parent_path().string(),
-                     "prep", stamp);
-    // The unregistered-images list, beside this log with the same stamp,
-    // written by whichever engine runs (sfm/Pipeline.cpp or ColmapRunner).
-    set_ss_env("UNREG_LOG", prep_log_file.empty()
-                                ? std::string()
-                                : (prep_log_file.parent_path() /
-                                   ("unreg_" + stamp + ".log")).string());
-    write_run_settings(_prep_log);
-    // The preview holds a multi-gigabyte backbone; the run about to start
-    // wants that VRAM for reconstruction.
-    reset_dataset_preview(effective_engine() != Engine::BuiltIn);
-    const RunFilms films{&_film_frames, &_film_masks, &_film_geometry};
-    if (effective_engine() == Engine::BuiltIn) _sfm.start(_sfm_job, films);
-    else                                      _colmap.start(_colmap_job, films);
-    // One run each: a re-do that stayed armed would throw the same step away
-    // again the next time the button is pressed.
+    app::set_crash_note("building dataset " + frozen.workspace);
+    reset_dataset_preview(false);
     _redo_frames = _redo_masks = _redo_model = _redo_geometry = false;
 }
 
@@ -5995,6 +6195,137 @@ void GuiApp::draw_batch_device_picker(BatchJob& job) {
     draw_job_device_picker(job.device, "##batch_device");
 }
 
+void GuiApp::draw_scheduler_queue() {
+    ui::SeparatorText(msg::scheduler_title);
+    if (_scheduler_jobs.empty()) {
+        ui::TextDisabled(msg::scheduler_empty);
+        return;
+    }
+    for (const app::sched::Job& job : _scheduler_jobs) {
+        ImGui::PushID(job.job_id.c_str());
+        const ImVec4 color =
+            job.state == app::sched::JobState::Failed ||
+                    job.state == app::sched::JobState::Blocked
+                ? kErr
+                : job.state == app::sched::JobState::Succeeded
+                      ? kOk
+                      : job.state == app::sched::JobState::Stopping
+                            ? kWarn
+                            : kDim;
+        ui::TextColored(color, msg::scheduler_job, {job.job_id});
+        ImGui::SameLine();
+        ui::TextColored(color, scheduler_state_label(job.state));
+        if (!job.phase.empty())
+            ui::Text(msg::scheduler_phase, {job.phase});
+        if (!job.device_name.empty())
+            ui::Text(msg::scheduler_device, {job.device_name});
+        if (!job.output_dir.empty())
+            ui::TextDisabled(msg::scheduler_output, {job.output_dir});
+        for (const app::sched::Phase& phase : job.phases) {
+            if (phase.outcome == "partial")
+                ui::TextColored(kWarn, msg::scheduler_outcome_partial);
+            else if (phase.outcome == "nonmetric")
+                ui::TextColored(kWarn, msg::scheduler_outcome_nonmetric);
+        }
+        if (!job.error.empty())
+            ui::TextColoredWrapped(kErr, msg::scheduler_reason, {job.error});
+        auto logs = _scheduler_log_tail.find(job.job_id);
+        if (logs != _scheduler_log_tail.end() && !logs->second.empty()) {
+            ui::TextDisabled(msg::scheduler_log);
+            const std::string child = "##scheduler-log-" + job.job_id;
+            ImGui::BeginChild(child.c_str(), ImVec2(0, px(88.0f)),
+                              ImGuiChildFlags_Borders);
+            for (const std::string& line : logs->second) ui::TextRaw(line);
+            ImGui::EndChild();
+        }
+        if (job.state == app::sched::JobState::Queued) {
+            if (ui::Button(msg::scheduler_cancel))
+                _scheduler.cancel(job.job_id);
+        } else if (job.state == app::sched::JobState::Starting ||
+                   job.state == app::sched::JobState::Running ||
+                   job.state == app::sched::JobState::Stopping) {
+            if (ui::Button(msg::scheduler_stop_save))
+                _scheduler.stop_and_save(job.job_id);
+            ImGui::SameLine();
+            if (ui::Button(msg::scheduler_force_stop))
+                request_force_stop(job.job_id);
+        } else if (job.state == app::sched::JobState::Interrupted ||
+                   job.state == app::sched::JobState::Failed ||
+                   job.state == app::sched::JobState::Stopped ||
+                   job.state == app::sched::JobState::Blocked) {
+            if (ui::Button(msg::scheduler_retry))
+                _scheduler.retry(job.job_id);
+        }
+        ImGui::PopID();
+        ImGui::Separator();
+    }
+}
+
+void GuiApp::draw_scheduler_recovery_modal() {
+    bool pending = false;
+    for (const app::sched::Job& job : _scheduler_jobs)
+        pending = pending || (job.pending_resume &&
+                              !_recovery_dismissed[job.job_id]);
+    if (!pending) {
+        if (_recovery_shown) ImGui::CloseCurrentPopup();
+        _recovery_shown = false;
+        return;
+    }
+    if (!_recovery_shown) {
+        ui::OpenPopup(msg::scheduler_recovery_title);
+        _recovery_shown = true;
+    }
+    if (!ui::BeginPopupModal(msg::scheduler_recovery_title, nullptr,
+                             ImGuiWindowFlags_AlwaysAutoResize)) {
+        _recovery_shown = false;
+        return;
+    }
+    ui::TextWrapped(msg::scheduler_recovery_intro);
+    ImGui::Spacing();
+    for (const app::sched::Job& job : _scheduler_jobs) {
+        if (!job.pending_resume || _recovery_dismissed[job.job_id]) continue;
+        ImGui::PushID(("recovery-" + job.job_id).c_str());
+        ui::Text(msg::scheduler_job, {job.job_id});
+        ui::TextDisabled(msg::scheduler_phase, {job.phase});
+        if (!job.device_name.empty())
+            ui::TextDisabled(msg::scheduler_device, {job.device_name});
+        if (ui::Button(msg::scheduler_recovery_retry)) {
+            _scheduler.retry(job.job_id);
+            if (job.options_payload == "gui:native-dataset:v1")
+                _scheduled_dataset_id = job.job_id;
+        }
+        ImGui::SameLine();
+        if (ui::Button(msg::scheduler_later))
+            _recovery_dismissed[job.job_id] = true;
+        ImGui::PopID();
+        ImGui::Separator();
+    }
+    ImGui::EndPopup();
+}
+
+void GuiApp::draw_force_stop_modal() {
+    if (_force_stop_open) {
+        ui::OpenPopup(msg::scheduler_force_title);
+        _force_stop_open = false;
+    }
+    if (!ui::BeginPopupModal(msg::scheduler_force_title, nullptr,
+                             ImGuiWindowFlags_AlwaysAutoResize))
+        return;
+    ui::TextWrapped(msg::scheduler_force_warning);
+    ImGui::Spacing();
+    if (ui::Button(msg::scheduler_force_stop)) {
+        _scheduler.force_stop(_force_stop_job);
+        _force_stop_job.clear();
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ui::Button(msg::cancel)) {
+        _force_stop_job.clear();
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
+
 void GuiApp::draw_batch() {
     // Keeps the saved presets warm for the rows' pickers and their tooltips
     // (rate-limited inside, so this is a no-op most frames).
@@ -6020,7 +6351,7 @@ void GuiApp::draw_batch() {
 
     const float log_h = log_height(ImGui::GetContentRegionAvail().y);
     ImGui::BeginChild("##batchlist", ImVec2(0, body_height(log_h)));
-
+    draw_scheduler_queue();
     draw_batch_table();
 
     ImGui::Spacing();
@@ -6181,7 +6512,7 @@ void GuiApp::draw_batch_table() {
                     if (!row_auto) j.device = device;
                     _scheduler.set_device(j.scheduler_id, device, name);
                 } else {
-                    j.message = error;
+                    log(error);
                 }
             }
         }
@@ -6224,37 +6555,47 @@ void GuiApp::draw_batch_table() {
         ImGui::EndDisabled();
 
         ImGui::TableNextColumn();
-        switch (j.status) {
-            case BatchJob::Status::Running:
-                ui::TextColored(kWarn, msg::batch_status_running); break;
-            case BatchJob::Status::Done:
-                ui::TextColored(kOk, msg::batch_status_done); break;
-            case BatchJob::Status::Failed:
-                ui::TextColored(kErr, msg::batch_status_failed); break;
-            case BatchJob::Status::Skipped:
-                ui::TextColored(kDim, msg::batch_status_skipped); break;
-            case BatchJob::Status::Stopped:
-                ui::TextColored(kDim, msg::batch_status_stopped); break;
-            default:
-                ui::TextColored(kDim, msg::batch_status_pending); break;
-        }
-        // Where it went, or why it did not: engine text and paths, both raw.
-        const std::string& detail = j.message.empty() ? j.out_dir : j.message;
-        if (!detail.empty()) ui::help_on_hover_raw(detail.c_str());
+        const Msg& state_label = scheduled
+                                     ? scheduler_state_label(scheduled->state)
+                                     : msg::scheduler_state_queued;
+        const ImVec4 state_color =
+            scheduled && (scheduled->state == app::sched::JobState::Failed ||
+                          scheduled->state == app::sched::JobState::Blocked)
+                ? kErr
+                : scheduled && scheduled->state == app::sched::JobState::Succeeded
+                      ? kOk
+                      : scheduled &&
+                                scheduled->state == app::sched::JobState::Stopping
+                            ? kWarn
+                            : kDim;
+        ui::TextColored(state_color, state_label);
+        if (scheduled && !scheduled->output_dir.empty())
+            ui::help_on_hover_raw(scheduled->output_dir.c_str());
+        if (scheduled && !scheduled->error.empty())
+            ui::help_on_hover_raw(scheduled->error.c_str());
         ImGui::SameLine();
         if (scheduled) {
             ImGui::BeginDisabled(scheduled->state == app::sched::JobState::Succeeded);
             if (scheduled->state == app::sched::JobState::Queued) {
-                if (ui::Button(msg::cancel)) _scheduler.cancel(j.scheduler_id);
+                if (ui::Button(msg::scheduler_cancel))
+                    _scheduler.cancel(j.scheduler_id);
             } else if (scheduled->state == app::sched::JobState::Starting ||
                        scheduled->state == app::sched::JobState::Running ||
                        scheduled->state == app::sched::JobState::Stopping) {
-                if (ui::Button(msg::batch_stop_now))
+                if (ui::Button(msg::scheduler_stop_save))
                     _scheduler.stop_and_save(j.scheduler_id);
-            } else if (ui::Button(msg::data_error_retry)) {
-                _scheduler.retry(j.scheduler_id);
-                _batch_active = true;
-                _scheduler.pause_dispatch(false);
+                ImGui::SameLine();
+                if (ui::Button(msg::scheduler_force_stop))
+                    request_force_stop(j.scheduler_id);
+            } else if (scheduled->state == app::sched::JobState::Interrupted ||
+                       scheduled->state == app::sched::JobState::Failed ||
+                       scheduled->state == app::sched::JobState::Stopped ||
+                       scheduled->state == app::sched::JobState::Blocked) {
+                if (ui::Button(msg::scheduler_retry)) {
+                    _scheduler.retry(j.scheduler_id);
+                    _batch_active = true;
+                    _scheduler.pause_dispatch(false);
+                }
             }
             ImGui::EndDisabled();
         }

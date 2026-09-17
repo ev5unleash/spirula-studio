@@ -39,8 +39,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
-#include <sstream>
-
+#include <stdexcept>
 namespace fs = std::filesystem;
 namespace lmsg = spirula::i18n::msg::log;
 using spirula::i18n::format;
@@ -212,13 +211,51 @@ bool sfm_features_cached(int features, int matcher) {
 
 std::string SfmRunner::availability() {
 #ifndef SS_TOOL_SFM
-    return lmsg::err_no_sfm_module.get();
+    return "spirula-sfm is not included in this build";
 #else
-    if (app::exe_path().empty())
-        return lmsg::err_no_exe_path.get();
     return "";
 #endif
 }
+
+std::vector<std::string> SfmRunner::scheduler_args(
+    const SfmJob& job, const std::string& image_dir,
+    const std::string& mask_dir) {
+    PrepResult prep;
+    prep.image_dir = image_dir;
+    prep.mask_dir = mask_dir;
+    prep.mask_dir_flipped = false;
+    for (const PrepInput& input : job.prep.inputs) {
+        if (!input.is_video) continue;
+        prep.captures.push_back(
+            {input.subdir, input.path, job.prep.force_external_decode
+                                      ? (double)job.prep.video_fps
+                                      : 0.0});
+    }
+    const std::vector<std::string> model_args = recon_args(job, prep);
+    std::vector<std::string> args = {
+        "auto", image_dir, "-o", job.prep.workspace,
+        "--progress-dir", (fs::path(job.prep.workspace) / ".progress").string()};
+    for (size_t i = 0; i < model_args.size(); ++i) {
+        if (model_args[i] == "--manifest" && i + 1 < model_args.size()) {
+            const fs::path manifest = fs::path(job.prep.workspace) /
+                                      ".spirula_manifest.yaml";
+            std::error_code ec;
+            fs::create_directories(manifest.parent_path(), ec);
+            if (ec) throw std::runtime_error(
+                "cannot create SfM workspace: " + ec.message());
+            std::ofstream out(manifest, std::ios::binary | std::ios::trunc);
+            if (!out) throw std::runtime_error("cannot write SfM manifest");
+            out << model_args[++i];
+            if (!out) throw std::runtime_error("cannot write SfM manifest");
+            args.push_back("--manifest");
+            args.push_back(manifest.u8string());
+        } else {
+            args.push_back(model_args[i]);
+        }
+    }
+    return args;
+}
+
 
 SfmRunner::~SfmRunner() {
     cancel();
