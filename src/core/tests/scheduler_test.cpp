@@ -88,8 +88,8 @@ int main(int argc, char** argv) {
         const fs::path state = migration / "job-state.json";
         std::ofstream(state, std::ios::binary | std::ios::trunc)
             << R"({"schema_version":1,"jobs":[{"order":0,"job_id":"legacy-job","phase":"train","device":"gpu-legacy","device_name":"Legacy GPU","work_dir":")"
-            << migration.u8string()
-            << R"(","run_dir":")" << (migration / "run").u8string()
+            << migration.generic_u8string()
+            << R"(","run_dir":")" << (migration / "run").generic_u8string()
             << R"(","output_dir":"","created_at":"created","state":"Queued","attempt_id":"","error":"","pending_resume":false,"last_exit_code":-1,"args":["--help"]}]})";
         sched::JobScheduler migrated(migration.u8string(), exe);
         migrated.pause_dispatch(true);

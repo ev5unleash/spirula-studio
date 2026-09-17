@@ -60,8 +60,6 @@ struct Phase {
     int exit_code = -1;
     std::string error;
 };
-using PhaseRecord = Phase;
-using JobPhase = Phase;
 
 struct PathClaim {
     std::string path;
@@ -122,7 +120,6 @@ struct WorkflowSubmitOpts {
     std::vector<PathClaim> path_claims;
     bool add_scheduler_publish = true;
 };
-using SubmitWorkflowOpts = WorkflowSubmitOpts;
 
 // Events are queued by worker threads and drained by the owning UI thread.
 struct Event {
@@ -155,10 +152,8 @@ private:
     bool save_locked();
 
 public:
-    // Compatibility wrapper: one submitted phase, no implicit descendants.
     std::string submit(const SubmitOpts& o);
     std::string submit(const WorkflowSubmitOpts& o);
-    std::string submit_workflow(const WorkflowSubmitOpts& o) { return submit(o); }
 
     // UI-facing snapshot. Never blocks on a running attempt.
     std::vector<Job> list() const;

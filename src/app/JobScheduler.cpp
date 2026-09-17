@@ -13,6 +13,7 @@
 #include <ctime>
 #include <filesystem>
 #include <cstddef>
+#include <fstream>
 #include <iterator>
 #include <limits>
 #include <random>
@@ -797,7 +798,7 @@ void JobScheduler::load() {
         j->job_id = string_field(el, "job_id"); j->phase = string_field(el, "phase"); j->device = string_field(el, "device");
         j->device_name = string_field(el, "device_name", false); j->work_dir = string_field(el, "work_dir"); j->run_dir = string_field(el, "run_dir");
         j->output_dir = string_field(el, "output_dir"); j->workspace = string_field(el, "workspace", false); j->source_paths = string_array(el, "source_paths", false);
-        j->options_payload = string_field(el, "options_payload", false); j->created_at = string_field(el, "created_at"); j->attempt_id = string_field(el, "attempt_id");
+        j->options_payload = string_field(el, "options_payload", false); j->created_at = string_field(el, "created_at"); j->attempt_id = string_field(el, "attempt_id"); j->error = string_field(el, "error");
         j->args = string_array(el, "args");
         j->last_exit_code = int_field(el, "last_exit_code");
         j->pending_resume = loaded_schema == 2 ? bool_field(el, "pending_resume") : false;
@@ -979,7 +980,7 @@ void JobScheduler::supervisor_main(std::shared_ptr<Attempt> att) {
     Phase phase;
     { std::lock_guard<std::mutex> lk(_mu); auto it = _jobs.find(att->job_id); if (it == _jobs.end() || att->phase_index >= it->second->phases.size()) { att->finished.store(true); _cv.notify_all(); return; } j = it->second; phase = j->phases[att->phase_index]; if (j->state == JobState::Starting) { j->state = JobState::Running; save_locked(); queue_event_locked(*j); } }
     const fs::path run_dir = fs::u8path(j->run_dir); const fs::path req_path = run_dir / ("request-" + att->id + ".json"); const fs::path res_path = run_dir / ("result-" + att->id + ".json"); const fs::path log_path = run_dir / ("log-" + att->id + ".txt");
-    app::worker::Request request; request.schema_version = 2; request.job_id = j->job_id; request.attempt_id = att->id; request.phase = phase.phase; request.device = phase.planned_device; request.device_name = phase.planned_device_name; request.work_dir = j->work_dir; request.workspace = j->workspace; request.result_path = res_path.u8string(); request.args = phase.args; request.payload = phase.payload;
+    app::worker::Request request; request.schema_version = 2; request.request_path = req_path.u8string(); request.job_id = j->job_id; request.attempt_id = att->id; request.phase = phase.phase; request.device = phase.planned_device; request.device_name = phase.planned_device_name; request.work_dir = j->work_dir; request.workspace = j->workspace; request.result_path = res_path.u8string(); request.args = phase.args; request.payload = phase.payload;
     try { write_request_file(request, req_path); app::worker::validate_request(request); }
     catch (const std::exception& e) { std::lock_guard<std::mutex> lk(_mu); transition_locked(*j, JobState::Failed, e.what()); _leases.erase(phase.planned_device); att->finished.store(true); save_locked(); _cv.notify_all(); return; }
     std::ofstream log_file(log_path, std::ios::binary | std::ios::trunc);
