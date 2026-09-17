@@ -218,12 +218,8 @@ std::string SfmRunner::availability() {
 }
 
 std::vector<std::string> SfmRunner::scheduler_args(
-    const SfmJob& job, const std::string& image_dir,
-    const std::string& mask_dir, std::string& manifest_payload) {
-    PrepResult prep;
-    prep.image_dir = image_dir;
-    prep.mask_dir = mask_dir;
-    prep.mask_dir_flipped = false;
+    const SfmJob& job, std::string& manifest_payload) {
+    PrepResult prep = app::planned_prep(job.prep);
     for (const PrepInput& input : job.prep.inputs) {
         if (!input.is_video) continue;
         prep.captures.push_back(
@@ -233,7 +229,7 @@ std::vector<std::string> SfmRunner::scheduler_args(
     }
     const std::vector<std::string> model_args = recon_args(job, prep);
     std::vector<std::string> args = {
-        "auto", image_dir, "-o", job.prep.workspace,
+        "auto", prep.image_dir, "-o", job.prep.workspace,
         "--progress-dir", (fs::path(job.prep.workspace) / ".progress").string()};
     for (size_t i = 0; i < model_args.size(); ++i) {
         if (model_args[i] == "--manifest" && i + 1 < model_args.size()) {
@@ -782,6 +778,7 @@ void SfmRunner::run(SfmJob job) {
             std::lock_guard<std::mutex> lk(_mu);
             _sfm_image_dir = prep.image_dir;
             _sfm_mask_dir = prep.mask_dir;
+            _mask_flipped = prep.mask_dir_flipped;
         }
         if (prep.per_folder_cameras && job.camera_mode == 0) {
             log(lmsg::one_camera_per_folder.get());

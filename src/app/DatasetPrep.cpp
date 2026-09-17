@@ -882,6 +882,48 @@ std::string planned_image_dir(const std::vector<PrepInput>& inputs,
                              : (fs::path(workspace) / "images").string();
 }
 
+PrepResult planned_prep(const PrepJob& job) {
+    PrepResult out;
+    const bool in_place = reads_photos_in_place(job.inputs, job.photo_import);
+    out.image_dir = planned_image_dir(job.inputs, job.workspace,
+                                      job.photo_import);
+    out.image_dir_cfg = in_place ? out.image_dir : "images";
+
+    bool needs_masks = job.mask_enable;
+    for (const PrepInput& in : job.inputs)
+        needs_masks = needs_masks || !in.mask_dir.empty() || !in.stencil.empty();
+    if (!needs_masks) return out;
+
+    const fs::path workspace(job.workspace);
+    if (!in_place) {
+        out.mask_dir = (workspace / "masks").string();
+        out.mask_dir_cfg = "masks";
+        return out;
+    }
+
+    const PrepInput& in = job.inputs[0];
+    if (in.mask_dir.empty()) {
+        out.mask_dir = (workspace / "masks").string();
+        out.mask_dir_cfg = "masks";
+        return out;
+    }
+
+    std::error_code ec;
+    const std::string bundled = fs::absolute(in.mask_dir, ec).string();
+    if (in.stencil.empty()) {
+        out.mask_dir = bundled;
+        out.mask_dir_cfg = bundled;
+        out.mask_dir_flipped = job.flip_found_masks;
+        return out;
+    }
+
+    const bool under_images = inside(fs::path(bundled), fs::path(out.image_dir));
+    out.mask_dir = under_images ? bundled : (workspace / "masks").string();
+    out.mask_dir_cfg = under_images ? bundled : "masks";
+    return out;
+}
+
+
 const Backends& backends() {
     static const Backends probed = [] {
         Backends b;
@@ -1026,6 +1068,11 @@ int64_t DatasetPrep::estimate_frames(const PrepJob& job, const PrepInput& in,
 bool DatasetPrep::run(const PrepJob& job_in, PrepResult& out, std::string& error,
                       const RefreshFn& refresh_masks) {
     PrepJob job = job_in;
+    const PrepResult plan = planned_prep(job);
+    out = PrepResult{};
+    out.image_dir = plan.image_dir;
+    out.image_dir_cfg = plan.image_dir_cfg;
+
 #ifdef SS_BUILD_SAM
     // Release the process-wide inference pool on every exit; later reconstruction
     // needs the VRAM returned by masking.
@@ -1085,8 +1132,6 @@ bool DatasetPrep::run(const PrepJob& job_in, PrepResult& out, std::string& error
         // raw captures does not want a second copy, and the parsers accept an
         // absolute image_dir.
         const PrepInput& in = job.inputs[0];
-        out.image_dir = fs::absolute(in.path).string();
-        out.image_dir_cfg = out.image_dir;
         // A capture handed over already split into cam/, cam0/, cam1/ is
         // several cameras, exactly as a multi-track video is -- and the folders
         // are what says so, since this path copies nothing.
@@ -1097,7 +1142,8 @@ bool DatasetPrep::run(const PrepJob& job_in, PrepResult& out, std::string& error
             // Nothing came with them, so anything generated goes in the
             // dataset, next to the reconstruction rather than next to the
             // photos -- a folder we were only asked to read.
-            per[0].masks = (ws / "masks").string();
+            per[0].masks = plan.mask_dir.empty() ? (ws / "masks").string()
+                                                : plan.mask_dir;
             per[0].masks_rel = "masks";
             skip_dir = per[0].masks;
         } else {
@@ -1108,24 +1154,20 @@ bool DatasetPrep::run(const PrepJob& job_in, PrepResult& out, std::string& error
                 // Nothing to fold in, so they are read where they lie and keep
                 // whichever convention they arrived in.
                 per[0].masks = per[0].masks_rel = bundled;
-                out.mask_dir_flipped = job.flip_found_masks;
+                out.mask_dir_flipped = plan.mask_dir_flipped;
             } else {
                 // The stencil has to go somewhere, and a masks/ under the
                 // images is the one folder every reader already skips -- so
                 // when theirs is there, the combination replaces it.
                 per[0].merge_from = bundled;
-                const bool under_images =
-                    inside(fs::path(bundled), fs::path(out.image_dir));
-                per[0].masks = under_images ? bundled : (ws / "masks").string();
-                per[0].masks_rel = under_images ? bundled : std::string("masks");
+                per[0].masks = plan.mask_dir;
+                per[0].masks_rel = plan.mask_dir_cfg;
             }
-            out.mask_dir = per[0].masks;
-            out.mask_dir_cfg = per[0].masks_rel;
+            out.mask_dir = plan.mask_dir;
+            out.mask_dir_cfg = plan.mask_dir_cfg;
             skip_dir = per[0].masks;
         }
     } else {
-        out.image_dir = (ws / "images").string();
-        out.image_dir_cfg = "images";
         // Every input is measured before any of them is extracted, so the bar
         // covers the whole step from the first frame rather than restarting on
         // each input (StageTally).
@@ -1134,7 +1176,9 @@ bool DatasetPrep::run(const PrepJob& job_in, PrepResult& out, std::string& error
             const PrepInput& in = job.inputs[i];
             Prepared& p = per[i];
             p.images = under(out.image_dir, in.subdir).string();
-            p.masks = under((ws / "masks").string(), in.subdir).string();
+            p.masks = under((plan.mask_dir.empty() ? (ws / "masks").string()
+                                                   : plan.mask_dir),
+                            in.subdir).string();
             p.images_rel = under("images", in.subdir).generic_string();
             p.masks_rel = under("masks", in.subdir).generic_string();
             // Folded in from where they lie, not from the copies gathered next
@@ -1259,10 +1303,14 @@ bool DatasetPrep::run(const PrepJob& job_in, PrepResult& out, std::string& error
     // here, written by the decoder, or linked in beside gathered photos. The
     // in-place case has already named the folder it reads them from.
     std::error_code mec;
-    if (out.mask_dir.empty() && want_masks && fs::is_directory(ws / "masks", mec) &&
-        !fs::is_empty(ws / "masks", mec)) {
-        out.mask_dir = (ws / "masks").string();
-        out.mask_dir_cfg = "masks";
+    const fs::path planned_masks =
+        plan.mask_dir.empty() ? (ws / "masks") : fs::path(plan.mask_dir);
+    if (out.mask_dir.empty() && want_masks &&
+        fs::is_directory(planned_masks, mec) &&
+        !fs::is_empty(planned_masks, mec)) {
+        out.mask_dir = planned_masks.string();
+        out.mask_dir_cfg = plan.mask_dir_cfg.empty() ? "masks"
+                                                      : plan.mask_dir_cfg;
     }
     return true;
 }

@@ -1061,16 +1061,26 @@ bool GuiApp::scheduled_dataset_active() const {
 
 void GuiApp::handle_scheduler_dataset_done(const app::sched::Job& job) {
     std::string image_dir, mask_dir;
+    bool mask_flipped = false;
     if (!job.phases.empty()) {
-        for (const std::string& output : job.phases.front().outputs) {
-            if (image_dir.empty()) image_dir = output;
-            if (fs::path(output).filename() == "masks") mask_dir = output;
-            if (fs::path(output).filename() == "images") image_dir = output;
+        const app::sched::Phase& prep = job.phases.front();
+        if (!prep.outputs.empty()) image_dir = prep.outputs[0];
+        if (prep.outputs.size() > 1) mask_dir = prep.outputs[1];
+        try {
+            const app::PrepJob frozen =
+                app::worker::deserialize_prep_job(prep.payload);
+            mask_flipped = app::planned_prep(frozen).mask_dir_flipped;
+        } catch (const std::exception& e) {
+            _scheduled_dataset_id.clear();
+            _native_device_error =
+                std::string("scheduled dataset preparation metadata invalid: ") +
+                e.what();
+            log(_native_device_error);
+            return;
         }
-        if (image_dir.empty()) image_dir = job.phases.front().output;
     }
     _scheduled_dataset_id.clear();
-    open_dataset(job.workspace, image_dir, mask_dir, false, true);
+    open_dataset(job.workspace, image_dir, mask_dir, mask_flipped, true);
 }
 
 void GuiApp::advance_scheduler_jobs() {
@@ -2834,19 +2844,10 @@ void GuiApp::start_dataset_job() {
     scheduled_sfm.prep = frozen;
     scheduled_sfm.device_selector = scheduled_device;
     scheduled_sfm.geometry.device_uuid = scheduled_device;
-    const std::string image_dir =
-        planned_image_dir(frozen.inputs, frozen.workspace,
-                          frozen.photo_import);
-    std::string mask_dir;
-    if (frozen.mask_enable)
-        mask_dir = (fs::path(frozen.workspace) / "masks").u8string();
-    for (const PrepInput& input : frozen.inputs) {
-        if (input.mask_dir.empty()) continue;
-        mask_dir = app::reads_photos_in_place(frozen.inputs, frozen.photo_import)
-                       ? input.mask_dir
-                       : (fs::path(frozen.workspace) / "masks").u8string();
-        break;
-    }
+    const app::PrepResult planned = app::planned_prep(frozen);
+    const std::string image_dir = planned.image_dir;
+    const std::string mask_dir = planned.mask_dir;
+
 
     app::sched::WorkflowSubmitOpts submit;
     submit.work_dir = fs::current_path(ec).u8string();
@@ -2879,8 +2880,7 @@ void GuiApp::start_dataset_job() {
     sfm.phase = "sfm";
     sfm.output = (fs::path(frozen.workspace) / "sparse" / "0").u8string();
     device(sfm);
-    sfm.args = _sfm.scheduler_args(scheduled_sfm, image_dir, mask_dir,
-                                   sfm.payload);
+    sfm.args = _sfm.scheduler_args(scheduled_sfm, sfm.payload);
     submit.phases.push_back(std::move(sfm));
 
     if (_geometry.enable) {

@@ -265,6 +265,11 @@ struct PrepResult {
     // a multi-track video -- so intrinsics must not be shared across them.
     bool per_folder_cameras = false;
 };
+// The paths and mask convention a preparation will publish before it runs.
+// DatasetPrep, scheduled SfM and the GUI handoff all use this same decision;
+// actual completed output folders still win when the worker reports them.
+PrepResult planned_prep(const PrepJob& job);
+
 
 // Build/runtime capabilities and user-facing explanations for each fallback.
 // Reasons describe why a backend is unavailable; notes describe what will run.
