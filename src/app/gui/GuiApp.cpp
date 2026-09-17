@@ -4478,34 +4478,55 @@ void GuiApp::poll_sfm_progress() {
     if (_sfm_polled_at > 0.0 && now - _sfm_polled_at < 0.5) return;
     _sfm_polled_at = now;
 
+    const app::sched::Job* scheduled = scheduler_job(_scheduled_dataset_id);
+    const bool scheduled_sfm = scheduled_dataset_pending() && scheduled &&
+                               scheduled->phase == "sfm";
+    std::string image_dir = _sfm.sfm_image_dir();
+    std::string mask_dir = _sfm.sfm_mask_dir();
+    std::string features_dir = _sfm.features_dir();
+    std::string matches_path = _sfm.matches_path();
+    std::string live_matches_path = _sfm.live_matches_path();
+    std::string progress_dir = _sfm.progress_dir();
+    std::string thumbs_dir = _sfm.thumbs_dir();
+    if (scheduled) {
+        image_dir = planned_image_dir(_sources, scheduled->workspace, _photo_import);
+        const fs::path workspace(scheduled->workspace);
+        const fs::path masks = workspace / "masks";
+        std::error_code ec;
+        mask_dir = fs::is_directory(masks, ec) ? masks.u8string() : std::string();
+        features_dir = (workspace / "features").u8string();
+        matches_path = (workspace / "matches.bin").u8string();
+        progress_dir = (workspace / ".progress").u8string();
+        live_matches_path = (workspace / ".progress" / "live_matches.bin").u8string();
+        thumbs_dir = (workspace / ".progress" / "thumbs").u8string();
+    }
+
     // The frames of the extraction step are shown by whoever writes them; the
     // features are read off disk, which is what this watcher is for.
-    if (dataset_busy() && dataset_steps()->current() == Stage::Features)
-        _features.start(_sfm.sfm_image_dir(), _sfm.sfm_mask_dir(),
-                        _sfm.features_dir(), &_film_features,
-                        _sfm.thumbs_dir());
-    _pairs_view.configure(_sfm.sfm_image_dir(), _sfm.sfm_mask_dir(),
-                          _sfm.features_dir(), _sfm.matches_path(),
-                          _sfm.live_matches_path());
+    if (scheduled_sfm ||
+        (dataset_busy() && dataset_steps()->current() == Stage::Features))
+        _features.start(image_dir, mask_dir, features_dir, &_film_features,
+                        thumbs_dir);
+    _pairs_view.configure(image_dir, mask_dir, features_dir, matches_path,
+                          live_matches_path);
 
-    const std::string dir = _sfm.progress_dir();
-    if (dir.empty()) return;
+    if (progress_dir.empty()) return;
 
     PairMatrix pm;
-    if (read_pair_matrix(dir, _pairs_mtime, pm)) _matrix.set(pm);
+    if (read_pair_matrix(progress_dir, _pairs_mtime, pm)) _matrix.set(pm);
     // matches.bin is the whole truth and outlives the live file, which the run
     // deletes with the rest of the intermediates.
     if (!dataset_busy() &&
-        read_pair_matrix_from_matches(_sfm.matches_path(), _matches_mtime, pm))
+        read_pair_matrix_from_matches(matches_path, _matches_mtime, pm))
         _matrix.set(pm);
 
     LiveModel lm;
-    if (read_live_model(dir, _model_mtime, lm)) {
+    if (read_live_model(progress_dir, _model_mtime, lm)) {
         _live_model = std::move(lm);
         // The mapper's own output is a wall of per-registration detail, so the
         // default log used to go quiet for the longest step. These are the
         // model in hand, not the bar -- a seed retry starts one over.
-        if (dataset_busy() && _live_model.n_images) {
+        if (!scheduled && dataset_busy() && _live_model.n_images) {
             RunProgress& p = _sfm.steps();
             p.note(Stage::Mapping,
                    i18n::format(dmsg::model_live_counts,
@@ -5297,11 +5318,12 @@ void GuiApp::draw_dataset_form(float height, bool running) {
     // before any of them can be started.
 #if defined(SS_BUILD_SAM) || defined(SS_TOOL_SFM) || defined(SS_BACKEND_VULKAN)
     draw_device_picker(false, &dmsg::desktop_gpu);
+    ui::help_on_hover(dmsg::desktop_gpu_help);
     if (effective_engine() == Engine::BuiltIn &&
         !_sfm_job.prep.force_external_masking &&
         (!_mask_enable || backends().builtin_masking)) {
         ImGui::SetNextItemWidth(px(220.0f));
-        draw_scheduled_device_picker();
+        draw_scheduled_device_picker(dmsg::queued_job_gpu_help);
         ImGui::SameLine();
         ui::Text(dmsg::queued_job_gpu);
     }
@@ -5472,7 +5494,7 @@ void GuiApp::draw_new_dataset() {
     // What the run says about itself, read before the layout is decided:
     // whether there is anything to show is what decides whether the screen is
     // one column or two.
-    if (!scheduled_dataset_pending()) poll_sfm_progress();
+    poll_sfm_progress();
 
     // The log spans the bottom whatever the body does above it: it is the one
     // panel that is read across everything, and it is what a run used to be
@@ -6212,10 +6234,10 @@ void GuiApp::draw_job_device_picker(std::string& request, const char* id,
 #endif
 }
 
-void GuiApp::draw_scheduled_device_picker() {
+void GuiApp::draw_scheduled_device_picker(const spirula::i18n::Msg& help) {
     draw_job_device_picker(_scheduled_device_request, "##scheduled_device",
                            &_scheduled_device_choice_set);
-    ui::help_on_hover(msg::device_auto_help);
+    ui::help_on_hover(help);
 }
 
 void GuiApp::draw_batch_device_picker(BatchJob& job) {
@@ -6378,7 +6400,7 @@ void GuiApp::draw_batch() {
         ui::TextColoredWrappedRaw(kErr, scheduler_error);
     ui::Text(msg::menu_device);
     ImGui::SameLine();
-    draw_scheduled_device_picker();
+    draw_scheduled_device_picker(msg::device_auto_help);
     if (_batch_active) {
         ImGui::SameLine();
         if (_scheduler.dispatch_paused()) {

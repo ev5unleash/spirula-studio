@@ -67,11 +67,41 @@ SS_MSG(desktop_gpu,
     IT("GPU desktop"), NL("Desktop-GPU"), RU("GPU приложения"),
     TR("Masaüstü GPU'su"));
 
+SS_MSG(desktop_gpu_help,
+    EN("Used by previews and GPU work that runs directly in this app."),
+    JA("プレビューと、このアプリ内で直接実行される GPU 処理に使用します。"),
+    ZH_HANS("用于预览和直接在此应用中运行的 GPU 任务。"),
+    ZH_HANT("用於預覽和直接在此應用程式中執行的 GPU 工作。"),
+    KO("미리보기와 이 앱에서 직접 실행되는 GPU 작업에 사용됩니다."),
+    DE("Wird für Vorschauen und direkt in dieser App ausgeführte GPU-Arbeit verwendet."),
+    FR("Utilisé pour les aperçus et les traitements GPU exécutés directement dans l'application."),
+    ES("Se usa para las vistas previas y el trabajo de GPU que se ejecuta directamente en la aplicación."),
+    PT("Usada nas visualizações e no trabalho de GPU executado diretamente no aplicativo."),
+    IT("Usata per le anteprime e le operazioni GPU eseguite direttamente nell'applicazione."),
+    NL("Wordt gebruikt voor voorbeelden en GPU-werk dat rechtstreeks in deze app draait."),
+    RU("Используется для предпросмотра и GPU-задач, выполняемых прямо в приложении."),
+    TR("Önizlemeler ve doğrudan bu uygulamada çalışan GPU işleri için kullanılır."));
+
 SS_MSG(queued_job_gpu,
     EN("Job GPU"), JA("ジョブ GPU"), ZH_HANS("任务 GPU"), ZH_HANT("工作 GPU"),
     KO("작업 GPU"), DE("Auftrags-GPU"), FR("GPU de la tâche"),
     ES("GPU de la tarea"), PT("GPU da tarefa"), IT("GPU dell'attività"),
     NL("Taak-GPU"), RU("GPU задания"), TR("İş GPU'su"));
+
+SS_MSG(queued_job_gpu_help,
+    EN("Used by this queued dataset job. The choice is fixed when the job starts."),
+    JA("この待機中のデータセットジョブに使用します。選択はジョブ開始時に固定されます。"),
+    ZH_HANS("用于此排队的数据集任务。任务启动时会固定该选择。"),
+    ZH_HANT("用於此排程的資料集工作。工作開始時會固定該選擇。"),
+    KO("이 대기 중인 데이터셋 작업에 사용됩니다. 작업이 시작되면 선택이 고정됩니다."),
+    DE("Wird für diesen eingereihten Dataset-Auftrag verwendet. Die Auswahl steht beim Start fest."),
+    FR("Utilisé pour cette tâche de jeu de données en file d'attente. Le choix est fixé au démarrage."),
+    ES("Se usa para esta tarea de conjunto de datos en cola. La selección queda fijada al iniciar la tarea."),
+    PT("Usada nesta tarefa de conjunto de dados na fila. A escolha é fixada quando a tarefa começa."),
+    IT("Usata da questa attività del set di dati in coda. La scelta viene fissata all'avvio."),
+    NL("Wordt gebruikt voor deze wachtrijtaak. De keuze staat vast zodra de taak start."),
+    RU("Используется этим заданием в очереди. Выбор фиксируется при запуске задания."),
+    TR("Bu sıradaki veri kümesi işinde kullanılır. Seçim iş başladığında sabitlenir."));
 
 SS_MSG(section_advanced,
     EN("Advanced"),      JA("詳細設定"),      ZH_HANS("高级"),     ZH_HANT("進階"),

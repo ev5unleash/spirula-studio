@@ -344,7 +344,7 @@ private:
     void open_mesh_preview();
     void close_mesh_preview();
     void draw_batch();
-    void draw_scheduled_device_picker();
+    void draw_scheduled_device_picker(const spirula::i18n::Msg& help);
     void draw_batch_device_picker(BatchJob& job);
     void draw_job_device_picker(std::string& request, const char* id,
                                 bool* choice_set = nullptr);
