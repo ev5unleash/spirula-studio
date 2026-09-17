@@ -1,6 +1,6 @@
 # Explicit-device process scheduling
 
-Status: Phase 4 in progress; training queue and device controls implemented; dataset, recovery, and acceptance work pending.
+Status: Implementation through Phase 4 is present; Phase 4 desktop acceptance and Phases 5-6 remain open.
 
 Target branch: `feature/device-job-scheduling`, based on `feature/native-gpu-selection`.
 
@@ -363,8 +363,56 @@ Use existing `SS_PROFILE=1` stage/kernel timing and bounded benchmarks on repres
 
 That future plan must separately address dynamic splat creation/deletion, stable ownership/IDs, optimizer moment and gradient synchronization, reproducibility/numerical behavior, partition/load balance, checkpoint/recovery, and communication cost. None of those structures or dependencies should be added speculatively to this scheduler.
 
-## 9. Evidence from this planning task
+## 9. Implementation status and evidence
 
-- Inspected current source for selector precedence, runtime pinning, GUI launch/batch ownership, process supervision, prep coupling, training config/resume, output naming, and checkpoint publication; read the existing architecture/build/testing/device-selection notes.
-- Recorded `feature/device-job-scheduling` with a clean worktree and no stashes before writing this document.
-- Ran the existing binary's read-only `./build/spirula.exe sam devices`. It listed NVIDIA GeForce RTX 3060 and AMD Radeon(TM) Graphics as usable according to the NN baseline probe. This is inventory only; it does not establish model capacity, compute overlap, training success, or that the existing binary was rebuilt from current source.
+The implementation landed on `feature/device-job-scheduling` in commits
+`00f25860` through `0c4d590a`. It provides:
+
+- one durable local scheduler with per-device admission, workspace/run leases,
+  fixed dataset and training phases, atomic state recovery, and bounded event
+  delivery;
+- one phase worker protocol for native preparation, built-in SfM, geometry, and
+  training, using the existing preparation and training implementations;
+- process-tree supervision, cooperative stop versus forced termination, output
+  lease handoff, and parent-death handling;
+- native dataset and batch submission in the GUI, distinct lifecycle states,
+  pending target selection, per-job retry/Later recovery, and all catalog copy
+  in the 13 supported languages.
+
+The Windows Vulkan integration build passed for `spirula`, `scheduler_test`,
+`worker_request_test`, and `subprocess_test`. The three executables then passed:
+
+- `scheduler_test`: output/state ownership, schema migration, path-claim
+  conflicts, same-device serialization, unrelated-device progress, foreground
+  reservations, pause/resume, persistence, recovery, and failed-publication
+  behavior;
+- `worker_request_test`: request validation, path freezing, preparation payload
+  round-trip, and rejection of external Python masking;
+- `subprocess_test`: environment isolation, line capture, cooperative and
+  forced stop, spawn failure, and inherited output-lease lifetime.
+
+The rebuilt Vulkan GUI target also passed the comment/i18n/font/build gates
+after the integration cleanup. A fresh `SS_BUILD_GUI=OFF`,
+`SS_BUILD_SFM=ON`, `SS_BUILD_SAM=ON`, `SS_ENABLE_PATENTED=OFF` configuration
+built `spirula` successfully, and its `--help` command exited successfully.
+
+### Acceptance still open
+
+The milestone is not complete until these external/manual rows are exercised
+and recorded:
+
+- the real desktop Phase 4 gate: preserve a live foreground device, run two
+  independent jobs, retarget pending work, stop one, restart, retry, and verify
+  Later plus mask-overlay color correctness;
+- real preparation, SfM, geometry, bounded training, evaluation, checkpoint,
+  and run-directory resume fixtures with the required accepted model weights;
+- overlapping native training on two suitable physical GPUs, followed by the
+  serial-versus-scheduled makespan measurement;
+- POSIX process-tree/parent-death validation and the remaining startup,
+  mid-save, disk-full, Unicode-path, and state-publication fault windows;
+- the optional patented native-video row in a separately opted-in build.
+
+The rebuilt headless binary's `sam devices` command listed an NVIDIA GeForce
+RTX 3060 and AMD Radeon(TM) Graphics as usable. That is inventory only: it does
+not prove that both fit the required models, that GPU work overlapped, or that
+any Phase 5 workload passed.
