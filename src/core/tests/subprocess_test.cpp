@@ -1,7 +1,7 @@
 #include "app/Subprocess.h"
 #include "app/OutputLease.h"
 
-#include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -15,6 +15,8 @@
 #include <windows.h>
 #else
 #include <fcntl.h>
+#include <signal.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
@@ -278,6 +280,87 @@ int main() {
         check(res.outcome == proc::ProcessOutcome::Cancelled,
               "pre-launch cancellation is reported as Cancelled");
         check(elapsed < 1000, "pre-launch cancellation terminates promptly");
+    }
+#endif
+
+#ifdef __linux__
+    // 11. Worker-control helpers stay in the worker group and cancel locally.
+    {
+        const char* previous = std::getenv("SS_WORKER_CONTROL");
+        const bool had_previous = previous != nullptr;
+        const std::string previous_value = previous ? previous : "";
+        setenv("SS_WORKER_CONTROL", "1", 1);
+
+        std::atomic<bool> cancel_flag{false};
+        std::vector<std::string> lines;
+        proc::ProcessOptions opts;
+        opts.argv = {"/bin/sh", "-c",
+                     "printf '%s\\n' \"$(ps -o pgid= -p $$)\"; sleep 2"};
+        opts.cancel = &cancel_flag;
+        opts.on_line = [&](const std::string& line) { lines.push_back(line); };
+        std::thread canceller([&]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+            cancel_flag.store(true);
+        });
+        const proc::ProcessResult res = proc::run_process(opts);
+        canceller.join();
+
+        long reported_group = -1;
+        if (!lines.empty()) {
+            char* end = nullptr;
+            reported_group = std::strtol(lines.front().c_str(), &end, 10);
+            if (!end || *end != '\0') reported_group = -1;
+        }
+        check(res.outcome == proc::ProcessOutcome::Cancelled,
+              "nested worker helper cancellation is reported as Cancelled");
+        check(reported_group == static_cast<long>(getpgrp()),
+              "nested worker helper remains in the caller process group");
+
+        if (had_previous)
+            setenv("SS_WORKER_CONTROL", previous_value.c_str(), 1);
+        else
+            unsetenv("SS_WORKER_CONTROL");
+    }
+
+    // 12. A worker parent death terminates its nested helper.
+    {
+        const fs::path root = fs::temp_directory_path() /
+            ("spirula_subprocess_parent_death_" + std::to_string(
+                std::chrono::steady_clock::now().time_since_epoch().count()));
+        const fs::path started = root.string() + ".started";
+        const fs::path alive = root.string() + ".alive";
+        const pid_t worker = fork();
+        if (worker < 0) {
+            check(false, "parent-death worker fork succeeds");
+        } else if (worker == 0) {
+            setenv("SS_WORKER_CONTROL", "1", 1);
+            proc::ProcessOptions opts;
+            opts.argv = {"/bin/sh", "-c",
+                         "printf started > \"$SPIRULA_TEST_STARTED\"; "
+                         "sleep 1; printf alive > \"$SPIRULA_TEST_ALIVE\""};
+            opts.env_overrides = {
+                {"SPIRULA_TEST_STARTED", started.string()},
+                {"SPIRULA_TEST_ALIVE", alive.string()}};
+            (void)proc::run_process(opts);
+            _exit(0);
+        } else {
+            bool helper_started = false;
+            for (int i = 0; i < 100 && !helper_started; ++i) {
+                helper_started = fs::exists(started);
+                if (!helper_started)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            check(helper_started, "parent-death helper reaches exec");
+            (void)kill(worker, SIGKILL);
+            int status = 0;
+            while (waitpid(worker, &status, 0) < 0 && errno == EINTR) {}
+            std::this_thread::sleep_for(std::chrono::milliseconds(1300));
+            check(!fs::exists(alive),
+                  "nested helper does not outlive its worker parent");
+        }
+        std::error_code ec;
+        fs::remove(started, ec);
+        fs::remove(alive, ec);
     }
 #endif
 

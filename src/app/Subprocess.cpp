@@ -421,6 +421,11 @@ std::string resolve_exe_path(const std::string& exe) {
     return "";
 }
 
+bool worker_control_active() {
+    const char* value = std::getenv("SS_WORKER_CONTROL");
+    return value && value[0] && !(value[0] == '0' && value[1] == '\0');
+}
+
 }  // namespace
 
 ProcessResult run_process(const ProcessOptions& options) {
@@ -435,6 +440,8 @@ ProcessResult run_process(const ProcessOptions& options) {
     if (resolved.empty()) {
         return {ProcessOutcome::SpawnFailed, -1, "executable not found: " + options.argv[0]};
     }
+    // Worker-control phases already own the root process group.
+    const bool nested_worker = worker_control_active();
 
     std::vector<std::string> args_storage = options.argv;
     std::vector<char*> args;
@@ -466,54 +473,48 @@ ProcessResult run_process(const ProcessOptions& options) {
         close(stdout_fds[0]); close(stdout_fds[1]);
         return {ProcessOutcome::SpawnFailed, -1, "pipe stdin failed"};
     }
-    int liveness_fds[2];
-    if (pipe(liveness_fds) != 0) {
-        close(stdout_fds[0]); close(stdout_fds[1]);
-        close(stdin_fds[0]); close(stdin_fds[1]);
-        return {ProcessOutcome::SpawnFailed, -1, "pipe liveness failed"};
-    }
 
     const int pipe_fds[] = {
         stdout_fds[0], stdout_fds[1],
-        stdin_fds[0], stdin_fds[1],
-        liveness_fds[0], liveness_fds[1]};
+        stdin_fds[0], stdin_fds[1]};
     for (int fd : pipe_fds) {
         const int flags = fcntl(fd, F_GETFD);
         if (flags < 0 || fcntl(fd, F_SETFD, flags | FD_CLOEXEC) != 0) {
             close(stdout_fds[0]); close(stdout_fds[1]);
             close(stdin_fds[0]); close(stdin_fds[1]);
-            close(liveness_fds[0]); close(liveness_fds[1]);
             return {ProcessOutcome::SpawnFailed, -1,
                     "cannot set pipe close-on-exec"};
         }
     }
+#ifdef __linux__
+    const pid_t parent_pid = getpid();
+#endif
 
     pid_t pid = fork();
     if (pid < 0) {
         close(stdout_fds[0]); close(stdout_fds[1]);
         close(stdin_fds[0]); close(stdin_fds[1]);
-        close(liveness_fds[0]); close(liveness_fds[1]);
         return {ProcessOutcome::SpawnFailed, -1, "fork failed"};
     }
 
     if (pid == 0) {
-        setpgid(0, 0);
 #ifdef __linux__
-        prctl(PR_SET_PDEATHSIG, SIGTERM);
+        // Arm first, then reject a parent-exit race before exec.
+        if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0 || getppid() != parent_pid)
+            _exit(127);
 #endif
+        if (!nested_worker) setpgid(0, 0);
         dup2(stdout_fds[1], STDOUT_FILENO);
         dup2(stdout_fds[1], STDERR_FILENO);
         dup2(stdin_fds[0], STDIN_FILENO);
 
         close(stdout_fds[0]); close(stdout_fds[1]);
         close(stdin_fds[0]); close(stdin_fds[1]);
-        close(liveness_fds[1]);
         for (int fd : options.inherit_fds) {
             const int flags = fcntl(fd, F_GETFD);
             if (flags < 0 || fcntl(fd, F_SETFD, flags & ~FD_CLOEXEC) != 0)
                 _exit(127);
         }
-        fcntl(liveness_fds[0], F_SETFD, FD_CLOEXEC);
 
         if (!options.cwd.empty() && chdir(options.cwd.c_str()) != 0) {
             _exit(127);
@@ -522,29 +523,29 @@ ProcessResult run_process(const ProcessOptions& options) {
         _exit(127);
     }
 
-    for (;;) {
-        if (setpgid(pid, pid) == 0) break;
-        const int group_error = errno;
-        if (group_error == EINTR) continue;
-        if (group_error == ESRCH) break;
-        if (group_error == EACCES) {
-            const pid_t group = getpgid(pid);
-            if (group == pid || (group < 0 && errno == ESRCH)) break;
-        }
+    if (!nested_worker) {
+        for (;;) {
+            if (setpgid(pid, pid) == 0) break;
+            const int group_error = errno;
+            if (group_error == EINTR) continue;
+            if (group_error == ESRCH) break;
+            if (group_error == EACCES) {
+                const pid_t group = getpgid(pid);
+                if (group == pid || (group < 0 && errno == ESRCH)) break;
+            }
 
-        (void)kill(pid, SIGKILL);
-        while (waitpid(pid, nullptr, 0) < 0 && errno == EINTR) {}
-        close(stdout_fds[0]); close(stdout_fds[1]);
-        close(stdin_fds[0]); close(stdin_fds[1]);
-        close(liveness_fds[0]); close(liveness_fds[1]);
-        return {ProcessOutcome::SpawnFailed, -1,
-                "cannot establish process group: " +
-                    std::strerror(group_error)};
+            (void)kill(pid, SIGKILL);
+            while (waitpid(pid, nullptr, 0) < 0 && errno == EINTR) {}
+            close(stdout_fds[0]); close(stdout_fds[1]);
+            close(stdin_fds[0]); close(stdin_fds[1]);
+            return {ProcessOutcome::SpawnFailed, -1,
+                    "cannot establish process group: " +
+                        std::strerror(group_error)};
+        }
     }
 
     close(stdout_fds[1]);
     close(stdin_fds[0]);
-    close(liveness_fds[0]);
 
     std::string acc;
     char buf[4096];
@@ -552,9 +553,15 @@ ProcessResult run_process(const ProcessOptions& options) {
     bool stop_sent = false;
     auto stop_time = std::chrono::steady_clock::time_point::min();
 
+    // Nested descendants inherit PDEATHSIG; the root group remains caller-owned.
+    auto kill_owned_tree = [&] {
+        (void)kill(nested_worker ? pid : -pid, SIGKILL);
+    };
+
     for (;;) {
         if (options.cancel && options.cancel->load() && !killed) {
-            kill(-pid, SIGKILL);
+            kill_owned_tree();
+
             killed = true;
             if (stdin_fds[1] >= 0) {
                 close(stdin_fds[1]);
@@ -576,11 +583,10 @@ ProcessResult run_process(const ProcessOptions& options) {
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - stop_time).count();
             if (elapsed > options.grace_period_ms) {
-                kill(-pid, SIGKILL);
+                kill_owned_tree();
                 killed = true;
             }
         }
-
         struct pollfd pfd{stdout_fds[0], POLLIN, 0};
         int pr = poll(&pfd, 1, 50);
         if (pr > 0) {
@@ -594,7 +600,6 @@ ProcessResult run_process(const ProcessOptions& options) {
     emit_tail(acc, options.on_line);
     close(stdout_fds[0]);
     if (stdin_fds[1] >= 0) close(stdin_fds[1]);
-    close(liveness_fds[1]);
 
     int status = 0;
     waitpid(pid, &status, 0);
