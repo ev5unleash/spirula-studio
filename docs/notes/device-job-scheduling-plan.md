@@ -445,9 +445,12 @@ also passed again.
 A resumed command-line run of the same dataset on AMD then failed cleanly with
 `VK_ERROR_DEVICE_LOST` at `src/sfm/vk/VkContext.h:772` instead of terminating.
 This narrows the remaining workload failure to the AMD driver/device path; it
-does not turn the dataset run into a pass. A second GUI retry was not counted:
-after relaunch, Computer Use could capture the Spirula window but Windows denied
-input with `GetCursorPos failed: Access is denied`.
+does not turn the dataset run into a pass. Computer Use then submitted a fresh
+GUI retry as job `job-44254f9999ec4a25` in a `_scheduler_test_fix` workspace.
+The GUI displayed the same Vulkan device-loss message, the durable job and SfM
+phase stored that message with exit code 99, and the desktop Device menu still
+showed the RTX 3060 checked. This is successful failure-path coverage, not a
+successful reconstruction on AMD.
 
 ### Acceptance still open
 
