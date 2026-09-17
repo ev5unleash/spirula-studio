@@ -1,6 +1,7 @@
 # Explicit-device process scheduling
 
-Status: Implementation through Phase 4 is present; Phase 4 desktop acceptance and Phases 5-6 remain open.
+Status: Implementation through Phase 4 is present; the desktop device split has
+been observed, while the rest of Phase 4 acceptance and Phases 5-6 remain open.
 
 Target branch: `feature/device-job-scheduling`, based on `feature/native-gpu-selection`.
 
@@ -406,17 +407,36 @@ after the integration cleanup. A fresh `SS_BUILD_GUI=OFF`,
 `SS_BUILD_SFM=ON`, `SS_BUILD_SAM=ON`, `SS_ENABLE_PATENTED=OFF` configuration
 built `spirula` successfully, and its `--help` command exited successfully.
 
+### Desktop device-separation observation
+
+On 2026-09-17, Computer Use drove a rebuilt Windows Vulkan GUI configured with
+`SS_BUILD_GUI=ON`, `SS_BUILD_SFM=ON`, `SS_BUILD_SAM=ON`, and
+`SS_ENABLE_PATENTED=OFF`. The desktop selector was fixed to NVIDIA GeForce RTX
+3060 (`uuid:94f229c65f9bdd9e1ca44b33fd0e4ed9`), while the queued-job selector was
+set to AMD Radeon(TM) Graphics
+(`uuid:000000007b0000000000000000000000`). Changing the queued selector did not
+change the checked desktop device.
+
+The native dataset submission used
+`Z:\3d\outside test 1\photos\UnknownDevice\VID_20260912_110208_00_001` and a
+new `_scheduler_test` workspace. Durable job `job-00f2e86618f16cb6` stored the
+AMD UUID and display name in the job, preparation phase, SfM phase, and frozen
+preparation payload. Preparation completed on AMD and produced 153 images. The
+SfM worker independently reported the same AMD UUID and reached geometric
+verification. While it ran, the desktop Device menu remained checked on the
+RTX 3060.
+
+The workload did not complete. Windows reported an AMD driver timeout during
+SfM verification; the worker exited with code 3, the SfM phase was durably
+marked failed, and publication remained pending. This verifies the selector
+split, immutable request identity, worker-side device use, and terminal failure
+persistence, but it is not a successful end-to-end dataset run or evidence that
+the AMD device is suitable for this workload.
+
 ### Acceptance still open
 
 The milestone is not complete until these external/manual rows are exercised
 and recorded:
-
-- A computer-use retry on 2026-09-17 exposed only the Codex in-app browser and
-  no native-app controller, so it could not launch or inspect the Spirula
-  desktop. The proposed fixture
-  `Z:\3d\outside test 1\photos\UnknownDevice\VID_20260912_110208_00_001`
-  was verified read-only to contain 152 JPEGs plus `Thumbs.db`, but no desktop
-  dataset run was performed or counted as acceptance evidence.
 
 - the real desktop Phase 4 gate: preserve a live foreground device, run two
   independent jobs, retarget pending work, stop one, restart, retry, and verify
