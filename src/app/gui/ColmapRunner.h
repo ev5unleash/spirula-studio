@@ -11,7 +11,7 @@
 // PhotoImport::InPlace records nothing in the workspace, so re-opening such a
 // dataset means setting data.image_dir in the dataparser options by hand.
 
-#include "app/gui/DatasetPrep.h"   // MaskClick
+#include "app/DatasetPrep.h"   // MaskClick
 #include "app/gui/FilmReel.h"
 #include "app/gui/GeometryRunner.h"
 #include "app/gui/PrepProgress.h"
@@ -25,6 +25,14 @@
 #include <vector>
 
 namespace gui {
+using app::CameraGroup;
+using app::DatasetPrep;
+using app::MaskClick;
+using app::PhotoImport;
+using app::PrepInput;
+using app::PrepJob;
+using app::PrepResult;
+using app::WorkspaceState;
 
 // COLMAP camera models the dataset parser understands (ColmapParser.cpp).
 inline const char* kColmapCameraModels[] = {

@@ -40,6 +40,10 @@
 #include <vector>
 
 namespace gui {
+using app::MaskClick;
+using app::PhotoImport;
+using app::PrepInput;
+using app::WorkspaceState;
 
 class GuiApp {
 public:

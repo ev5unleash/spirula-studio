@@ -4,7 +4,7 @@
 
 #include "app/DepthColor.h"
 
-#include "app/gui/DatasetPrep.h"
+#include "app/DatasetPrep.h"
 #include "app/gui/Layout.h"
 #include "app/gui/SfmRunner.h"     // sfm_model_is_fisheye
 #include "app/gui/Ui.h"
@@ -31,6 +31,7 @@ namespace dmsg = spirula::i18n::msg::dataset;
 namespace lmsg = spirula::i18n::msg::log;
 
 namespace gui {
+using app::folder_looks_like_dataset;
 
 // One picture the panel can show, already 8-bit RGB.
 struct GeometryPanel::Rgb {

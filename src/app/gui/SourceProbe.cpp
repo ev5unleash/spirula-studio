@@ -3,9 +3,12 @@
 #ifdef SS_HAVE_VIDEO
 #include "app/FrameExtract.h"
 #endif
-#include "app/gui/DatasetPrep.h"
+#include "app/DatasetPrep.h"
 
 namespace gui {
+using app::VideoFacts;
+using app::ffmpeg_probe_video;
+using app::is_pano360_path;
 
 namespace {
 

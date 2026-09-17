@@ -5,7 +5,7 @@
 
 #include "app/TrainerCore.h"
 #include "app/AppPaths.h"
-#include "app/gui/DatasetPrep.h"
+#include "app/DatasetPrep.h"
 #include "app/gui/TrainPreset.h"
 #include "backend/api/BackendRuntime.h"
 #include "data/Json.h"
@@ -21,6 +21,7 @@
 namespace fs = std::filesystem;
 
 namespace gui {
+using app::folder_looks_like_dataset;
 
 namespace msg = spirula::i18n::msg::gui;
 

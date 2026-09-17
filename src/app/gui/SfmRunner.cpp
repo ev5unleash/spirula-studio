@@ -55,6 +55,32 @@ inline std::string fmt(const spirula::i18n::Msg& m,
 namespace gui {
 
 namespace {
+app::DatasetPrepSinks make_prep_sinks(RunProgress& progress, RunFilms films) {
+    app::DatasetPrepSinks sinks;
+    sinks.log = [&progress](app::Stage stage, const std::string& line, bool detail) {
+        progress.note(static_cast<Stage>(stage), line, detail);
+    };
+    sinks.enter = [&progress](app::Stage stage, const std::string& text) {
+        progress.enter(static_cast<Stage>(stage), text);
+    };
+    sinks.count = [&progress](app::Stage stage, int64_t done, int64_t total) {
+        progress.count(static_cast<Stage>(stage), done, total);
+    };
+    sinks.detail = [&progress](app::Stage stage, const std::string& text) {
+        progress.detail(static_cast<Stage>(stage), text);
+    };
+    sinks.frame = [films](const app::PrepFrame& frame) {
+        FilmReel* reel = frame.mask_path.empty() ? films.frames : films.masks;
+        if (!reel) return;
+        FilmFrame f;
+        f.name = frame.name;
+        f.image_path = frame.image_path;
+        f.mask_path = frame.mask_path;
+        reel->add(f, reel->wants() ? frame.rgb : nullptr, frame.width,
+                  frame.height, frame.mask);
+    };
+    return sinks;
+}
 
 const char* kQuality[] = {"low", "medium", "high", "extreme"};
 const char* kDataType[] = {"individual", "video", "internet"};
@@ -713,7 +739,7 @@ void SfmRunner::run(SfmJob job) {
         // ---- 1. frames and masks ------------------------------------------
         PrepResult prep;
         {
-            DatasetPrep dp(&_prog, _films, _cancel);
+            DatasetPrep dp(_cancel, make_prep_sinks(_prog, _films));
             std::string err;
             if (!dp.run(job.prep, prep, err,
                         [this](PrepJob& p) { take_masking(p); }))

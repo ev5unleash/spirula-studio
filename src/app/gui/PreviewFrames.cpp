@@ -3,7 +3,7 @@
 #include "app/gui/PreviewFrames.h"
 
 #include "app/FrameMask.h"
-#include "app/gui/DatasetPrep.h"
+#include "app/DatasetPrep.h"
 #include "app/gui/Subprocess.h"
 #include "i18n/catalog/Dataset.h"
 
@@ -26,6 +26,10 @@ namespace fs = std::filesystem;
 namespace dmsg = spirula::i18n::msg::dataset;
 
 namespace gui {
+using app::FfmpegStillOpts;
+using app::VideoFacts;
+using app::ffmpeg_extract_frame;
+using app::ffmpeg_probe_video;
 
 namespace {
 

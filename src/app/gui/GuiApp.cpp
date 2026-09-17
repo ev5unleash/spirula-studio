@@ -9,7 +9,7 @@
 #include "data/Json.h"
 #include "app/AppPaths.h"
 #include "app/CrashLog.h"
-#include "app/gui/DatasetPrep.h"
+#include "app/DatasetPrep.h"
 #include "app/gui/MaskPrompt.h"
 #include "app/gui/Subprocess.h"
 #include "mesh/MeshImport.h"
@@ -65,6 +65,29 @@ using spirula::i18n::Msg;
 using spirula::format_duration;
 
 namespace gui {
+using app::backends;
+using app::kNumPhotoImports;
+using app::kRigFirstShared;
+using app::kRigNone;
+using app::kRigOwn;
+using app::kRigShared;
+using app::kNumVideoExtensions;
+using app::kVideoExtensions;
+using app::camera_groups;
+using app::camera_group_models;
+using app::camera_subfolders;
+using app::folder_has_images;
+using app::folder_looks_like_dataset;
+using app::group_focal;
+using app::group_rig;
+using app::is_dual_fisheye_path;
+using app::is_mask_folder;
+using app::is_video_path;
+using app::lens_dirs;
+using app::planned_image_dir;
+using app::probe_workspace;
+using app::resolve_photo_folder;
+using app::workspace_artifacts;
 
 namespace {
 

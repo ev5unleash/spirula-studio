@@ -28,6 +28,7 @@ namespace fs = std::filesystem;
 namespace dmsg = spirula::i18n::msg::dataset;
 
 namespace gui {
+using app::backends;
 
 namespace {
 

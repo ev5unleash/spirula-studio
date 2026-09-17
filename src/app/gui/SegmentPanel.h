@@ -27,7 +27,7 @@
 // says so -- when there is none.
 
 #include "app/FrameMask.h"
-#include "app/gui/DatasetPrep.h"   // MaskClick
+#include "app/DatasetPrep.h"   // MaskClick
 #include "app/gui/GlLoader.h"
 #include "app/gui/PreviewFrames.h"
 
@@ -39,6 +39,7 @@
 #include <vector>
 
 namespace gui {
+using app::MaskClick;
 
 // The mask settings the panel edits, owned by the dataset screen so what is
 // tried here is what runs.

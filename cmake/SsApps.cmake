@@ -82,6 +82,17 @@ if(SS_FONT_CJK STREQUAL "none")
 endif()
 
 # ---- trainer: no Python at runtime ----
+# Dataset preparation and frame selection are application code, not GUI code:
+# `spirula` must expose the same headless path when SS_BUILD_GUI=OFF.
+list(APPEND SS_TOOL_SOURCES
+     ${SS_SRC}/app/DatasetPrep.cpp
+     ${SS_SRC}/app/FrameSelect.cpp)
+
+# Embed reference/scripts/mask.py once for the non-GUI application build too.
+ss_embed_file(
+    ${SS_ROOT}/reference/scripts/mask.py
+    ${CMAKE_BINARY_DIR}/app_generated/mask_py.h
+    MaskPy)
 list(APPEND SS_TOOL_SOURCES ${SS_SRC}/app/cli/main.cpp)
 list(APPEND SS_TOOL_DEFS SS_TOOL_TRAIN=1)
 
@@ -184,13 +195,6 @@ if(SS_BUILD_GUI)
     target_link_libraries(imgui_glfw PUBLIC glfw)
     set_property(TARGET imgui_glfw PROPERTY CXX_STANDARD 17)
 
-    # Embed reference/scripts/mask.py (AI masking helper, run via external
-    # Python) so the exe is self-contained. Same mechanism as the
-    # viewer.html embed.
-    ss_embed_file(
-        ${SS_ROOT}/reference/scripts/mask.py
-        ${CMAKE_BINARY_DIR}/app_generated/mask_py.h
-        MaskPy)
 
     # ---- fonts (src/app/gui/Fonts.h, docs/i18n.md) ----
     #

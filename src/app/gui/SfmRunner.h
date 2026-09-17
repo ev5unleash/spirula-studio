@@ -16,7 +16,7 @@
 // driver that resets under a long solve. Either way the screen reads the same
 // typed status, from the event stream or from the snapshot the child writes.
 
-#include "app/gui/DatasetPrep.h"
+#include "app/DatasetPrep.h"
 #include "core/Env.h"
 #include "app/gui/SfmProgress.h"
 #ifdef SS_TOOL_SFM
@@ -36,6 +36,15 @@
 #include <vector>
 
 namespace gui {
+using app::CameraGroup;
+using app::DatasetPrep;
+using app::MaskClick;
+using app::PhotoImport;
+using app::PrepInput;
+using app::PrepJob;
+using app::PrepResult;
+using app::SubCamera;
+using app::WorkspaceState;
 
 // The camera models the dataset parser and renderer can also consume,
 // EQUIRECTANGULAR included (ColmapParser reads model 17, 2:1 aspect checked).
