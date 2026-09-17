@@ -14,6 +14,7 @@
 
 #include "sfm/core/CameraSetup.h"
 #include "sfm/core/Exif.h"
+#include "sfm/core/Events.h"
 #include "sfm/core/Features.h"
 #include "sfm/core/Image.h"
 #include "sfm/core/ImageLoader.h"
@@ -866,6 +867,32 @@ int cmdSelftest(int argc, char** argv) {
         printf("  verification 1 vs 8 threads: %zu/%zu pairs kept, identical -> %s\n",
                serial.size(), vpairs.size(), vok ? "ok" : "BAD");
         if (!vok) fails++;
+
+        bool producer_threw = false;
+        try {
+            verifyPairs(vf, vpairs,
+                        [](size_t, size_t, std::vector<std::vector<FeatureMatch>>&) {
+                            throw std::runtime_error("matching failed");
+                        }, vo);
+        } catch (const std::runtime_error& e) {
+            producer_threw = std::string(e.what()) == "matching failed";
+        }
+        printf("  throwing matcher propagates -> %s\n", producer_threw ? "ok" : "BAD");
+        if (!producer_threw) fails++;
+
+        bool verifier_threw = false;
+        events::set_sink([](const Event& e) {
+            if (e.kind == Event::Kind::PairVerified)
+                throw std::runtime_error("verification failed");
+        });
+        try {
+            verifyPairs(vf, vpairs, vmatch, vo);
+        } catch (const std::runtime_error& e) {
+            verifier_threw = std::string(e.what()) == "verification failed";
+        }
+        events::set_sink({});
+        printf("  throwing verifier propagates -> %s\n", verifier_threw ? "ok" : "BAD");
+        if (!verifier_threw) fails++;
     }
 
     // 8b) GPU pair selection (pair_selection.hpp): two disjoint groups of
