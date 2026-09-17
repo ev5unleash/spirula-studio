@@ -10,6 +10,7 @@ namespace app::worker {
 
 struct Request {
     int schema_version = 0;
+    std::string request_path; // source JSON path; not part of the schema
     std::string job_id;
     std::string attempt_id;
     std::string phase;        // "train" | "sfm" | "geometry"

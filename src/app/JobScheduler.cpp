@@ -286,6 +286,10 @@ void JobScheduler::transition_locked(Job& j, JobState s, std::string err) {
 
 std::string JobScheduler::submit(const SubmitOpts& o) {
     if (o.device.empty() || o.device == "auto") return {};
+    {
+        std::lock_guard<std::mutex> lk(_mu);
+        if (!_state_error.empty()) return {};
+    }
     auto j = std::make_shared<Job>();
     j->job_id = new_job_id();
     j->phase = o.phase;
@@ -303,15 +307,18 @@ std::string JobScheduler::submit(const SubmitOpts& o) {
             j->output_dir = output.u8string();
     }
 
-    // Per-job run dir under config/jobs/<id>; holds request.json, result.json, log.txt.
     const fs::path dir = fs::u8path(_config_dir) / "jobs" / j->job_id;
-    std::error_code ec;
-    fs::create_directories(dir, ec);
-    if (ec) return {};
-    j->run_dir = dir.u8string();
 
     {
         std::lock_guard<std::mutex> lk(_mu);
+        if (!_state_error.empty()) return {};
+        std::error_code ec;
+        fs::create_directories(dir.parent_path(), ec);
+        if (ec) return {};
+        const bool created_run_dir = fs::create_directory(dir, ec);
+        if (ec) return {};
+        j->run_dir = dir.u8string();
+        const uint64_t previous_order = _next_order;
         j->order = _next_order++;
         _jobs[j->job_id] = j;
         _queue.push_back(j->job_id);
@@ -320,6 +327,8 @@ std::string JobScheduler::submit(const SubmitOpts& o) {
             _jobs.erase(j->job_id);
             _queue.pop_back();
             _events.pop_back();
+            _next_order = previous_order;
+            if (created_run_dir) fs::remove(dir, ec);
             return {};
         }
     }
@@ -934,7 +943,8 @@ void JobScheduler::supervisor_main(std::shared_ptr<Attempt> att) {
     opts.stop = &att->stop;
     opts.stop_token = "STOP\n";
     opts.grace_period_ms = j->phase == "train" ? 300000 : 30000;
-    opts.env_overrides = {{"SS_WORKER_CONTROL", "1"}};
+    opts.env_overrides = {{"SS_WORKER_CONTROL", "1"},
+                          {"SS_CRASH_DIR", j->run_dir}};
     if (att->output_lease.valid()) {
         opts.env_overrides.push_back({"SS_OUTPUT_LEASE_HELD", "1"});
 #ifdef _WIN32

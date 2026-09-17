@@ -84,6 +84,99 @@ int main(int argc, char** argv) {
                                 : binary_name;
 
     {
+        const fs::path failure_root = root / "submit_failure";
+        const fs::path state_tmp = failure_root / "job-state.json.tmp";
+        const fs::path jobs_root = failure_root / "jobs";
+        auto job_dir_count = [](const fs::path& path) {
+            size_t count = 0;
+            std::error_code iter_ec;
+            for (const auto& entry : fs::directory_iterator(path, iter_ec))
+                if (entry.is_directory(iter_ec)) ++count;
+            return count;
+        };
+        sched::SubmitOpts failed_submit;
+        failed_submit.phase = "train";
+        failed_submit.device = "gpu-failure";
+        failed_submit.work_dir = failure_root.u8string();
+        failed_submit.args = {"--help"};
+
+        {
+            sched::JobScheduler blocked(failure_root.u8string(), exe);
+            blocked.pause_dispatch(true);
+            std::error_code mkdir_ec;
+            check(fs::create_directory(state_tmp, mkdir_ec) && !mkdir_ec,
+                  "scheduler state temp path becomes unusable");
+            check(blocked.submit(failed_submit).empty(),
+                  "submit rejects unwritable scheduler state");
+            check(blocked.list().empty(),
+                  "failed submit leaves no in-memory job record");
+            check(job_dir_count(jobs_root) == 0,
+                  "failed submit removes its run directory");
+            check(!fs::exists(failure_root / "job-state.json"),
+                  "failed submit leaves no state record");
+        }
+
+        std::error_code restore_ec;
+        fs::remove(state_tmp, restore_ec);
+        check(!restore_ec && !fs::exists(state_tmp),
+              "scheduler state temp path becomes writable again");
+        sched::JobScheduler restored(failure_root.u8string(), exe);
+        restored.pause_dispatch(true);
+        const std::string restored_id = restored.submit(failed_submit);
+        const auto restored_jobs = restored.list();
+        check(!restored_id.empty(), "next submit succeeds after state recovery");
+        check(restored_jobs.size() == 1 && restored_jobs[0].order == 0,
+              "next submit does not consume an order");
+    }
+
+    {
+        const fs::path ownership_root = root / "ownership";
+        auto read_text = [](const fs::path& path) {
+            std::ifstream in(path, std::ios::binary);
+            std::ostringstream text;
+            text << in.rdbuf();
+            return text.str();
+        };
+        auto job_dir_count = [](const fs::path& path) {
+            size_t count = 0;
+            std::error_code iter_ec;
+            for (const auto& entry : fs::directory_iterator(path, iter_ec))
+                if (entry.is_directory(iter_ec)) ++count;
+            return count;
+        };
+
+        sched::JobScheduler owner(ownership_root.u8string(), exe);
+        owner.pause_dispatch(true);
+        sched::SubmitOpts existing;
+        existing.phase = "train";
+        existing.device = "gpu-owner";
+        existing.work_dir = ownership_root.u8string();
+        existing.args = {"--help"};
+        const std::string owner_id = owner.submit(existing);
+        check(!owner_id.empty(), "state owner persists an initial job");
+
+        const fs::path state = ownership_root / "job-state.json";
+        const std::string before = read_text(state);
+        const size_t job_dirs_before = job_dir_count(ownership_root / "jobs");
+        sched::JobScheduler contender(ownership_root.u8string(), exe);
+        check(contender.state_error() ==
+                  "scheduler state is owned by another application",
+              "second scheduler reports state ownership failure");
+        check(contender.submit(existing).empty(),
+              "second scheduler rejects submit");
+        check(contender.list().empty(),
+              "second scheduler does not add an in-memory job");
+        check(!contender.save(), "second scheduler rejects save");
+        check(read_text(state) == before,
+              "second scheduler leaves persisted collection intact");
+        check(job_dir_count(ownership_root / "jobs") == job_dirs_before,
+              "second scheduler creates no job directory");
+        const auto owner_jobs = owner.list();
+        check(owner_jobs.size() == 1 && owner_jobs[0].job_id == owner_id,
+              "first scheduler retains its job");
+    }
+
+    {
         sched::JobScheduler s(root.u8string(), exe);
         s.set_event_callback([&](const sched::Event& e) {
             std::lock_guard<std::mutex> lk(events_mu);

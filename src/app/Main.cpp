@@ -16,6 +16,7 @@
 #include "app/AppPaths.h"
 #include "app/CrashLog.h"
 #include "app/Tools.h"
+#include "core/Env.h"
 #include "i18n/Locale.h"
 #include "i18n/catalog/Cli.h"
 
@@ -181,7 +182,8 @@ int main(int argc, char** argv) {
     // Every tool, not only the window: the GUI runs reconstruction, masking
     // and meshing as child processes, and a child that dies of a fault leaves
     // its parent an exit status and nothing else.
-    app::install_crash_log(app::config_dir());
+    const char* crash_dir = spirula::env("CRASH_DIR");
+    app::install_crash_log(crash_dir && crash_dir[0] ? crash_dir : app::config_dir());
 
     // An explicit subcommand wins over the argv[0] hint, so a binary that was
     // renamed or symlinked still answers to every tool it holds. No subcommand
