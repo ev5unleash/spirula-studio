@@ -13,26 +13,15 @@ namespace fs = std::filesystem;
 
 namespace gui {
 
-namespace {
-
-bool is_image(const fs::path& p) {
-    std::string e = p.extension().string();
-    for (char& c : e) c = (char)std::tolower((unsigned char)c);
-    return e == ".jpg" || e == ".jpeg" || e == ".png" || e == ".webp" ||
-           e == ".tif" || e == ".tiff" || e == ".bmp" || e == ".exr";
-}
-
-}  // namespace
-
 FeatureWatcher::~FeatureWatcher() { stop(); }
 
 void FeatureWatcher::start(const std::string& image_dir,
                            const std::string& mask_dir,
                            const std::string& features_dir, FilmReel* film,
-                           const std::string& thumb_dir) {
+                           const std::string& thumb_dir, bool mask_flipped) {
     if (_worker.joinable() && _image_dir == image_dir &&
         _mask_dir == mask_dir && _features_dir == features_dir &&
-        _thumb_dir == thumb_dir)
+        _thumb_dir == thumb_dir && _mask_flipped == mask_flipped)
         return;
     stop();
     if (image_dir.empty() || features_dir.empty() || !film) return;
@@ -40,9 +29,11 @@ void FeatureWatcher::start(const std::string& image_dir,
     _mask_dir = mask_dir;
     _features_dir = features_dir;
     _thumb_dir = thumb_dir;
+    _mask_flipped = mask_flipped;
     _stop = false;
-    _worker = std::thread([this, image_dir, mask_dir, features_dir, film, thumb_dir] {
-        run(image_dir, mask_dir, features_dir, film, thumb_dir);
+    _worker = std::thread([this, image_dir, mask_dir, features_dir, film,
+                           thumb_dir, mask_flipped] {
+        run(image_dir, mask_dir, features_dir, film, thumb_dir, mask_flipped);
     });
 }
 
@@ -53,20 +44,17 @@ void FeatureWatcher::stop() {
     _mask_dir.clear();
     _features_dir.clear();
     _thumb_dir.clear();
+    _mask_flipped = false;
 }
 
 void FeatureWatcher::run(std::string image_dir, std::string mask_dir,
                          std::string features_dir, FilmReel* film,
-                         std::string thumb_dir) {
+                         std::string thumb_dir, bool mask_flipped) {
     std::error_code ec;
+    const auto groups = app::group_frames_by_camera(image_dir, mask_dir);
     std::vector<fs::path> files;
-    for (fs::recursive_directory_iterator
-             it(image_dir, fs::directory_options::skip_permission_denied |
-                               fs::directory_options::follow_directory_symlink, ec),
-         end;
-         !ec && it != end; it.increment(ec))
-        if (it->is_regular_file(ec) && is_image(it->path()))
-            files.push_back(it->path());
+    for (const auto& [_, paths] : groups)
+        for (const std::string& path : paths) files.emplace_back(path);
     std::sort(files.begin(), files.end());
 
     const fs::path root(image_dir);
@@ -93,6 +81,7 @@ void FeatureWatcher::run(std::string image_dir, std::string mask_dir,
         frame.name = rel.generic_string();
         frame.image_path = f.string();
         frame.points_path = feat;
+        frame.mask_flipped = mask_flipped;
         if (!mask_dir.empty()) {
             const fs::path m = fs::path(mask_dir) / (rel_stem + ".png");
             if (fs::exists(m, ec)) frame.mask_path = m.string();
@@ -116,6 +105,8 @@ void FeatureWatcher::run(std::string image_dir, std::string mask_dir,
             int mw = 0, mh = 0;
             if (!frame.mask_path.empty())
                 app::load_stencil(frame.mask_path, mw, mh, mask);
+            if (frame.mask_flipped)
+                for (uint8_t& value : mask) value = (uint8_t)(255 - value);
             // The stencil is at the mask file's own size; nearest-neighbour it
             // onto the picture, which a thumbnail never matches.
             if (mask.size() == (size_t)mw * mh && mask.size() != (size_t)w * h &&

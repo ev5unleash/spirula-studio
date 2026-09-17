@@ -554,6 +554,7 @@ private:
     bool _model_attached = false;
     // Snapshot files already read, by their write time; 0 means "not yet".
     int64_t _model_mtime = 0, _pairs_mtime = 0, _matches_mtime = 0;
+    int64_t _scheduled_status_mtime = 0;
     double _sfm_polled_at = -1.0;
     bool _show_preview = true;
     // Which view the panel shows: -1 follows the running step, otherwise the
@@ -643,6 +644,8 @@ private:
     std::string _scheduled_device_request;
     bool _scheduled_device_choice_set = false;
     std::string _scheduled_dataset_id;
+    std::string _scheduled_mask_job_id;
+    bool _scheduled_mask_flipped = false;
     std::vector<app::sched::Job> _scheduler_jobs;
     std::map<std::string, std::deque<std::string>> _scheduler_log_tail;
     std::map<std::string, bool> _recovery_dismissed;

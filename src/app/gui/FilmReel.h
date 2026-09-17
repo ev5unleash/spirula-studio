@@ -47,6 +47,7 @@ struct FilmFrame {
     std::string name;          // the caption; the image's name in the dataset
     std::string image_path;
     std::string mask_path;     // "" when there is none
+    bool mask_flipped = false; // true when nonzero means remove
     std::string points_path;   // feature file to overlay; "" for none
     // Set instead of the three above when the frame is a ROW -- the geometry
     // step's photograph, normal map and depth map of one frame, which are

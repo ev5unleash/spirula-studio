@@ -124,7 +124,7 @@ void make_picture(const uint8_t* rgb, int w, int h, const uint8_t* mask,
 }
 
 bool load_picture(const std::string& image_path, const std::string& mask_path,
-                  int max_side, Picture& out) {
+                  int max_side, Picture& out, bool mask_flipped) {
     out = Picture{};
     int w = 0, h = 0;
     std::vector<uint8_t> rgb;
@@ -132,20 +132,23 @@ bool load_picture(const std::string& image_path, const std::string& mask_path,
 
     std::vector<uint8_t> mask;
     int mw = 0, mh = 0;
-    if (!mask_path.empty() && app::load_stencil(mask_path, mw, mh, mask) &&
-        (mw != w || mh != h)) {
-        // A mask is written at its image's size, so this is a mask that came
-        // with the capture rather than one the run made. Nearest is enough for
-        // a picture that is about to be averaged down anyway.
-        std::vector<uint8_t> fit((size_t)w * h);
-        for (int y = 0; y < h; y++) {
-            const int sy = mh > 0 ? std::min(mh - 1, y * mh / h) : 0;
-            for (int x = 0; x < w; x++) {
-                const int sx = mw > 0 ? std::min(mw - 1, x * mw / w) : 0;
-                fit[(size_t)y * w + x] = mask[(size_t)sy * mw + sx];
+    if (!mask_path.empty() && app::load_stencil(mask_path, mw, mh, mask)) {
+        if (mask_flipped)
+            for (uint8_t& value : mask) value = (uint8_t)(255 - value);
+        if (mw != w || mh != h) {
+            // A mask is written at its image's size, so this is a mask that came
+            // with the capture rather than one the run made. Nearest is enough
+            // for a picture that is about to be averaged down anyway.
+            std::vector<uint8_t> fit((size_t)w * h);
+            for (int y = 0; y < h; y++) {
+                const int sy = mh > 0 ? std::min(mh - 1, y * mh / h) : 0;
+                for (int x = 0; x < w; x++) {
+                    const int sx = mw > 0 ? std::min(mw - 1, x * mw / w) : 0;
+                    fit[(size_t)y * w + x] = mask[(size_t)sy * mw + sx];
+                }
             }
+            mask.swap(fit);
         }
-        mask.swap(fit);
     }
     make_picture(rgb.data(), w, h,
                  mask.size() == (size_t)w * h ? mask.data() : nullptr, max_side,

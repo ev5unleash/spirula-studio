@@ -4457,6 +4457,7 @@ int GuiApp::preview_for_stage() {
     // what somebody was watching when it ended, and falling back to the frames
     // would hide it behind a click nobody knows to make.
     if (!dataset_busy()) return _preview_last_stage;
+    if (scheduled_dataset_pending()) return _preview_last_stage;
     switch (dataset_steps()->current()) {
         case Stage::Frames:    return 0;
         case Stage::Masks:     return 1;
@@ -4479,26 +4480,65 @@ void GuiApp::poll_sfm_progress() {
     _sfm_polled_at = now;
 
     const app::sched::Job* scheduled = scheduler_job(_scheduled_dataset_id);
-    const bool scheduled_sfm = scheduled_dataset_pending() && scheduled &&
-                               scheduled->phase == "sfm";
-    std::string image_dir = _sfm.sfm_image_dir();
-    std::string mask_dir = _sfm.sfm_mask_dir();
-    std::string features_dir = _sfm.features_dir();
-    std::string matches_path = _sfm.matches_path();
-    std::string live_matches_path = _sfm.live_matches_path();
-    std::string progress_dir = _sfm.progress_dir();
-    std::string thumbs_dir = _sfm.thumbs_dir();
+    std::string image_dir, mask_dir;
+    std::string features_dir, matches_path, live_matches_path;
+    std::string progress_dir, thumbs_dir;
+    bool mask_flipped = false;
+    bool scheduled_prep_ready = false;
+    const app::sched::Phase* completed_prep = nullptr;
     if (scheduled) {
-        image_dir = planned_image_dir(_sources, scheduled->workspace, _photo_import);
+        for (const app::sched::Phase& phase : scheduled->phases) {
+            if (phase.phase != "prep" || !phase.completed ||
+                phase.outputs.empty())
+                continue;
+            completed_prep = &phase;
+            image_dir = phase.outputs[0];
+            if (phase.outputs.size() > 1) mask_dir = phase.outputs[1];
+            scheduled_prep_ready = true;
+            break;
+        }
+        if (completed_prep && !mask_dir.empty()) {
+            if (_scheduled_mask_job_id != scheduled->job_id) {
+                try {
+                    _scheduled_mask_flipped =
+                        app::planned_prep(
+                            app::worker::deserialize_prep_job(
+                                completed_prep->payload))
+                            .mask_dir_flipped;
+                    _scheduled_mask_job_id = scheduled->job_id;
+                } catch (const std::exception&) {
+                    mask_dir.clear();
+                    _scheduled_mask_job_id.clear();
+                    _scheduled_mask_flipped = false;
+                }
+            }
+            if (_scheduled_mask_job_id == scheduled->job_id)
+                mask_flipped = _scheduled_mask_flipped;
+        }
         const fs::path workspace(scheduled->workspace);
-        const fs::path masks = workspace / "masks";
-        std::error_code ec;
-        mask_dir = fs::is_directory(masks, ec) ? masks.u8string() : std::string();
         features_dir = (workspace / "features").u8string();
         matches_path = (workspace / "matches.bin").u8string();
         progress_dir = (workspace / ".progress").u8string();
         live_matches_path = (workspace / ".progress" / "live_matches.bin").u8string();
         thumbs_dir = (workspace / ".progress" / "thumbs").u8string();
+    } else {
+        image_dir = _sfm.sfm_image_dir();
+        mask_dir = _sfm.sfm_mask_dir();
+        mask_flipped = _sfm.mask_flipped();
+        features_dir = _sfm.features_dir();
+        matches_path = _sfm.matches_path();
+        live_matches_path = _sfm.live_matches_path();
+        progress_dir = _sfm.progress_dir();
+        thumbs_dir = _sfm.thumbs_dir();
+    }
+    const bool scheduled_sfm = scheduled_dataset_pending() && scheduled &&
+                               scheduled->phase == "sfm" &&
+                               scheduled_prep_ready;
+    if (scheduled_sfm) {
+        RunStatus status;
+        if (read_status(progress_dir, _scheduled_status_mtime, status))
+            _preview_last_stage =
+                status.stage == 0 ? 2 : status.stage == 1 ? 3 : 4;
     }
 
     // The frames of the extraction step are shown by whoever writes them; the
@@ -4506,9 +4546,9 @@ void GuiApp::poll_sfm_progress() {
     if (scheduled_sfm ||
         (dataset_busy() && dataset_steps()->current() == Stage::Features))
         _features.start(image_dir, mask_dir, features_dir, &_film_features,
-                        thumbs_dir);
+                        thumbs_dir, mask_flipped);
     _pairs_view.configure(image_dir, mask_dir, features_dir, matches_path,
-                          live_matches_path);
+                          live_matches_path, mask_flipped);
 
     if (progress_dir.empty()) return;
 
@@ -4566,7 +4606,9 @@ void GuiApp::reset_dataset_preview(bool sweep) {
         f->clear();
         f->destroy_gl();
     }
-    _model_mtime = _pairs_mtime = _matches_mtime = 0;
+    _model_mtime = _pairs_mtime = _matches_mtime = _scheduled_status_mtime = 0;
+    _scheduled_mask_job_id.clear();
+    _scheduled_mask_flipped = false;
     _preview_tab = -1;
     _preview_last_stage = -1;
 }

@@ -38,9 +38,10 @@ void make_picture(const uint8_t* rgb, int w, int h, const uint8_t* mask,
                   int max_side, Picture& out);
 
 // The same from files. `mask_path` may be empty or absent; a mask stored at
-// another size than its image is sampled to it.
+// another size than its image is sampled to it. `mask_flipped` swaps keep and
+// remove for untouched source masks.
 bool load_picture(const std::string& image_path, const std::string& mask_path,
-                  int max_side, Picture& out);
+                  int max_side, Picture& out, bool mask_flipped);
 
 // One panel of a row picture.
 struct PicturePanel {

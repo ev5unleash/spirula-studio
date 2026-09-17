@@ -67,7 +67,7 @@ void FilmReel::add_loaded(const FilmFrame& f) {
     }
     Picture pic;
     if (!f.panels.empty()) load_picture_row(f.panels, target, pic);
-    else load_picture(f.image_path, f.mask_path, target, pic);
+    else load_picture(f.image_path, f.mask_path, target, pic, f.mask_flipped);
     append(f, std::move(pic), {});
 }
 
@@ -176,7 +176,8 @@ void FilmReel::loader_loop() {
         try {
             if (!f.panels.empty()) {
                 load_picture_row(f.panels, target, pic);
-            } else if (load_picture(f.image_path, f.mask_path, target, pic) &&
+            } else if (load_picture(f.image_path, f.mask_path, target, pic,
+                                    f.mask_flipped) &&
                        !f.points_path.empty()) {
                 std::vector<KeyPoint2D> kp;
                 if (read_keypoints_file(f.points_path, pic.src_w, pic.src_h, kp))
