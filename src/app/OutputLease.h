@@ -15,6 +15,12 @@ public:
 
     bool acquire(const std::filesystem::path& output_dir, std::string& error);
     void release();
+    bool valid() const;
+#ifdef _WIN32
+    void* native_handle() const;
+#else
+    int native_fd() const;
+#endif
 
 private:
 #ifdef _WIN32

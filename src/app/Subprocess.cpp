@@ -7,6 +7,7 @@
 #include <cstring>
 #include <filesystem>
 #include <map>
+#include <mutex>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -58,6 +59,8 @@ void emit_tail(std::string& acc, const std::function<void(const std::string&)>& 
 
 namespace {
 
+std::mutex inherited_handle_mutex;
+
 std::wstring utf8_to_wide(const std::string& s) {
     if (s.empty()) return std::wstring();
     int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
@@ -94,6 +97,10 @@ ProcessResult run_process(const ProcessOptions& options) {
     if (options.argv.empty()) {
         return {ProcessOutcome::SpawnFailed, -1, "argv cannot be empty"};
     }
+    for (void* handle : options.inherit_handles)
+        if (!handle)
+            return {ProcessOutcome::SpawnFailed, -1,
+                    "invalid inherited handle"};
 
     std::wstring cmdline;
     for (size_t i = 0; i < options.argv.size(); ++i) {
@@ -146,6 +153,32 @@ ProcessResult run_process(const ProcessOptions& options) {
     SetHandleInformation(stdin_wr, HANDLE_FLAG_INHERIT, 0);
 
     std::vector<HANDLE> inherit_handles = { stdout_wr, stdin_rd };
+    std::vector<HANDLE> extra_handles;
+    for (void* raw : options.inherit_handles) {
+        HANDLE handle = static_cast<HANDLE>(raw);
+        inherit_handles.push_back(handle);
+        extra_handles.push_back(handle);
+    }
+    std::unique_lock<std::mutex> inherit_lock(inherited_handle_mutex,
+                                               std::defer_lock);
+    if (!extra_handles.empty()) inherit_lock.lock();
+    std::vector<DWORD> extra_handle_flags;
+    extra_handle_flags.reserve(extra_handles.size());
+    for (HANDLE handle : extra_handles) {
+        DWORD flags = 0;
+        if (!GetHandleInformation(handle, &flags)) {
+            CloseHandle(stdout_rd); CloseHandle(stdout_wr);
+            CloseHandle(stdin_rd); CloseHandle(stdin_wr);
+            return {ProcessOutcome::SpawnFailed, -1,
+                    "cannot inspect inherited handle"};
+        }
+        extra_handle_flags.push_back(flags);
+    }
+    auto restore_extra_handles = [&] {
+        for (size_t i = 0; i < extra_handles.size(); ++i)
+            SetHandleInformation(extra_handles[i], HANDLE_FLAG_INHERIT,
+                                 extra_handle_flags[i] & HANDLE_FLAG_INHERIT);
+    };
     SIZE_T attr_size = 0;
     InitializeProcThreadAttributeList(nullptr, 1, 0, &attr_size);
     std::vector<uint8_t> attr_buf(attr_size);
@@ -165,6 +198,16 @@ ProcessResult run_process(const ProcessOptions& options) {
         CloseHandle(stdin_rd); CloseHandle(stdin_wr);
         return {ProcessOutcome::SpawnFailed, -1, "UpdateProcThreadAttribute failed"};
     }
+    for (HANDLE handle : extra_handles) {
+        if (SetHandleInformation(handle, HANDLE_FLAG_INHERIT,
+                                 HANDLE_FLAG_INHERIT)) continue;
+        restore_extra_handles();
+        DeleteProcThreadAttributeList(attr_list);
+        CloseHandle(stdout_rd); CloseHandle(stdout_wr);
+        CloseHandle(stdin_rd); CloseHandle(stdin_wr);
+        return {ProcessOutcome::SpawnFailed, -1,
+                "cannot prepare inherited handle"};
+    }
 
     STARTUPINFOEXW siex{};
     siex.StartupInfo.cb = sizeof siex;
@@ -179,6 +222,7 @@ ProcessResult run_process(const ProcessOptions& options) {
     jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     if (!job || !SetInformationJobObject(job, JobObjectExtendedLimitInformation,
                                          &jeli, sizeof(jeli))) {
+        restore_extra_handles();
         DeleteProcThreadAttributeList(attr_list);
         CloseHandle(stdout_rd); CloseHandle(stdout_wr);
         CloseHandle(stdin_rd); CloseHandle(stdin_wr);
@@ -199,6 +243,9 @@ ProcessResult run_process(const ProcessOptions& options) {
         creation_flags, env_block.data(),
         wcwd.empty() ? nullptr : wcwd.c_str(),
         &siex.StartupInfo, &pi);
+    const DWORD create_error = ok ? ERROR_SUCCESS : GetLastError();
+    restore_extra_handles();
+    if (inherit_lock.owns_lock()) inherit_lock.unlock();
 
     DeleteProcThreadAttributeList(attr_list);
     CloseHandle(stdout_wr);
@@ -208,7 +255,8 @@ ProcessResult run_process(const ProcessOptions& options) {
         CloseHandle(stdout_rd);
         CloseHandle(stdin_wr);
         CloseHandle(job);
-        return {ProcessOutcome::SpawnFailed, -1, "CreateProcessW failed: " + std::to_string(GetLastError())};
+        return {ProcessOutcome::SpawnFailed, -1,
+                "CreateProcessW failed: " + std::to_string(create_error)};
     }
 
     if (!AssignProcessToJobObject(job, pi.hProcess)) {
@@ -379,6 +427,10 @@ ProcessResult run_process(const ProcessOptions& options) {
     if (options.argv.empty()) {
         return {ProcessOutcome::SpawnFailed, -1, "argv cannot be empty"};
     }
+    for (int fd : options.inherit_fds)
+        if (fd < 0)
+            return {ProcessOutcome::SpawnFailed, -1,
+                    "invalid inherited file descriptor"};
     std::string resolved = resolve_exe_path(options.argv[0]);
     if (resolved.empty()) {
         return {ProcessOutcome::SpawnFailed, -1, "executable not found: " + options.argv[0]};
@@ -421,9 +473,20 @@ ProcessResult run_process(const ProcessOptions& options) {
         return {ProcessOutcome::SpawnFailed, -1, "pipe liveness failed"};
     }
 
-    fcntl(stdout_fds[0], F_SETFD, FD_CLOEXEC);
-    fcntl(stdin_fds[1], F_SETFD, FD_CLOEXEC);
-    fcntl(liveness_fds[1], F_SETFD, FD_CLOEXEC);
+    const int pipe_fds[] = {
+        stdout_fds[0], stdout_fds[1],
+        stdin_fds[0], stdin_fds[1],
+        liveness_fds[0], liveness_fds[1]};
+    for (int fd : pipe_fds) {
+        const int flags = fcntl(fd, F_GETFD);
+        if (flags < 0 || fcntl(fd, F_SETFD, flags | FD_CLOEXEC) != 0) {
+            close(stdout_fds[0]); close(stdout_fds[1]);
+            close(stdin_fds[0]); close(stdin_fds[1]);
+            close(liveness_fds[0]); close(liveness_fds[1]);
+            return {ProcessOutcome::SpawnFailed, -1,
+                    "cannot set pipe close-on-exec"};
+        }
+    }
 
     pid_t pid = fork();
     if (pid < 0) {
@@ -445,6 +508,11 @@ ProcessResult run_process(const ProcessOptions& options) {
         close(stdout_fds[0]); close(stdout_fds[1]);
         close(stdin_fds[0]); close(stdin_fds[1]);
         close(liveness_fds[1]);
+        for (int fd : options.inherit_fds) {
+            const int flags = fcntl(fd, F_GETFD);
+            if (flags < 0 || fcntl(fd, F_SETFD, flags & ~FD_CLOEXEC) != 0)
+                _exit(127);
+        }
         fcntl(liveness_fds[0], F_SETFD, FD_CLOEXEC);
 
         if (!options.cwd.empty() && chdir(options.cwd.c_str()) != 0) {
@@ -452,6 +520,26 @@ ProcessResult run_process(const ProcessOptions& options) {
         }
         execve(resolved.c_str(), args.data(), envp.data());
         _exit(127);
+    }
+
+    for (;;) {
+        if (setpgid(pid, pid) == 0) break;
+        const int group_error = errno;
+        if (group_error == EINTR) continue;
+        if (group_error == ESRCH) break;
+        if (group_error == EACCES) {
+            const pid_t group = getpgid(pid);
+            if (group == pid || (group < 0 && errno == ESRCH)) break;
+        }
+
+        (void)kill(pid, SIGKILL);
+        while (waitpid(pid, nullptr, 0) < 0 && errno == EINTR) {}
+        close(stdout_fds[0]); close(stdout_fds[1]);
+        close(stdin_fds[0]); close(stdin_fds[1]);
+        close(liveness_fds[0]); close(liveness_fds[1]);
+        return {ProcessOutcome::SpawnFailed, -1,
+                "cannot establish process group: " +
+                    std::strerror(group_error)};
     }
 
     close(stdout_fds[1]);

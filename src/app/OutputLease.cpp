@@ -43,7 +43,7 @@ bool OutputLease::acquire(const fs::path& output_dir, std::string& error) {
     }
     _handle = handle;
 #else
-    const int fd = ::open(lock_path.c_str(), O_CREAT | O_RDWR, 0666);
+    int fd = ::open(lock_path.c_str(), O_CREAT | O_RDWR, 0666);
     if (fd < 0) {
         error = "cannot open output lock " + lock_path.u8string() + ": " +
                 std::strerror(errno);
@@ -61,6 +61,18 @@ bool OutputLease::acquire(const fs::path& output_dir, std::string& error) {
         error = "output directory is already in use: " + lock_path.u8string();
         return false;
     }
+    if (fd < 3) {
+        const int safe_fd = fcntl(fd, F_DUPFD_CLOEXEC, 3);
+        if (safe_fd < 0) {
+            const int saved_errno = errno;
+            ::close(fd);
+            error = "cannot duplicate output lock " + lock_path.u8string() + ": " +
+                    std::strerror(saved_errno);
+            return false;
+        }
+        ::close(fd);
+        fd = safe_fd;
+    }
     _fd = fd;
 #endif
     return true;
@@ -74,11 +86,24 @@ void OutputLease::release() {
     }
 #else
     if (_fd >= 0) {
-        flock(_fd, LOCK_UN);
         ::close(_fd);
         _fd = -1;
     }
 #endif
 }
+
+bool OutputLease::valid() const {
+#ifdef _WIN32
+    return _handle != nullptr;
+#else
+    return _fd >= 0;
+#endif
+}
+
+#ifdef _WIN32
+void* OutputLease::native_handle() const { return _handle; }
+#else
+int OutputLease::native_fd() const { return _fd; }
+#endif
 
 }  // namespace app

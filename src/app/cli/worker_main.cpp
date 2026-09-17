@@ -16,7 +16,10 @@
 #include "app/WorkerRequest.h"
 #include "core/Env.h"
 
+#include <cerrno>
+#include <climits>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
@@ -24,6 +27,16 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <fcntl.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -40,6 +53,49 @@ int spirula_geometry_main(int argc, char** argv);
 #endif
 
 namespace {
+
+bool protect_output_lease(std::string& error) {
+    if (!spirula::env_on("OUTPUT_LEASE_HELD")) return true;
+#ifdef _WIN32
+    const char* text = spirula::env("OUTPUT_LEASE_HANDLE");
+    if (!text || !text[0]) {
+        error = "output lease handle missing";
+        return false;
+    }
+    errno = 0;
+    char* end = nullptr;
+    const unsigned long long raw = std::strtoull(text, &end, 10);
+    if (errno || end == text || *end || raw > UINTPTR_MAX) {
+        error = "output lease handle invalid";
+        return false;
+    }
+    HANDLE handle = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(raw));
+    if (!SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0)) {
+        error = "output lease handle is not owned by worker";
+        return false;
+    }
+#else
+    const char* text = spirula::env("OUTPUT_LEASE_FD");
+    if (!text || !text[0]) {
+        error = "output lease file descriptor missing";
+        return false;
+    }
+    errno = 0;
+    char* end = nullptr;
+    const long raw = std::strtol(text, &end, 10);
+    if (errno || end == text || *end || raw < 0 || raw > INT_MAX) {
+        error = "output lease file descriptor invalid";
+        return false;
+    }
+    const int fd = static_cast<int>(raw);
+    const int flags = fcntl(fd, F_GETFD);
+    if (flags < 0 || fcntl(fd, F_SETFD, flags | FD_CLOEXEC) != 0) {
+        error = "output lease file descriptor is not owned by worker";
+        return false;
+    }
+#endif
+    return true;
+}
 
 // --device is spliced in so the phase lands on the resolved GPU even when the
 // request forgot.
@@ -115,6 +171,12 @@ int spirula_worker_main(int argc, char** argv) {
         // Cannot publish into a request we could not read. Print where a
         // scheduler watching the process sees it.
         std::fprintf(stderr, "worker: bad request: %s\n", e.what());
+        return 2;
+    }
+    std::string lease_error;
+    if (!protect_output_lease(lease_error)) {
+        std::fprintf(stderr, "worker: invalid output lease: %s\n",
+                     lease_error.c_str());
         return 2;
     }
 

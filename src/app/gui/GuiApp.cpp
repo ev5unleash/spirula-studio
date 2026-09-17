@@ -983,6 +983,7 @@ void GuiApp::add_batch_row(const std::string& dataset) {
     j.preset_path = _preset_file;
     j.preset_name = _preset_file.empty() ? _preset : _preset_display;
     j.device = _scheduled_device_request;
+    if (j.device.empty() && _scheduled_device_choice_set) j.device = "auto";
     _batch.push_back(std::move(j));
     _batch_dirty = true;
     _batch_checked = false;
@@ -1058,8 +1059,9 @@ void GuiApp::start_batch(bool skip_invalid) {
         const std::string request = j.device.empty() ? _scheduled_device_request
                                                       : j.device;
         std::string device, device_name, device_error;
-        if (!resolve_scheduled_device(request, device, device_name,
-                                      device_error)) {
+        if (!resolve_scheduled_device(
+                request, !j.device.empty() || _scheduled_device_choice_set,
+                device, device_name, device_error)) {
             j.status = BatchJob::Status::Failed;
             j.message = device_error;
             continue;
@@ -5787,6 +5789,7 @@ void GuiApp::draw_mesh() {
 // ===========================================================================
 
 bool GuiApp::resolve_scheduled_device(const std::string& request,
+                                      bool explicit_request,
                                       std::string& device,
                                       std::string& device_name,
                                       std::string& error) {
@@ -5795,15 +5798,32 @@ bool GuiApp::resolve_scheduled_device(const std::string& request,
     error.clear();
 #ifdef SS_BACKEND_VULKAN
     load_native_devices();
+    const spirula::vkselect::Request parsed =
+        spirula::vkselect::requestFrom(request, explicit_request);
+    const std::string selector = parsed.text.empty() ? "auto" : parsed.text;
+    if (parsed.kind == spirula::vkselect::Request::Kind::Malformed) {
+        error = i18n::format(msg::device_error,
+                             {selector, parsed.error});
+        return false;
+    }
     int best = -1;
-    if (!request.empty() && request != "auto") {
+    if (parsed.kind != spirula::vkselect::Request::Kind::Auto) {
+        const std::string canonical =
+            backend::device_resolve_identity(parsed.text.c_str());
+        if (canonical.empty()) {
+            const std::string detail = backend::device_selection_error();
+            error = i18n::format(
+                msg::device_error,
+                {selector, detail.empty() ? msg::no_device_found.get() : detail});
+            return false;
+        }
         for (size_t i = 0; i < _native_devices.size(); ++i) {
             const NativeDeviceRow& d = _native_devices[i];
-            if (d.uuid == request) { best = (int)i; break; }
+            if (d.uuid == canonical) { best = (int)i; break; }
         }
         if (best < 0) {
             error = i18n::format(msg::device_error,
-                                 {request, msg::no_device_found.get()});
+                                 {selector, msg::no_device_found.get()});
             return false;
         }
     } else {
@@ -5832,6 +5852,7 @@ bool GuiApp::resolve_scheduled_device(const std::string& request,
     device_name = _native_devices[best].name;
     return true;
 #else
+    (void)explicit_request;
     int index = backend::device_current();
     if (!request.empty() && request != "auto") {
         try {
@@ -5882,14 +5903,19 @@ bool GuiApp::validate_scheduled_device(const std::string& device,
 #endif
 }
 
-void GuiApp::draw_job_device_picker(std::string& request, const char* id) {
+void GuiApp::draw_job_device_picker(std::string& request, const char* id,
+                                    bool* choice_set) {
 #ifdef SS_BACKEND_VULKAN
     load_native_devices();
     std::string shown = msg::device_auto.get();
     for (const NativeDeviceRow& d : _native_devices)
         if (!request.empty() && d.uuid == request) { shown = d.name; break; }
     if (ui::BeginComboRaw(id, shown.c_str())) {
-        if (ui::Selectable(msg::device_auto, request.empty())) request.clear();
+        const bool auto_selected = request.empty() || request == "auto";
+        if (ui::Selectable(msg::device_auto, auto_selected)) {
+            request = choice_set ? std::string() : "auto";
+            if (choice_set) *choice_set = true;
+        }
         ui::help_on_hover(msg::device_auto_help);
         for (size_t i = 0; i < _native_devices.size(); ++i) {
             const NativeDeviceRow& d = _native_devices[i];
@@ -5898,7 +5924,10 @@ void GuiApp::draw_job_device_picker(std::string& request, const char* id) {
             std::snprintf(label, sizeof label, "%s [%zu]##job_device_%zu",
                           d.name.c_str(), i, i);
             const bool selected = request == d.uuid;
-            if (ui::SelectableRaw(label, selected)) request = d.uuid;
+            if (ui::SelectableRaw(label, selected)) {
+                request = d.uuid;
+                if (choice_set) *choice_set = true;
+            }
             if (selected) ImGui::SetItemDefaultFocus();
             ui::help_on_hover_raw(d.uuid.c_str());
         }
@@ -5913,14 +5942,20 @@ void GuiApp::draw_job_device_picker(std::string& request, const char* id) {
                             ? backend::device_info(selected).name
                             : msg::device_auto.get();
     if (ui::BeginComboRaw(id, shown.c_str())) {
-        if (ui::Selectable(msg::device_auto, request.empty())) request.clear();
+        const bool auto_selected = request.empty() || request == "auto";
+        if (ui::Selectable(msg::device_auto, auto_selected)) {
+            request = choice_set ? std::string() : "auto";
+            if (choice_set) *choice_set = true;
+        }
         for (int i = 0; i < backend::device_count(); ++i) {
             const backend::DeviceInfo d = backend::device_info(i);
             char label[400];
             std::snprintf(label, sizeof label, "%s [%d]##job_device_%d",
                           d.name, i, i);
-            if (ui::SelectableRaw(label, selected == i))
+            if (ui::SelectableRaw(label, selected == i)) {
                 request = std::to_string(i);
+                if (choice_set) *choice_set = true;
+            }
         }
         ImGui::EndCombo();
     }
@@ -5928,7 +5963,8 @@ void GuiApp::draw_job_device_picker(std::string& request, const char* id) {
 }
 
 void GuiApp::draw_scheduled_device_picker() {
-    draw_job_device_picker(_scheduled_device_request, "##scheduled_device");
+    draw_job_device_picker(_scheduled_device_request, "##scheduled_device",
+                           &_scheduled_device_choice_set);
     ui::help_on_hover(msg::device_auto_help);
 }
 
@@ -6114,9 +6150,12 @@ void GuiApp::draw_batch_table() {
             if (scheduled && scheduled->state == app::sched::JobState::Queued) {
                 const std::string request = j.device.empty()
                                                 ? _scheduled_device_request : j.device;
+                const bool row_auto = j.device == "auto";
                 std::string device, name, error;
-                if (resolve_scheduled_device(request, device, name, error)) {
-                    j.device = device;
+                if (resolve_scheduled_device(
+                        request, !j.device.empty() || _scheduled_device_choice_set,
+                        device, name, error)) {
+                    if (!row_auto) j.device = device;
                     _scheduler.set_device(j.scheduler_id, device, name);
                 } else {
                     j.message = error;

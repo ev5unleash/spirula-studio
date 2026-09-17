@@ -9,12 +9,15 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdint>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <random>
+#include <unordered_set>
 #include <sstream>
 
 #ifdef _WIN32
@@ -554,54 +557,141 @@ bool JobScheduler::save_locked() {
 void JobScheduler::load() {
     const fs::path state_path = fs::u8path(_state_path);
     const fs::path backup_path = fs::u8path(_state_path + ".bak");
-    std::error_code exists_ec;
-    fs::path source = state_path;
-    if (!fs::exists(source, exists_ec) && fs::exists(backup_path, exists_ec))
-        source = backup_path;
-    if (!fs::exists(source, exists_ec)) return;
-    const std::string text = read_file(source.u8string());
-    if (text.empty()) {
-        std::lock_guard<std::mutex> lk(_mu);
-        _state_error = "scheduler state is empty";
-        _paused.store(true);
-        return;
-    }
     JsonValue root;
-    try {
-        root = json_parse(text);
-    } catch (...) {
-        std::lock_guard<std::mutex> lk(_mu);
-        _state_error = "cannot parse scheduler state";
-        _paused.store(true);
-        return;
+    std::string load_error;
+    bool found_state = false;
+    bool found_file = false;
+    auto read_state = [&](const fs::path& path, std::string& error) {
+        const std::string text = read_file(path.u8string());
+        if (text.empty()) {
+            error = "scheduler state is empty";
+            return false;
+        }
+        try {
+            root = json_parse(text);
+        } catch (...) {
+            error = "cannot parse scheduler state";
+            return false;
+        }
+        if (root.type != JsonValue::Type::Object) {
+            error = "scheduler state root is not an object";
+            return false;
+        }
+        const JsonValue* schema = root.find("schema_version");
+        if (!schema || schema->type != JsonValue::Type::Number ||
+            schema->num != 1) {
+            error = "unsupported scheduler state schema";
+            return false;
+        }
+        const JsonValue* jobs = root.find("jobs");
+        if (!jobs || jobs->type != JsonValue::Type::Array) {
+            error = "scheduler state has no jobs array";
+            return false;
+        }
+        const auto has_type = [](const JsonValue& object, const char* name,
+                                 JsonValue::Type type) {
+            const JsonValue* value = object.find(name);
+            return value && value->type == type;
+        };
+        std::unordered_set<std::string> ids;
+        std::unordered_set<uint64_t> orders;
+        const auto finite_integer = [](double value) {
+            return std::isfinite(value) && std::trunc(value) == value;
+        };
+        for (const JsonValue& el : jobs->arr) {
+            if (el.type != JsonValue::Type::Object) {
+                error = "scheduler state has an invalid job";
+                return false;
+            }
+            if (!has_type(el, "order", JsonValue::Type::Number) ||
+                !has_type(el, "job_id", JsonValue::Type::String) ||
+                !has_type(el, "phase", JsonValue::Type::String) ||
+                !has_type(el, "device", JsonValue::Type::String) ||
+                !has_type(el, "device_name", JsonValue::Type::String) ||
+                !has_type(el, "work_dir", JsonValue::Type::String) ||
+                !has_type(el, "run_dir", JsonValue::Type::String) ||
+                !has_type(el, "output_dir", JsonValue::Type::String) ||
+                !has_type(el, "created_at", JsonValue::Type::String) ||
+                !has_type(el, "state", JsonValue::Type::String) ||
+                !has_type(el, "attempt_id", JsonValue::Type::String) ||
+                !has_type(el, "error", JsonValue::Type::String) ||
+                !has_type(el, "pending_resume", JsonValue::Type::Bool) ||
+                !has_type(el, "last_exit_code", JsonValue::Type::Number) ||
+                !has_type(el, "args", JsonValue::Type::Array)) {
+                error = "scheduler state has an invalid job";
+                return false;
+            }
+            const JsonValue* order = el.find("order");
+            const JsonValue* phase = el.find("phase");
+            const JsonValue* device = el.find("device");
+            const JsonValue* run_dir = el.find("run_dir");
+            const JsonValue* created_at = el.find("created_at");
+            const JsonValue* state = el.find("state");
+            const JsonValue* attempt_id = el.find("attempt_id");
+            const JsonValue* last_exit_code = el.find("last_exit_code");
+            if (!finite_integer(order->num) || order->num < 0.0 ||
+                order->num >= std::ldexp(1.0, std::numeric_limits<uint64_t>::digits) ||
+                !orders.insert(static_cast<uint64_t>(order->num)).second ||
+                (phase->str != "train" && phase->str != "sfm" &&
+                 phase->str != "geometry") ||
+                device->str.empty() || device->str == "auto" ||
+                run_dir->str.empty() || created_at->str.empty() ||
+                !finite_integer(last_exit_code->num) ||
+                last_exit_code->num < std::numeric_limits<int>::min() ||
+                last_exit_code->num > std::numeric_limits<int>::max() ||
+                ((state->str == "Starting" || state->str == "Running" ||
+                  state->str == "Stopping") && attempt_id->str.empty())) {
+                error = "scheduler state has an invalid job";
+                return false;
+            }
+            const JsonValue* id = el.find("job_id");
+            if (id->str.empty()) {
+                error = "scheduler state has an invalid job";
+                return false;
+            }
+            if (!ids.insert(id->str).second) {
+                error = "scheduler state has duplicate job id";
+                return false;
+            }
+            if (state->str != to_string(state_from_string(state->str))) {
+                error = "scheduler state has an invalid job";
+                return false;
+            }
+            const JsonValue* args = el.find("args");
+            for (const JsonValue& arg : args->arr) {
+                if (arg.type != JsonValue::Type::String) {
+                    error = "scheduler state has an invalid job";
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+    for (const fs::path& candidate : {state_path, backup_path}) {
+        std::error_code ec;
+        if (!fs::exists(candidate, ec) || ec) continue;
+        found_file = true;
+        if (read_state(candidate, load_error)) {
+            found_state = true;
+            break;
+        }
     }
-    if (root.type != JsonValue::Type::Object) {
+    if (!found_file) return;
+    if (!found_state) {
         std::lock_guard<std::mutex> lk(_mu);
-        _state_error = "scheduler state root is not an object";
-        _paused.store(true);
-        return;
-    }
-    const JsonValue* schema = root.find("schema_version");
-    if (!schema || schema->as_int(0) != 1) {
-        std::lock_guard<std::mutex> lk(_mu);
-        _state_error = "unsupported scheduler state schema";
-        _paused.store(true);
-        return;
-    }
-    const JsonValue* jobs = root.find("jobs");
-    if (!jobs || jobs->type != JsonValue::Type::Array) {
-        std::lock_guard<std::mutex> lk(_mu);
-        _state_error = "scheduler state has no jobs array";
+        _state_error = load_error.empty() ? "cannot load scheduler state"
+                                          : load_error;
         _paused.store(true);
         return;
     }
 
+    const JsonValue* jobs = root.find("jobs");
     std::lock_guard<std::mutex> lk(_mu);
     uint64_t fallback_order = 0;
     for (const JsonValue& el : jobs->arr) {
         auto j = std::make_shared<Job>();
         if (const JsonValue* v = el.find("order"))
-            j->order = v->as_int(fallback_order);
+            j->order = static_cast<uint64_t>(v->num);
         else
             j->order = fallback_order;
         fallback_order++;
@@ -619,7 +709,7 @@ void JobScheduler::load() {
         j->pending_resume = el.find("pending_resume")
                             ? el.find("pending_resume")->as_bool(false) : false;
         j->last_exit_code = el.find("last_exit_code")
-                            ? (int)el.find("last_exit_code")->as_int(-1) : -1;
+                            ? static_cast<int>(el.find("last_exit_code")->num) : -1;
         JobState s = el.find("state") ? state_from_string(el.find("state")->str)
                                       : JobState::Failed;
         // Anything that was mid-flight at crash is Interrupted and needs an
@@ -648,7 +738,8 @@ bool JobScheduler::has_eligible_job_locked() const {
     if (_paused.load() || _shutdown.load() || !_state_error.empty()) return false;
     for (const std::string& id : _queue) {
         auto it = _jobs.find(id);
-        if (it != _jobs.end() && !_leases.count(it->second->device) &&
+        if (it != _jobs.end() && it->second->state == JobState::Queued &&
+            !_leases.count(it->second->device) &&
             it->second->device != _foreground_device) return true;
     }
     return false;
@@ -682,7 +773,8 @@ void JobScheduler::dispatch_one() {
             bool discarded = false;
             for (size_t i = 0; i < _queue.size(); ++i) {
                 auto it = _jobs.find(_queue[i]);
-                if (it == _jobs.end()) continue;
+                if (it == _jobs.end() || it->second->state != JobState::Queued)
+                    continue;
                 const std::string& dev = it->second->device;
                 if (_leases.count(dev) != 0 || dev == _foreground_device)
                     continue;
@@ -734,20 +826,23 @@ void JobScheduler::dispatch_one() {
                     continue;
                 }
             }
-            _queue.erase(_queue.begin() + (ptrdiff_t)idx);
-            _leases[j->device] = j->job_id;
+            const JobState previous_state = j->state;
+            const std::string previous_attempt = j->attempt_id;
+            const std::string previous_error = j->error;
             j->attempt_id = new_attempt_id();
             j->state = JobState::Starting;
-            queue_event_locked(*j);
+            j->error.clear();
             if (!save_locked()) {
-                j->state = JobState::Blocked;
-                j->error = "cannot persist scheduler state";
-                _leases.erase(j->device);
-                queue_event_locked(*j);
+                j->state = previous_state;
+                j->attempt_id = previous_attempt;
+                j->error = previous_error;
                 _paused.store(true);
                 return;
             }
 
+            _queue.erase(_queue.begin() + (ptrdiff_t)idx);
+            _leases[j->device] = j->job_id;
+            queue_event_locked(*j);
             att = std::move(candidate);
             att->id = j->attempt_id;
             att->job_id = j->job_id;
@@ -824,8 +919,10 @@ void JobScheduler::supervisor_main(std::shared_ptr<Attempt> att) {
         std::lock_guard<std::mutex> lk(_mu);
         if (j->state == JobState::Starting) {
             j->state = JobState::Running;
-            queue_event_locked(*j);
-            save_locked();
+            if (save_locked())
+                queue_event_locked(*j);
+            else
+                j->state = JobState::Starting;
         }
     }
 
@@ -837,8 +934,22 @@ void JobScheduler::supervisor_main(std::shared_ptr<Attempt> att) {
     opts.stop = &att->stop;
     opts.stop_token = "STOP\n";
     opts.grace_period_ms = j->phase == "train" ? 300000 : 30000;
-    opts.env_overrides = {{"SS_WORKER_CONTROL", "1"},
-                          {"SS_OUTPUT_LEASE_HELD", "1"}};
+    opts.env_overrides = {{"SS_WORKER_CONTROL", "1"}};
+    if (att->output_lease.valid()) {
+        opts.env_overrides.push_back({"SS_OUTPUT_LEASE_HELD", "1"});
+#ifdef _WIN32
+        opts.inherit_handles.push_back(att->output_lease.native_handle());
+        opts.env_overrides.push_back({
+            "SS_OUTPUT_LEASE_HANDLE",
+            std::to_string(reinterpret_cast<uintptr_t>(
+                att->output_lease.native_handle()))});
+#else
+        opts.inherit_fds.push_back(att->output_lease.native_fd());
+        opts.env_overrides.push_back({
+            "SS_OUTPUT_LEASE_FD",
+            std::to_string(att->output_lease.native_fd())});
+#endif
+    }
     opts.on_line = [this, &log_file, job_id = att->job_id](const std::string& line) {
         if (log_file) {
             log_file << line << "\n";
@@ -933,18 +1044,19 @@ void JobScheduler::shutdown() {
         for (auto& [_, a] : _active) live.push_back(a);
     }
     for (auto& a : live) a->stop.store(true);
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
-    for (auto& a : live) {
-        if (a->thread.joinable() &&
-            std::chrono::steady_clock::now() < deadline)
-            a->thread.join();
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::seconds(8);
+    for (;;) {
+        bool done = true;
+        for (const auto& a : live)
+            done = done && a->finished.load();
+        if (done || std::chrono::steady_clock::now() >= deadline) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    for (auto& a : live) {
-        if (a->thread.joinable()) {
-            a->cancel.store(true);
-            a->thread.join();
-        }
-    }
+    for (auto& a : live)
+        if (!a->finished.load()) a->cancel.store(true);
+    for (auto& a : live)
+        if (a->thread.joinable()) a->thread.join();
     std::lock_guard<std::mutex> lk(_mu);
     save_locked();
 }

@@ -1,14 +1,25 @@
 #include "app/Subprocess.h"
+#include "app/OutputLease.h"
 
 #include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <string>
 #include <thread>
 #include <vector>
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
 namespace proc = app::proc;
+namespace fs = std::filesystem;
 
 namespace {
 
@@ -178,6 +189,97 @@ int main() {
         proc::ProcessResult res = proc::run_process(opts);
         check(res.outcome == proc::ProcessOutcome::SpawnFailed, "missing executable reports SpawnFailed");
     }
+
+    // 8. A worker-held output lease survives parent release.
+    {
+        const fs::path output = fs::temp_directory_path() /
+            ("spirula_subprocess_lease_" + std::to_string(
+                std::chrono::steady_clock::now().time_since_epoch().count()));
+        app::OutputLease owner;
+        app::OutputLease contender;
+        std::string error;
+        check(owner.acquire(output, error), "handoff test acquires output lease");
+
+        std::atomic<bool> ready{false};
+        proc::ProcessResult worker_result;
+        proc::ProcessOptions opts;
+#ifdef _WIN32
+        DWORD original_flags = 0;
+        const bool got_original_flags =
+            GetHandleInformation(owner.native_handle(), &original_flags) != 0;
+        opts.argv = {"powershell", "-NoProfile", "-Command",
+                     "Write-Output READY; Start-Sleep -Seconds 1"};
+        opts.inherit_handles.push_back(owner.native_handle());
+#else
+        opts.argv = {"/bin/sh", "-c", "printf 'READY\\n'; sleep 1"};
+        opts.inherit_fds.push_back(owner.native_fd());
+#endif
+        opts.on_line = [&](const std::string& line) { ready = line == "READY"; };
+        std::thread worker([&] { worker_result = proc::run_process(opts); });
+        for (int i = 0; i < 100 && !ready; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        check(ready, "handoff worker started");
+#ifdef _WIN32
+        DWORD current_flags = 0;
+        check(got_original_flags &&
+                  GetHandleInformation(owner.native_handle(), &current_flags) &&
+                  ((current_flags ^ original_flags) & HANDLE_FLAG_INHERIT) == 0,
+              "inherited handle flags restored after spawn");
+#else
+        const int flags = fcntl(owner.native_fd(), F_GETFD);
+        check(flags >= 0 && (flags & FD_CLOEXEC),
+              "output lease remains close-on-exec");
+#endif
+        owner.release();
+        check(!contender.acquire(output, error),
+              "worker keeps output lease after parent release");
+        worker.join();
+        check(contender.acquire(output, error),
+              "output lease releases after worker exit");
+        check(worker_result.outcome == proc::ProcessOutcome::Success,
+              "handoff worker exits successfully");
+        check(worker_result.exit_code == 0,
+              "handoff worker exit code is zero");
+    }
+
+#ifndef _WIN32
+    // 9. An inherited lease never occupies a standard descriptor.
+    {
+        const int saved_stdin = dup(STDIN_FILENO);
+        if (saved_stdin >= 0) close(STDIN_FILENO);
+        const fs::path output = fs::temp_directory_path() /
+            ("spirula_subprocess_standard_fd_" + std::to_string(
+                std::chrono::steady_clock::now().time_since_epoch().count()));
+        app::OutputLease lease;
+        std::string error;
+        check(lease.acquire(output, error),
+              "output lease acquires with closed standard input");
+        check(lease.valid() && lease.native_fd() >= 3,
+              "output lease avoids standard descriptors");
+        lease.release();
+        if (saved_stdin >= 0) {
+            dup2(saved_stdin, STDIN_FILENO);
+            close(saved_stdin);
+        }
+    }
+#endif
+
+#ifndef _WIN32
+    // 10. Cancellation requested before launch still kills process group.
+    {
+        std::atomic<bool> cancel_flag{true};
+        proc::ProcessOptions opts;
+        opts.argv = {"/bin/sh", "-c", "sleep 2"};
+        opts.cancel = &cancel_flag;
+        const auto start = std::chrono::steady_clock::now();
+        const proc::ProcessResult res = proc::run_process(opts);
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start).count();
+        check(res.outcome == proc::ProcessOutcome::Cancelled,
+              "pre-launch cancellation is reported as Cancelled");
+        check(elapsed < 1000, "pre-launch cancellation terminates promptly");
+    }
+#endif
 
     if (failures) {
         std::printf("FAILED with %d error(s)\n", failures);

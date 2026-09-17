@@ -32,6 +32,11 @@ struct ProcessOptions {
     std::string stop_token = "STOP\n";
     std::string cancel_token = "CANCEL\n";
     int grace_period_ms = 3000;
+#ifdef _WIN32
+    std::vector<void*> inherit_handles;
+#else
+    std::vector<int> inherit_fds;
+#endif
 };
 
 ProcessResult run_process(const ProcessOptions& options);

@@ -334,8 +334,10 @@ private:
     void draw_batch();
     void draw_scheduled_device_picker();
     void draw_batch_device_picker(BatchJob& job);
-    void draw_job_device_picker(std::string& request, const char* id);
+    void draw_job_device_picker(std::string& request, const char* id,
+                                bool* choice_set = nullptr);
     bool resolve_scheduled_device(const std::string& request,
+                                  bool explicit_request,
                                   std::string& device, std::string& device_name,
                                   std::string& error);
     bool validate_scheduled_device(const std::string& device,
@@ -628,6 +630,7 @@ private:
     std::string _batch_msg;           // already formatted; "" when there is none
     bool _batch_msg_err = false;
     std::string _scheduled_device_request;
+    bool _scheduled_device_choice_set = false;
     std::vector<app::sched::Job> _scheduler_jobs;
 
     FileDialog _dialog;

@@ -55,7 +55,7 @@ struct BatchJob {
     // screen picks when a dataset is opened. Each run still lands in its own
     // timestamped subfolder of this, so two rows sharing one folder is fine.
     std::string output_dir;
-    std::string device;          // canonical scheduled target; empty = auto
+    std::string device;          // canonical target; empty = inherit, "auto" = row Auto
 
     // Per-row overrides of the three flags that get changed often enough that
     // making a whole preset for each combination is the wrong shape of work.

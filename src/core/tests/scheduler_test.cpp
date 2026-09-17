@@ -246,6 +246,40 @@ int main(int argc, char** argv) {
 
         // Fabricate an Interrupted row, write it by hand, and reload.
     }
+    {
+        const fs::path state = root / "job-state.json";
+        const fs::path backup = root / "job-state.json.bak";
+        std::ostringstream saved;
+        {
+            std::ifstream in(state, std::ios::binary);
+            saved << in.rdbuf();
+        }
+        std::ofstream(backup, std::ios::binary | std::ios::trunc) << saved.str();
+        std::ofstream(state, std::ios::binary | std::ios::trunc)
+            << "{not valid scheduler state";
+        sched::JobScheduler recovered(root.u8string(), exe);
+        recovered.load();
+        check(recovered.state_error().empty() && recovered.list().size() == 6,
+              "valid scheduler backup replaces corrupt primary on load");
+    }
+    {
+        const fs::path state = root / "job-state.json";
+        const fs::path backup = root / "job-state.json.bak";
+        std::string saved;
+        {
+            std::ifstream in(state, std::ios::binary);
+            std::ostringstream ss;
+            ss << in.rdbuf();
+            saved = ss.str();
+        }
+        std::ofstream(backup, std::ios::binary | std::ios::trunc) << saved;
+        std::ofstream(state, std::ios::binary | std::ios::trunc)
+            << R"({"schema_version":1,"jobs":[{"order":0,"job_id":"bad","phase":"invalid","device":"auto","device_name":"","work_dir":"","run_dir":"run","output_dir":"","created_at":"created","state":"Queued","attempt_id":"","error":"","pending_resume":false,"last_exit_code":-1,"args":[]}]})";
+        sched::JobScheduler recovered(root.u8string(), exe);
+        recovered.load();
+        check(recovered.state_error().empty() && recovered.list().size() == 6,
+              "parseable invalid job row falls back to valid scheduler backup");
+    }
     // Synthetic recovery: Running persisted, must come back Interrupted.
     {
         const fs::path p = root / "job-state.json";
