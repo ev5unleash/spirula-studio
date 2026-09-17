@@ -2766,11 +2766,6 @@ void GuiApp::start_dataset_job() {
         log(dmsg::sensors_reading.get());
         return;
     }
-#ifdef SS_BACKEND_VULKAN
-    if (!freeze_native_device()) return;
-#else
-    if (!freeze_cuda_device()) return;
-#endif
     sync_dataset_jobs();
 
     const bool schedule_native =
@@ -2778,6 +2773,12 @@ void GuiApp::start_dataset_job() {
         !_sfm_job.prep.force_external_masking &&
         (!_mask_enable || backends().builtin_masking);
     if (!schedule_native) {
+#ifdef SS_BACKEND_VULKAN
+        if (!freeze_native_device()) return;
+#else
+        if (!freeze_cuda_device()) return;
+#endif
+        sync_dataset_jobs();
         if (effective_engine() == Engine::Colmap ||
             _sfm_job.prep.force_external_masking ||
             (_mask_enable && !backends().builtin_masking))
@@ -2805,23 +2806,34 @@ void GuiApp::start_dataset_job() {
         return;
     }
 
+    std::string scheduled_device, scheduled_device_name, device_error;
+    if (!resolve_scheduled_device(_scheduled_device_request,
+                                  _scheduled_device_choice_set,
+                                  scheduled_device, scheduled_device_name,
+                                  device_error)) {
+        _native_device_error = device_error;
+        log(device_error);
+        return;
+    }
+
     app::PrepJob frozen = _sfm_job.prep;
+    frozen.device = scheduled_device;
     std::string error;
     std::error_code ec;
     if (!app::worker::freeze_prep_job(
             frozen, fs::current_path(ec).u8string(), error)) {
         _native_device_error = error;
         log(error);
-        _scheduler.set_foreground_device("");
         return;
     }
     if (app::worker::reject_external_masking(frozen, error)) {
         log(msg::scheduler_external_interactive.get());
-        _scheduler.set_foreground_device("");
         return;
     }
     SfmJob scheduled_sfm = _sfm_job;
     scheduled_sfm.prep = frozen;
+    scheduled_sfm.device_selector = scheduled_device;
+    scheduled_sfm.geometry.device_uuid = scheduled_device;
     const std::string image_dir =
         planned_image_dir(frozen.inputs, frozen.workspace,
                           frozen.photo_import);
@@ -2852,8 +2864,8 @@ void GuiApp::start_dataset_job() {
     }
 
     auto device = [&](app::sched::Phase& phase) {
-        phase.planned_device = _native_device_uuid;
-        phase.planned_device_name = _native_device_name;
+        phase.planned_device = scheduled_device;
+        phase.planned_device_name = scheduled_device_name;
     };
     app::sched::Phase prep;
     prep.phase = "prep";
@@ -2922,7 +2934,6 @@ void GuiApp::start_dataset_job() {
     }
 
     const std::string job_id = _scheduler.submit(submit);
-    _scheduler.set_foreground_device("");
     if (job_id.empty()) {
         log(msg::scheduler_external_interactive.get());
         return;
@@ -5284,7 +5295,16 @@ void GuiApp::draw_dataset_form(float height, bool running) {
     // a masking step and the reconstruction all run on it, so it is offered
     // before any of them can be started.
 #if defined(SS_BUILD_SAM) || defined(SS_TOOL_SFM) || defined(SS_BACKEND_VULKAN)
+    ui::Text(dmsg::desktop_gpu);
+    ImGui::SameLine();
     draw_device_picker();
+    if (effective_engine() == Engine::BuiltIn &&
+        !_sfm_job.prep.force_external_masking &&
+        (!_mask_enable || backends().builtin_masking)) {
+        ui::Text(dmsg::queued_job_gpu);
+        ImGui::SameLine();
+        draw_scheduled_device_picker();
+    }
     ImGui::Spacing();
 #endif
     draw_dataset_basics();
@@ -5368,6 +5388,24 @@ void GuiApp::draw_dataset_form(float height, bool running) {
         cancel_dataset_job();
     }
 
+    if (const app::sched::Job* scheduled =
+            scheduler_job(_scheduled_dataset_id)) {
+        ui::TextColored(kDim, scheduler_state_label(scheduled->state));
+        if (!scheduled->phase.empty())
+            ui::Text(msg::scheduler_phase, {scheduled->phase});
+        if (!scheduled->device_name.empty())
+            ui::Text(msg::scheduler_device, {scheduled->device_name});
+        if (!scheduled->error.empty())
+            ui::TextColoredWrapped(kErr, msg::scheduler_reason,
+                                   {scheduled->error});
+        const auto logs = _scheduler_log_tail.find(scheduled->job_id);
+        if (logs != _scheduler_log_tail.end())
+            for (const std::string& line : logs->second)
+                ui::TextDisabledRaw(line);
+        _ds_action_h = ImGui::GetCursorPosY() - action_y0;
+        return;
+    }
+
     // Both runners report through the same three states.
     struct {
         bool done, failed, cancelled;
@@ -5438,7 +5476,7 @@ void GuiApp::draw_new_dataset() {
     // What the run says about itself, read before the layout is decided:
     // whether there is anything to show is what decides whether the screen is
     // one column or two.
-    poll_sfm_progress();
+    if (!scheduled_dataset_pending()) poll_sfm_progress();
 
     // The log spans the bottom whatever the body does above it: it is the one
     // panel that is read across everything, and it is what a run used to be
@@ -6237,17 +6275,24 @@ void GuiApp::draw_scheduler_queue() {
         } else if (job.state == app::sched::JobState::Starting ||
                    job.state == app::sched::JobState::Running ||
                    job.state == app::sched::JobState::Stopping) {
-            if (ui::Button(msg::scheduler_stop_save))
-                _scheduler.stop_and_save(job.job_id);
-            ImGui::SameLine();
+            const bool cooperative = job.phase == "train" ||
+                                     job.phase == "prep" || job.phase == "sfm";
+            if (cooperative) {
+                if (ui::Button(job.phase == "train" ? msg::scheduler_stop_save
+                                                     : msg::scheduler_stop))
+                    _scheduler.stop_and_save(job.job_id);
+                ImGui::SameLine();
+            }
             if (ui::Button(msg::scheduler_force_stop))
                 request_force_stop(job.job_id);
         } else if (job.state == app::sched::JobState::Interrupted ||
                    job.state == app::sched::JobState::Failed ||
                    job.state == app::sched::JobState::Stopped ||
                    job.state == app::sched::JobState::Blocked) {
-            if (ui::Button(msg::scheduler_retry))
+            if (ui::Button(msg::scheduler_retry)) {
+                _recovery_dismissed.erase(job.job_id);
                 _scheduler.retry(job.job_id);
+            }
         }
         ImGui::PopID();
         ImGui::Separator();
@@ -6283,6 +6328,7 @@ void GuiApp::draw_scheduler_recovery_modal() {
         if (!job.device_name.empty())
             ui::TextDisabled(msg::scheduler_device, {job.device_name});
         if (ui::Button(msg::scheduler_recovery_retry)) {
+            _recovery_dismissed.erase(job.job_id);
             _scheduler.retry(job.job_id);
             if (job.options_payload == "gui:native-dataset:v1")
                 _scheduled_dataset_id = job.job_id;

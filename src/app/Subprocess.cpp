@@ -1,4 +1,5 @@
 #include "app/Subprocess.h"
+#include "core/Env.h"
 
 #include <algorithm>
 #include <cctype>
@@ -18,6 +19,7 @@
 #else
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -51,6 +53,10 @@ void emit_lines(std::string& acc, const char* buf, size_t n,
 void emit_tail(std::string& acc, const std::function<void(const std::string&)>& on_line) {
     if (!acc.empty() && on_line) on_line(acc);
     acc.clear();
+}
+
+bool worker_control_active() {
+    return spirula::env_on("WORKER_CONTROL");
 }
 
 }  // namespace
@@ -101,6 +107,7 @@ ProcessResult run_process(const ProcessOptions& options) {
         if (!handle)
             return {ProcessOutcome::SpawnFailed, -1,
                     "invalid inherited handle"};
+    const bool nested_worker = worker_control_active();
 
     std::wstring cmdline;
     for (size_t i = 0; i < options.argv.size(); ++i) {
@@ -217,11 +224,12 @@ ProcessResult run_process(const ProcessOptions& options) {
     siex.StartupInfo.hStdInput  = stdin_rd;
     siex.lpAttributeList = attr_list;
 
-    HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    HANDLE job = nested_worker ? nullptr : CreateJobObjectW(nullptr, nullptr);
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli{};
     jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    if (!job || !SetInformationJobObject(job, JobObjectExtendedLimitInformation,
-                                         &jeli, sizeof(jeli))) {
+    if (!nested_worker &&
+        (!job || !SetInformationJobObject(job, JobObjectExtendedLimitInformation,
+                                          &jeli, sizeof(jeli)))) {
         restore_extra_handles();
         DeleteProcThreadAttributeList(attr_list);
         CloseHandle(stdout_rd); CloseHandle(stdout_wr);
@@ -254,12 +262,12 @@ ProcessResult run_process(const ProcessOptions& options) {
     if (!ok) {
         CloseHandle(stdout_rd);
         CloseHandle(stdin_wr);
-        CloseHandle(job);
+        if (job) CloseHandle(job);
         return {ProcessOutcome::SpawnFailed, -1,
                 "CreateProcessW failed: " + std::to_string(create_error)};
     }
 
-    if (!AssignProcessToJobObject(job, pi.hProcess)) {
+    if (!nested_worker && !AssignProcessToJobObject(job, pi.hProcess)) {
         const DWORD error = GetLastError();
         TerminateProcess(pi.hProcess, 1);
         WaitForSingleObject(pi.hProcess, INFINITE);
@@ -267,19 +275,20 @@ ProcessResult run_process(const ProcessOptions& options) {
         CloseHandle(pi.hProcess);
         CloseHandle(stdout_rd);
         CloseHandle(stdin_wr);
-        CloseHandle(job);
+        if (job) CloseHandle(job);
         return {ProcessOutcome::SpawnFailed, -1,
                 "cannot assign process tree: " + std::to_string(error)};
     }
     if (ResumeThread(pi.hThread) == static_cast<DWORD>(-1)) {
         const DWORD error = GetLastError();
-        TerminateJobObject(job, 1);
+        if (job) TerminateJobObject(job, 1);
+        else TerminateProcess(pi.hProcess, 1);
         WaitForSingleObject(pi.hProcess, INFINITE);
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
         CloseHandle(stdout_rd);
         CloseHandle(stdin_wr);
-        CloseHandle(job);
+        if (job) CloseHandle(job);
         return {ProcessOutcome::SpawnFailed, -1,
                 "cannot resume process: " + std::to_string(error)};
     }
@@ -294,7 +303,7 @@ ProcessResult run_process(const ProcessOptions& options) {
     for (;;) {
         if (options.cancel && options.cancel->load() && !killed) {
             killed = true;
-            TerminateJobObject(job, 1);
+            if (job) TerminateJobObject(job, 1);
             TerminateProcess(pi.hProcess, 1);
             if (stdin_wr) {
                 CloseHandle(stdin_wr);
@@ -319,7 +328,7 @@ ProcessResult run_process(const ProcessOptions& options) {
                 std::chrono::steady_clock::now() - stop_time).count();
             if (elapsed > options.grace_period_ms) {
                 killed = true;
-                TerminateJobObject(job, 1);
+                if (job) TerminateJobObject(job, 1);
                 TerminateProcess(pi.hProcess, 1);
             }
         }
@@ -352,7 +361,7 @@ ProcessResult run_process(const ProcessOptions& options) {
     DWORD exit_code = 1;
     GetExitCodeProcess(pi.hProcess, &exit_code);
     CloseHandle(pi.hProcess);
-    CloseHandle(job);
+    if (job) CloseHandle(job);
     CloseHandle(stdout_rd);
 
     ProcessResult res;
@@ -421,9 +430,27 @@ std::string resolve_exe_path(const std::string& exe) {
     return "";
 }
 
-bool worker_control_active() {
-    const char* value = std::getenv("SS_WORKER_CONTROL");
-    return value && value[0] && !(value[0] == '0' && value[1] == '\0');
+bool safe_pipe_write(int fd, const std::string& value) {
+    sigset_t block, previous;
+    sigemptyset(&block);
+    sigaddset(&block, SIGPIPE);
+    if (pthread_sigmask(SIG_BLOCK, &block, &previous) != 0) return false;
+    size_t offset = 0;
+    bool ok = true;
+    while (offset < value.size()) {
+        const ssize_t n = write(fd, value.data() + offset,
+                                value.size() - offset);
+        if (n > 0) { offset += static_cast<size_t>(n); continue; }
+        if (n < 0 && errno == EINTR) continue;
+        ok = false;
+        break;
+    }
+    if (!ok && errno == EPIPE) {
+        timespec zero{};
+        while (sigtimedwait(&block, nullptr, &zero) < 0 && errno == EINTR) {}
+    }
+    pthread_sigmask(SIG_SETMASK, &previous, nullptr);
+    return ok;
 }
 
 }  // namespace
@@ -573,7 +600,7 @@ ProcessResult run_process(const ProcessOptions& options) {
             stop_time = std::chrono::steady_clock::now();
             if (stdin_fds[1] >= 0) {
                 if (!options.stop_token.empty()) {
-                    (void)write(stdin_fds[1], options.stop_token.data(), options.stop_token.size());
+                    (void)safe_pipe_write(stdin_fds[1], options.stop_token);
                 }
                 close(stdin_fds[1]);
                 stdin_fds[1] = -1;
@@ -602,7 +629,13 @@ ProcessResult run_process(const ProcessOptions& options) {
     if (stdin_fds[1] >= 0) close(stdin_fds[1]);
 
     int status = 0;
-    waitpid(pid, &status, 0);
+    pid_t waited = -1;
+    do { waited = waitpid(pid, &status, 0); }
+    while (waited < 0 && errno == EINTR);
+    if (waited < 0) {
+        return {ProcessOutcome::Crashed, -1,
+                "waitpid failed: " + std::string(std::strerror(errno))};
+    }
 
     ProcessResult res;
     if (killed) {

@@ -60,6 +60,21 @@ SS_MSG(section_settings,
     PT("Configurações"), IT("Impostazioni"), NL("Instellingen"), RU("Настройки"),
     TR("Ayarlar"));
 
+SS_MSG(desktop_gpu,
+    EN("Desktop GPU"), JA("デスクトップ GPU"), ZH_HANS("桌面 GPU"),
+    ZH_HANT("桌面 GPU"), KO("데스크톱 GPU"), DE("Desktop-GPU"),
+    FR("GPU du bureau"), ES("GPU del escritorio"), PT("GPU do aplicativo"),
+    IT("GPU desktop"), NL("Desktop-GPU"), RU("GPU приложения"),
+    TR("Masaüstü GPU'su"));
+
+SS_MSG(queued_job_gpu,
+    EN("Queued job GPU"), JA("キュー処理の GPU"), ZH_HANS("队列任务 GPU"),
+    ZH_HANT("佇列工作 GPU"), KO("대기 작업 GPU"), DE("GPU des Warteschlangenauftrags"),
+    FR("GPU de la tâche en attente"), ES("GPU de la tarea en cola"),
+    PT("GPU da tarefa na fila"), IT("GPU dell'attività in coda"),
+    NL("GPU voor wachtrijtaak"), RU("GPU задания в очереди"),
+    TR("Kuyruktaki işin GPU'su"));
+
 SS_MSG(section_advanced,
     EN("Advanced"),      JA("詳細設定"),      ZH_HANS("高级"),     ZH_HANT("進階"),
     KO("고급"),           DE("Erweitert"),    FR("Avancé"),       ES("Avanzado"),

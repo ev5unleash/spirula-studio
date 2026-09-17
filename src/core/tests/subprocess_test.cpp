@@ -244,6 +244,37 @@ int main() {
               "handoff worker exit code is zero");
     }
 
+#ifdef _WIN32
+    {
+        const char* previous = std::getenv("SS_WORKER_CONTROL");
+        const bool had_previous = previous != nullptr;
+        const std::string previous_value = previous ? previous : "";
+        _putenv_s("SS_WORKER_CONTROL", "1");
+
+        std::atomic<bool> cancel_flag{false};
+        proc::ProcessOptions opts;
+        opts.argv = {"powershell", "-NoProfile", "-Command",
+                     "Write-Output READY; Start-Sleep -Seconds 10"};
+        opts.cancel = &cancel_flag;
+        std::vector<std::string> lines;
+        opts.on_line = [&](const std::string& line) { lines.push_back(line); };
+        std::thread canceller([&]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+            cancel_flag.store(true);
+        });
+        const proc::ProcessResult res = proc::run_process(opts);
+        canceller.join();
+
+        check(res.outcome == proc::ProcessOutcome::Cancelled,
+              "nested worker helper cancellation is reported as Cancelled");
+        check(!lines.empty() && lines.front() == "READY",
+              "nested worker helper starts without a second job object");
+
+        _putenv_s("SS_WORKER_CONTROL",
+                  had_previous ? previous_value.c_str() : "");
+    }
+#endif
+
 #ifndef _WIN32
     // 9. An inherited lease never occupies a standard descriptor.
     {

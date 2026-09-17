@@ -70,12 +70,33 @@ bool protect_output_lease(std::string& error) {
     return true;
 }
 
+bool protect_state_lock(std::string& error) {
+    if (!spirula::env_on("STATE_LOCK_HELD")) return true;
+#ifdef _WIN32
+    const char* text = spirula::env("STATE_LOCK_HANDLE");
+    if (!text || !text[0]) { error = "scheduler state lock handle missing"; return false; }
+    errno = 0; char* end = nullptr;
+    const unsigned long long raw = std::strtoull(text, &end, 10);
+    if (errno || end == text || *end || raw > UINTPTR_MAX) { error = "scheduler state lock handle invalid"; return false; }
+    HANDLE handle = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(raw));
+    if (!SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0)) { error = "scheduler state lock is not owned by worker"; return false; }
+#else
+    const char* text = spirula::env("STATE_LOCK_FD");
+    if (!text || !text[0]) { error = "scheduler state lock file descriptor missing"; return false; }
+    errno = 0; char* end = nullptr; const long raw = std::strtol(text, &end, 10);
+    if (errno || end == text || *end || raw < 0 || raw > INT_MAX) { error = "scheduler state lock file descriptor invalid"; return false; }
+    const int fd = static_cast<int>(raw); const int flags = fcntl(fd, F_GETFD);
+    if (flags < 0 || fcntl(fd, F_SETFD, flags | FD_CLOEXEC) != 0) { error = "scheduler state lock is not owned by worker"; return false; }
+#endif
+    return true;
+}
+
 struct WorkerControl {
     std::atomic<bool> stop{false};
     std::atomic<bool> done{false};
     std::thread listener;
     WorkerControl() {
-        if (!spirula::env_on("WORKER_CONTROL") && !spirula::env_on("SS_WORKER_CONTROL")) return;
+        if (!spirula::env_on("WORKER_CONTROL")) return;
         listener = std::thread([this] {
 #ifdef _WIN32
             HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
@@ -119,6 +140,7 @@ std::vector<std::string> build_argv(const app::worker::Request& r) {
 
 int run_sfm(const app::worker::Request& r, app::worker::Result& result) {
 #ifdef SS_TOOL_SFM
+    WorkerControl control;
     std::vector<std::string> args = r.args;
     if (!args.empty() && args.front() == "auto") args.erase(args.begin());
     if (!r.payload.empty() && r.payload != "{}") {
@@ -141,7 +163,17 @@ int run_sfm(const app::worker::Request& r, app::worker::Result& result) {
     if (const std::string error = sfm::parse_auto_args(args, request); !error.empty()) {
         result.outcome = "failed"; result.message = error; return 2;
     }
-    const sfm::AutoResult value = sfm::run_auto(request.cfg, request.in);
+    sfm::RunContext context;
+    context.set_cancel(&control.stop);
+    sfm::AutoResult value;
+    try {
+        value = sfm::run_auto(request.cfg, request.in);
+    } catch (const sfm::Cancelled&) {
+        result.outcome = "stopped";
+        result.message = "SfM stopped";
+        result.exit_code = 42;
+        return 42;
+    }
     result.exit_code = value.exit_code;
     result.registered = value.registered; result.images = value.images;
     result.points = value.points; result.models = value.models;
@@ -152,7 +184,9 @@ int run_sfm(const app::worker::Request& r, app::worker::Result& result) {
     if (value.exit_code == 0) result.outcome = "success";
     else if (value.exit_code == 3) result.outcome = "partial";
     else if (value.exit_code == 4) result.outcome = "nonmetric";
+    else if (control.stop.load()) result.outcome = "stopped";
     else result.outcome = "failed";
+    if (control.stop.load() && value.exit_code != 0) return 42;
     return value.exit_code;
 #else
     (void)r; result.outcome = "spawn_failed"; result.message = "worker: SfM phase unavailable in this build"; return 100;
@@ -199,9 +233,9 @@ int run_tool_phase(const app::worker::Request& r, app::worker::Result& result) {
     if (r.phase == "train") {
 #ifdef SS_TOOL_TRAIN
 #ifdef _WIN32
-        _putenv_s("SS_WORKER_CONTROL", "1"); _putenv_s("WORKER_CONTROL", "1");
+        _putenv_s("SS_WORKER_CONTROL", "1");
 #else
-        setenv("SS_WORKER_CONTROL", "1", 1); setenv("WORKER_CONTROL", "1", 1);
+        setenv("SS_WORKER_CONTROL", "1", 1);
 #endif
         return spirula_train_main(argc, argv.data());
 #else
@@ -210,6 +244,7 @@ int run_tool_phase(const app::worker::Request& r, app::worker::Result& result) {
     }
     if (r.phase == "geometry") {
 #ifdef SS_TOOL_GEOMETRY
+        WorkerControl control;
         const int rc = spirula_geometry_main(argc, argv.data());
         if (rc == 0) {
             if (std::find(r.args.begin(), r.args.end(), "--depth") != r.args.end())
@@ -246,6 +281,11 @@ int spirula_worker_main(int argc, char** argv) {
     std::string lease_error;
     if (!protect_output_lease(lease_error)) {
         std::fprintf(stderr, "worker: invalid output lease: %s\n", lease_error.c_str());
+        return 2;
+    }
+    if (!protect_state_lock(lease_error)) {
+        std::fprintf(stderr, "worker: invalid scheduler state lock: %s\n",
+                     lease_error.c_str());
         return 2;
     }
     if (!req.work_dir.empty()) {

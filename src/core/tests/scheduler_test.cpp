@@ -106,6 +106,27 @@ int main(int argc, char** argv) {
         check(text.str().find("\"schema_version\": 2") != std::string::npos,
               "migration writes schema 2 only");
     }
+    {
+        const fs::path invalid = root / "invalid-path";
+        fs::create_directories(invalid);
+        const fs::path state = invalid / "job-state.json";
+        std::ofstream(state, std::ios::binary | std::ios::trunc)
+            << R"({"schema_version":1,"jobs":[{"order":0,"job_id":"bad-path","phase":"train","device":"gpu-path","device_name":"Path GPU","work_dir":"\u0000","run_dir":")"
+            << (invalid / "run").generic_u8string()
+            << R"(","output_dir":"","created_at":"created","state":"Queued","attempt_id":"","error":"","pending_resume":false,"last_exit_code":-1,"args":["--help"]}]})";
+        sched::JobScheduler scheduler(invalid.u8string(), exe);
+        scheduler.pause_dispatch(true);
+        scheduler.load();
+        const auto rows = scheduler.list();
+        check(rows.size() == 1 && rows[0].state == sched::JobState::Failed &&
+                  rows[0].error.find("invalid persisted path") !=
+                      std::string::npos,
+              "malformed persisted path durably fails its job");
+        check(rows.size() == 1 && rows[0].phases.size() == 1 &&
+                  rows[0].phases[0].outcome == "failed" &&
+                  rows[0].phases[0].error == rows[0].error,
+              "malformed persisted path records the phase error");
+    }
     check(!sched::path_claims_conflict({(root / "dataset").u8string(), false},
                                        {(root / "dataset-copy").u8string(), true}),
           "non-overlapping path claims stay independent");
@@ -240,8 +261,8 @@ int main(int argc, char** argv) {
         }), "dataset phase leases its workspace");
         for (const auto& job : s.list())
             if (job.job_id == workflow_id)
-                check(job.path_claims.size() == 1,
-                      "phase artifacts are not implicit write claims");
+                check(job.path_claims.size() == 2,
+                      "workflow and scheduler run retain ownership claims");
         check(!fs::exists(root / "source-images" / ".spirula-output.lock"),
               "dataset phase does not lock its read-only artifact");
         workspace_hold.release();

@@ -7583,6 +7583,10 @@ SS_MSG(scheduler_stop_save,
     FR("Arrêter et enregistrer"), ES("Detener y guardar"), PT("Parar e guardar"),
     IT("Arresta e salva"), NL("Stoppen en opslaan"), RU("Остановить и сохранить"),
     TR("Durdur ve kaydet"));
+SS_MSG(scheduler_stop,
+    EN("Stop"), JA("停止"), ZH_HANS("停止"), ZH_HANT("停止"), KO("중지"),
+    DE("Anhalten"), FR("Arrêter"), ES("Detener"), PT("Parar"),
+    IT("Arresta"), NL("Stoppen"), RU("Остановить"), TR("Durdur"));
 SS_MSG(scheduler_force_stop,
     EN("Force stop"), JA("強制停止"), ZH_HANS("强制停止"), ZH_HANT("強制停止"),
     KO("강제 중지"), DE("Sofort beenden"), FR("Forcer l’arrêt"),

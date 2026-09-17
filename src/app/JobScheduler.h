@@ -187,7 +187,8 @@ private:
         std::string job_id;
         size_t phase_index = 0;
         std::thread thread;
-        OutputLease path_lease;
+        std::vector<std::shared_ptr<OutputLease>> path_leases;
+        int shutdown_grace_ms = 30000;
         std::atomic<bool> cancel{false};
         std::atomic<bool> stop{false};
         std::atomic<bool> finished{false};
@@ -206,6 +207,8 @@ private:
     bool acquire_state_lock();
     void release_state_lock();
     bool claim_paths_locked(const Job& job, std::string& error) const;
+    bool acquire_claim_leases_locked(const Job& job, std::string& error);
+    void release_claim_leases_locked(const std::string& job_id);
     bool advance_local_phase_locked(Job& job);
     static bool valid_phase_order(const std::vector<Phase>& phases,
                                   std::string& error);
@@ -220,6 +223,8 @@ private:
     std::deque<std::string> _queue;                     // job_ids, FIFO
     std::unordered_map<std::string, std::shared_ptr<Job>>     _jobs;
     std::unordered_map<std::string, std::shared_ptr<Attempt>> _active;   // job_id → attempt
+    std::unordered_map<std::string,
+                       std::vector<std::shared_ptr<OutputLease>>> _claim_leases;
     std::deque<Event> _events;
     std::string _state_error;
 
