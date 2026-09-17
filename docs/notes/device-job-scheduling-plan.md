@@ -452,6 +452,22 @@ phase stored that message with exit code 99, and the desktop Device menu still
 showed the RTX 3060 checked. This is successful failure-path coverage, not a
 successful reconstruction on AMD.
 
+A fresh Computer Use run then pinned both the desktop and queued-job selectors
+to the RTX 3060 and submitted the same 153-photo source into a new
+`_scheduler_test_rtx` workspace. Durable job `job-20567d64591c3f23` stored
+`uuid:94f229c65f9bdd9e1ca44b33fd0e4ed9` as both the planned and actual device
+for preparation and SfM. Preparation succeeded, SfM completed as an accepted
+partial result, and publication succeeded. The mapper registered 146/153
+images into one model with 22,153 points and 2.999 px mean reprojection error
+in 1:42.867. The GUI opened the published dataset, displayed the reconstruction,
+and still showed the RTX 3060 as its desktop device. This is the successful
+end-to-end native dataset run that the AMD device could not provide.
+
+The capture has no GPS, so the SfM log says the model was written in a
+normalized frame. Its worker result nevertheless records `"metric": true`;
+that result field is inconsistent with the gauge log and is not metric-frame
+evidence for this run.
+
 ### Acceptance still open
 
 The milestone is not complete until these external/manual rows are exercised
