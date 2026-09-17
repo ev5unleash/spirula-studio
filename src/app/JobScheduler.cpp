@@ -236,6 +236,7 @@ void bind_prep_masks(std::vector<std::string>& args,
     const std::string mask_dir =
         prep_outputs.size() > 1 ? prep_outputs[1] : std::string();
     const bool have_masks = !mask_dir.empty();
+    bool explicit_no_masks = false;
     bool flip_mask = false;
     std::vector<std::string> bound;
     bound.reserve(args.size() + (have_masks ? 2 : 1));
@@ -249,14 +250,19 @@ void bind_prep_masks(std::vector<std::string>& args,
             ++i;
             continue;
         }
-        if (arg == "--no-masks") continue;
+        if (arg == "--no-masks") {
+            explicit_no_masks = true;
+            continue;
+        }
         if (arg == "--flip-mask") {
             flip_mask = have_masks;
             continue;
         }
         bound.push_back(arg);
     }
-    if (have_masks) {
+    if (explicit_no_masks) {
+        bound.push_back("--no-masks");
+    } else if (have_masks) {
         bound.push_back("--masks");
         bound.push_back(mask_dir);
         if (flip_mask) bound.push_back("--flip-mask");
@@ -815,8 +821,13 @@ void JobScheduler::set_device(const std::string& job_id, const std::string& devi
     if (device.empty() || device == "auto") return;
     std::lock_guard<std::mutex> lk(_mu);
     auto it = _jobs.find(job_id); if (it == _jobs.end() || it->second->state != JobState::Queued) return;
-    Job& j = *it->second; j.device = device; if (!device_name.empty()) j.device_name = device_name;
-    if (j.current_phase < j.phases.size()) { j.phases[j.current_phase].planned_device = device; if (!device_name.empty()) j.phases[j.current_phase].planned_device_name = device_name; }
+    Job& j = *it->second;
+    j.device = device;
+    if (!device_name.empty()) j.device_name = device_name;
+    for (size_t i = j.current_phase; i < j.phases.size(); ++i) {
+        j.phases[i].planned_device = device;
+        if (!device_name.empty()) j.phases[i].planned_device_name = device_name;
+    }
     queue_event_locked(j); save_locked(); _cv.notify_all();
 }
 

@@ -42,6 +42,56 @@ bool wait_for(const std::function<bool()>& pred, int timeout_ms = 8000) {
     }
     return pred();
 }
+void write_rgba_bmp(const fs::path& path, unsigned char alpha) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    unsigned char header[54] = {};
+    auto put16 = [&](size_t at, unsigned value) {
+        header[at] = static_cast<unsigned char>(value);
+        header[at + 1] = static_cast<unsigned char>(value >> 8);
+    };
+    auto put32 = [&](size_t at, unsigned value) {
+        for (int i = 0; i < 4; ++i)
+            header[at + i] = static_cast<unsigned char>(value >> (i * 8));
+    };
+    constexpr unsigned width = 2, height = 2, bytes_per_pixel = 4;
+    constexpr unsigned pixel_bytes = width * height * bytes_per_pixel;
+    header[0] = 'B'; header[1] = 'M';
+    put32(2, 54 + pixel_bytes);
+    put32(10, 54);
+    put32(14, 40);
+    put32(18, width); put32(22, height);
+    put16(26, 1); put16(28, 32);
+    put32(34, pixel_bytes);
+    out.write(reinterpret_cast<const char*>(header), sizeof header);
+    for (unsigned i = 0; i < width * height; ++i) {
+        const unsigned char pixel[4] = {
+            0, 0, 255, i == 0 ? alpha : static_cast<unsigned char>(255)};
+        out.write(reinterpret_cast<const char*>(pixel), sizeof pixel);
+    }
+}
+
+bool find_request(const fs::path& run_dir, const std::string& phase,
+                  app::worker::Request& out) {
+    std::error_code ec;
+    for (fs::directory_iterator it(run_dir, ec), end; !ec && it != end;
+         it.increment(ec)) {
+        if (!it->is_regular_file(ec) ||
+            it->path().filename().u8string().rfind("request-", 0) != 0 ||
+            it->path().extension() != ".json")
+            continue;
+        try {
+            app::worker::Request request =
+                app::worker::parse_request(it->path().u8string());
+            if (request.phase == phase) {
+                out = std::move(request);
+                return true;
+            }
+        } catch (...) {
+        }
+    }
+    return false;
+}
+
 
 }  // namespace
 
@@ -228,6 +278,224 @@ int main(int argc, char** argv) {
         const auto owner_jobs = owner.list();
         check(owner_jobs.size() == 1 && owner_jobs[0].job_id == owner_id,
               "first scheduler retains its job");
+    }
+
+    {
+        const fs::path alpha_input = root / "scheduler-alpha-input";
+        fs::create_directories(alpha_input);
+        for (int i = 0; i < 3; ++i)
+            write_rgba_bmp(alpha_input / ("photo-" + std::to_string(i) + ".bmp"),
+                           i == 0 ? 0 : 255);
+
+        const fs::path retarget_root = root / "retarget";
+        const fs::path retarget_workspace = retarget_root / "workspace";
+        std::string retarget_id;
+        app::worker::Request retarget_prep_request;
+        app::worker::Request retarget_sfm_request;
+        {
+            sched::JobScheduler scheduler(retarget_root.u8string(), exe);
+            check(scheduler.try_reserve_foreground_device("gpu-retarget-old"),
+                  "retarget test reserves the foreground target");
+
+            app::PrepJob prep_job;
+            prep_job.workspace = fs::absolute(retarget_workspace).u8string();
+            prep_job.device = "gpu-retarget-prep";
+            prep_job.resume = false;
+            app::PrepInput input;
+            input.path = fs::absolute(alpha_input).u8string();
+            prep_job.inputs.push_back(std::move(input));
+
+            sched::WorkflowSubmitOpts workflow;
+            workflow.work_dir = retarget_root.u8string();
+            workflow.workspace = retarget_workspace.u8string();
+            workflow.path_claims.push_back({workflow.workspace, true});
+            workflow.add_scheduler_publish = false;
+
+            sched::Phase prep;
+            prep.phase = "prep";
+            prep.planned_device = "gpu-retarget-prep";
+            prep.planned_device_name = "Prep GPU";
+            prep.payload = app::worker::serialize_prep_job(prep_job);
+            workflow.phases.push_back(std::move(prep));
+
+            sched::Phase sfm;
+            sfm.phase = "sfm";
+            sfm.planned_device = "gpu-retarget-old";
+            sfm.planned_device_name = "Old GPU";
+            sfm.args = {"auto", "--definitely-invalid"};
+            workflow.phases.push_back(std::move(sfm));
+
+            sched::Phase train;
+            train.phase = "train";
+            train.planned_device = "gpu-retarget-old";
+            train.planned_device_name = "Old GPU";
+            train.args = {"--help"};
+            workflow.phases.push_back(std::move(train));
+
+            retarget_id = scheduler.submit(workflow);
+            check(!retarget_id.empty(),
+                  "queued retarget workflow submits");
+            check(wait_for([&] {
+                for (const auto& job : scheduler.list())
+                    if (job.job_id == retarget_id &&
+                        job.current_phase == 1 &&
+                        job.state == sched::JobState::Queued)
+                        return true;
+                return false;
+            }), "retarget workflow leaves completed prep queued behind foreground");
+
+            scheduler.set_device(retarget_id, "gpu-retarget-new", "New GPU");
+            bool completed_prefix_unchanged = false;
+            bool future_retargeted = false;
+            for (const auto& job : scheduler.list()) {
+                if (job.job_id != retarget_id || job.phases.size() != 3)
+                    continue;
+                completed_prefix_unchanged =
+                    job.completed_prefix == 1 &&
+                    job.phases[0].completed &&
+                    job.phases[0].planned_device == "gpu-retarget-prep" &&
+                    job.phases[0].planned_device_name == "Prep GPU" &&
+                    job.phases[0].actual_device == "gpu-retarget-prep";
+                future_retargeted =
+                    job.phases[1].planned_device == "gpu-retarget-new" &&
+                    job.phases[1].planned_device_name == "New GPU" &&
+                    job.phases[2].planned_device == "gpu-retarget-new" &&
+                    job.phases[2].planned_device_name == "New GPU";
+            }
+            check(completed_prefix_unchanged,
+                  "retarget leaves completed phase target and observation unchanged");
+            check(future_retargeted,
+                  "retarget updates every remaining phase target");
+            check(scheduler.try_reserve_foreground_device("gpu-retarget-old"),
+                  "retarget preserves the foreground reservation");
+            check(!scheduler.try_reserve_foreground_device("gpu-retarget-other"),
+                  "retarget does not transfer foreground ownership");
+            check(scheduler.save(),
+                  "retarget persists the future target");
+            check(wait_for([&] {
+                for (const auto& job : scheduler.list())
+                    if (job.job_id == retarget_id &&
+                        job.state == sched::JobState::Failed)
+                        return true;
+                return false;
+            }), "retargeted worker reaches a terminal state");
+
+            fs::path run_dir;
+            for (const auto& job : scheduler.list())
+                if (job.job_id == retarget_id)
+                    run_dir = fs::u8path(job.run_dir);
+            check(find_request(run_dir, "prep", retarget_prep_request),
+                  "retarget observes the original prep worker request");
+            check(find_request(run_dir, "sfm", retarget_sfm_request),
+                  "retarget observes the retargeted worker request");
+            scheduler.set_foreground_device("");
+        }
+        {
+            sched::JobScheduler recovered(retarget_root.u8string(), exe);
+            recovered.load();
+            bool persisted = false;
+            for (const auto& job : recovered.list()) {
+                if (job.job_id != retarget_id || job.phases.size() != 3)
+                    continue;
+                persisted =
+                    job.completed_prefix == 1 &&
+                    job.phases[0].planned_device == "gpu-retarget-prep" &&
+                    job.phases[0].actual_device == "gpu-retarget-prep" &&
+                    job.phases[1].planned_device == "gpu-retarget-new" &&
+                    job.phases[1].planned_device_name == "New GPU" &&
+                    job.phases[2].planned_device == "gpu-retarget-new" &&
+                    job.phases[2].planned_device_name == "New GPU";
+            }
+            check(persisted,
+                  "retargeted future target and completed prefix survive reload");
+        }
+
+        auto run_mask_case = [&](const fs::path& case_root,
+                                 std::vector<std::string> sfm_args) {
+            const fs::path workspace = case_root / "workspace";
+            app::PrepJob prep_job;
+            prep_job.workspace = fs::absolute(workspace).u8string();
+            prep_job.device = "gpu-mask-prep";
+            prep_job.resume = false;
+            app::PrepInput input;
+            input.path = fs::absolute(alpha_input).u8string();
+            prep_job.inputs.push_back(std::move(input));
+
+            sched::WorkflowSubmitOpts workflow;
+            workflow.work_dir = case_root.u8string();
+            workflow.workspace = workspace.u8string();
+            workflow.path_claims.push_back({workflow.workspace, true});
+            workflow.add_scheduler_publish = false;
+
+            sched::Phase prep;
+            prep.phase = "prep";
+            prep.planned_device = "gpu-mask-prep";
+            prep.payload = app::worker::serialize_prep_job(prep_job);
+            workflow.phases.push_back(std::move(prep));
+
+            sched::Phase sfm;
+            sfm.phase = "sfm";
+            sfm.planned_device = "gpu-mask-sfm";
+            sfm.args = std::move(sfm_args);
+            workflow.phases.push_back(std::move(sfm));
+
+            app::worker::Request request;
+            std::string id;
+            {
+                sched::JobScheduler scheduler(case_root.u8string(), exe);
+                id = scheduler.submit(workflow);
+                check(!id.empty(), "mask binding workflow submits");
+                check(wait_for([&] {
+                    for (const auto& job : scheduler.list())
+                        if (job.job_id == id &&
+                            job.state == sched::JobState::Failed)
+                            return true;
+                    return false;
+                }), "mask binding worker observes the dispatched SfM request");
+                fs::path run_dir;
+                for (const auto& job : scheduler.list())
+                    if (job.job_id == id)
+                        run_dir = fs::u8path(job.run_dir);
+                check(find_request(run_dir, "sfm", request),
+                      "mask binding reads the actual SfM worker request");
+            }
+            return std::pair<app::worker::Request, fs::path>(
+                std::move(request), workspace);
+        };
+
+        const fs::path explicit_root = root / "mask-explicit";
+        auto explicit_case = run_mask_case(
+            explicit_root,
+            {"auto", "--masks", (explicit_root / "stale-a").u8string(),
+             "--flip-mask", "--no-masks", "--mask-dir",
+             (explicit_root / "stale-b").u8string(), "--definitely-invalid"});
+        const std::vector<std::string> explicit_expected = {
+            "auto", "--definitely-invalid", "--no-masks"};
+        check(explicit_case.first.args == explicit_expected,
+              "explicit no-masks wins over aliases and inversion");
+
+        const fs::path actual_mask_dir =
+            fs::absolute(explicit_case.second / "masks");
+        check(fs::is_directory(actual_mask_dir),
+              "prep publishes an actual alpha-derived mask directory");
+
+        const fs::path implicit_root = root / "mask-implicit";
+        auto implicit_case = run_mask_case(
+            implicit_root,
+            {"auto", "--mask-dir", (implicit_root / "stale-a").u8string(),
+             "--flip-mask", "--masks",
+             (implicit_root / "stale-b").u8string(), "--definitely-invalid"});
+        const std::string implicit_mask_dir =
+            fs::absolute(implicit_case.second / "masks").u8string();
+        const std::vector<std::string> implicit_expected = {
+            "auto", "--definitely-invalid", "--masks", implicit_mask_dir,
+            "--flip-mask"};
+        check(implicit_case.first.args == implicit_expected &&
+                  implicit_case.first.args[3] !=
+                      (implicit_root / "stale-a").u8string() &&
+                  implicit_case.first.args[3] !=
+                      (implicit_root / "stale-b").u8string(),
+              "without disable canonical args consume actual masks and inversion");
     }
 
     {
