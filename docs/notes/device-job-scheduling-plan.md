@@ -433,6 +433,22 @@ split, immutable request identity, worker-side device use, and terminal failure
 persistence, but it is not a successful end-to-end dataset run or evidence that
 the AMD device is suitable for this workload.
 
+The initial driver failure also exposed an SfM supervision bug: a Vulkan error
+from the matching producer unwound past live verification threads and invoked
+`std::terminate`, hiding the original error from the worker result boundary.
+Commit `51832e0b` records the first producer or verifier exception, wakes and
+joins the pool, then rethrows it on the calling thread. Focused regressions for
+both paths passed in `sfm_sift_test` on the NVIDIA and AMD devices. The Windows
+Vulkan build and `scheduler_test`, `worker_request_test`, and `subprocess_test`
+also passed again.
+
+A resumed command-line run of the same dataset on AMD then failed cleanly with
+`VK_ERROR_DEVICE_LOST` at `src/sfm/vk/VkContext.h:772` instead of terminating.
+This narrows the remaining workload failure to the AMD driver/device path; it
+does not turn the dataset run into a pass. A second GUI retry was not counted:
+after relaunch, Computer Use could capture the Spirula window but Windows denied
+input with `GetCursorPos failed: Access is denied`.
+
 ### Acceptance still open
 
 The milestone is not complete until these external/manual rows are exercised
