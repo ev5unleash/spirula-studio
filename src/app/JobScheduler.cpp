@@ -236,51 +236,32 @@ void bind_prep_masks(std::vector<std::string>& args,
     const std::string mask_dir =
         prep_outputs.size() > 1 ? prep_outputs[1] : std::string();
     const bool have_masks = !mask_dir.empty();
-    bool mask_option_seen = false;
+    bool flip_mask = false;
     std::vector<std::string> bound;
     bound.reserve(args.size() + (have_masks ? 2 : 1));
     for (size_t i = 0; i < args.size(); ++i) {
         const std::string& arg = args[i];
-        if (arg == "--masks") {
+        if (arg == "--masks" || arg == "--mask-dir") {
             if (i + 1 >= args.size() || args[i + 1].empty() ||
                 args[i + 1][0] == '-') {
-                throw std::runtime_error("--masks: missing value");
+                throw std::runtime_error(arg + ": missing value");
             }
             ++i;
-            if (mask_option_seen) continue;
-            if (have_masks) {
-                bound.push_back("--masks");
-                bound.push_back(mask_dir);
-            } else {
-                bound.push_back("--no-masks");
-            }
-            mask_option_seen = true;
             continue;
         }
-        if (arg == "--no-masks") {
-            if (mask_option_seen) continue;
-            if (have_masks) {
-                bound.push_back("--masks");
-                bound.push_back(mask_dir);
-            } else {
-                bound.push_back("--no-masks");
-            }
-            mask_option_seen = true;
-            continue;
-        }
+        if (arg == "--no-masks") continue;
         if (arg == "--flip-mask") {
-            if (have_masks) bound.push_back(arg);
+            flip_mask = have_masks;
             continue;
         }
         bound.push_back(arg);
     }
-    if (!mask_option_seen) {
-        if (have_masks) {
-            bound.push_back("--masks");
-            bound.push_back(mask_dir);
-        } else {
-            bound.push_back("--no-masks");
-        }
+    if (have_masks) {
+        bound.push_back("--masks");
+        bound.push_back(mask_dir);
+        if (flip_mask) bound.push_back("--flip-mask");
+    } else {
+        bound.push_back("--no-masks");
     }
     args = std::move(bound);
 }
