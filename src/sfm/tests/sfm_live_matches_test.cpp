@@ -3,17 +3,26 @@
 // The GUI reads this file while the stage that writes it runs, so the two
 // cases that matter are a torn tail (a record the writer had not finished) and
 // the switch back to a finished matches.bin once the stage ends.
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <string>
 #include <vector>
 
+#include "sfm/core/Model.h"
 #include "sfm/core/Matches.h"
 #include "sfm/core/Progress.h"
 #include "sfm/tests/TestMain.h"
 
 using namespace sfm;
+namespace fs = std::filesystem;
+
+static bool set_mtime(const fs::path& path, fs::file_time_type stamp) {
+    std::error_code ec;
+    fs::last_write_time(path, stamp, ec);
+    return !ec;
+}
 
 static int fails = 0;
 
@@ -102,6 +111,82 @@ static int cmdLiveMatchesTest(int, char**) {
     MatchesIndex fin;
     check(indexMatches(done, fin), "index a finished file");
     check(fin.pairs.size() == 1, "finished file indexes its pairs");
+    // The preview's source order is final/live by freshness, with the final
+    // file winning an equal timestamp. Keep both valid files around so this
+    // exercises the handoff rather than only the writer in isolation.
+    const auto t0 = fs::file_time_type::clock::now();
+    check(set_mtime(done, t0), "stamp the old final file");
+    check(set_mtime(path, t0 + std::chrono::seconds(1)),
+          "stamp a newer live file");
+    MatchesIndex live_newer;
+    check(indexMatches(path, live_newer), "index the newer live source");
+    check(live_newer.pairs.size() == 3, "newer live source is complete");
+
+    MatchesDatabase newer = db;
+    newer.pairs.push_back({0, 1, 2, matches(5, 500)});
+    writeMatches(done, newer);
+    check(set_mtime(done, t0 + std::chrono::seconds(2)),
+          "stamp the newer final file");
+    MatchesIndex final_newer;
+    check(indexMatches(done, final_newer), "index the newer final source");
+    check(final_newer.pairs.size() == 2, "newer final source wins its handoff");
+    check(set_mtime(done, t0 + std::chrono::seconds(1)),
+          "stamp an equal final/live timestamp");
+    check(fs::last_write_time(done) == fs::last_write_time(path),
+          "final and live timestamps tie");
+
+    // Starting another run in the same progress directory removes only the
+    // four progress snapshots. Reconstruction output and resume state stay.
+    progress::begin_matching(3, {{0, 1}});
+    progress::pair(0, 1, 4);
+    progress::flush();
+    Reconstruction rec;
+    progress::model(rec, true);
+    Event old_status;
+    old_status.kind = Event::Kind::StageBegin;
+    old_status.stage = Stage::Match;
+    old_status.total = 1;
+    progress::status(old_status);
+    check(fs::exists(fs::path(dir) / "model.bin"),
+          "old model snapshot exists before reset");
+    check(fs::exists(fs::path(dir) / "pairs.bin"),
+          "old pair snapshot exists before reset");
+    check(fs::exists(fs::path(dir) / "status.bin"),
+          "old status snapshot exists before reset");
+    check(fs::exists(path), "old live snapshot exists before reset");
+    const fs::path journal = fs::path(dir) / "resume" / "matches.part";
+    const fs::path unrelated = fs::path(dir) / "keep.bin";
+    fs::create_directories(journal.parent_path());
+    {
+        std::ofstream f(journal, std::ios::binary);
+        f << "resume";
+    }
+    {
+        std::ofstream f(unrelated, std::ios::binary);
+        f << "keep";
+    }
+    progress::set_dir(dir);
+    for (const char* name : {"model.bin", "pairs.bin", "status.bin",
+                             "live_matches.bin"})
+        check(!fs::exists(fs::path(dir) / name),
+              "old progress snapshot removed");
+    check(fs::exists(done), "matches output survives progress reset");
+    check(fs::exists(journal), "resume journal survives progress reset");
+    check(fs::exists(unrelated), "unrelated file survives progress reset");
+    progress::flush();
+    check(!fs::exists(fs::path(dir) / "pairs.bin"),
+          "cleared pair state is not flushed back");
+    progress::model(rec, false);
+    check(fs::exists(fs::path(dir) / "model.bin"),
+          "new model snapshot is not rate-limited by old run");
+    Event new_status;
+    new_status.kind = Event::Kind::Progress;
+    new_status.stage = Stage::Match;
+    new_status.done = 1;
+    new_status.total = 2;
+    progress::status(new_status);
+    check(fs::exists(fs::path(dir) / "status.bin"),
+          "new status snapshot is not rate-limited by old run");
 
     // A fixed-count file that IS truncated is still an error, not a prefix.
     {

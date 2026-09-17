@@ -231,13 +231,30 @@ void set_dir(const std::string& dir) {
         std::lock_guard<std::mutex> live(s.live_mu);
         s.live.close();
         s.live.clear();
+        s.live_at = {};
+        s.live_started = false;
+        s.live_bytes = 0;
     }
     std::lock_guard<std::mutex> lk(s.mu);
     s.dir = dir;
+    s.model_at = {};
+    s.pairs_at = {};
+    s.model_started = s.pairs_started = false;
+    s.n_images = s.bins = 0;
+    s.counts.clear();
+    s.planned.clear();
+    s.verified.clear();
+    s.pairs_dirty = false;
     s.gauge_oriented = s.gauge_metric = false;
+    s.status_at = {};
+    s.status_started = false;
+    s.last = Event{};
     if (dir.empty()) return;
     std::error_code ec;
     fs::create_directories(dir, ec);
+    for (const char* name : {"model.bin", "pairs.bin", "status.bin",
+                             "live_matches.bin"})
+        fs::remove(fs::path(dir) / name, ec);
 }
 
 bool enabled() {

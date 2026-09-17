@@ -27,6 +27,40 @@ namespace {
 // rectangle, and every one of them is a draw command.
 constexpr size_t kMaxDots = 500;
 constexpr size_t kMaxLines = 160;
+struct MatchSource {
+    std::string path;
+    int64_t mtime = 0;
+};
+
+MatchSource match_file(const std::string& path) {
+    MatchSource out;
+    if (path.empty()) return out;
+    std::error_code ec;
+    if (!fs::is_regular_file(path, ec) || ec) return out;
+    const auto stamp = fs::last_write_time(path, ec);
+    if (ec) return out;
+    out.path = path;
+    out.mtime = (int64_t)stamp.time_since_epoch().count();
+    return out;
+}
+
+void choose_match_sources(const std::string& final_path,
+                          const std::string& live_path, MatchSource& source,
+                          MatchSource& fallback) {
+    const MatchSource final = match_file(final_path);
+    const MatchSource live = match_file(live_path);
+    if (final.path.empty()) {
+        source = live;
+        return;
+    }
+    if (live.path.empty() || final.mtime >= live.mtime) {
+        source = final;
+        if (live.path != final.path) fallback = live;
+    } else {
+        source = live;
+        if (final.path != live.path) fallback = final;
+    }
+}
 
 // The image a feature stem names. The stem carries the folder it came from, so
 // only the extension is unknown -- and the run's own extractor found the file
@@ -90,17 +124,35 @@ void PairPreview::configure(const std::string& image_dir,
                             const std::string& mask_dir,
                             const std::string& features_dir,
                             const std::string& matches_path,
-                            const std::string& live_matches) {
+                            const std::string& live_matches,
+                            bool mask_flipped) {
+    MatchSource source, fallback;
+    choose_match_sources(matches_path, live_matches, source, fallback);
+
     std::lock_guard<std::mutex> lk(_mu);
-    if (_image_dir == image_dir && _mask_dir == mask_dir &&
-        _features_dir == features_dir && _matches_path == matches_path &&
-        _live_matches == live_matches)
-        return;
+    const bool paths_changed =
+        _image_dir != image_dir || _mask_dir != mask_dir ||
+        _features_dir != features_dir || _matches_path != matches_path ||
+        _live_matches != live_matches || _mask_flipped != mask_flipped;
+    const bool source_changed =
+        _match_source != source.path || _match_mtime != source.mtime ||
+        _match_fallback != fallback.path ||
+        _match_fallback_mtime != fallback.mtime;
+    _match_fallback = fallback.path;
+    _match_fallback_mtime = fallback.mtime;
+    if (!paths_changed && !source_changed) return;
     _image_dir = image_dir;
     _mask_dir = mask_dir;
     _features_dir = features_dir;
     _matches_path = matches_path;
     _live_matches = live_matches;
+    _mask_flipped = mask_flipped;
+    _match_source = source.path;
+    _match_mtime = source.mtime;
+    ++_config_generation;
+    _shot = Shot{};
+    _result = Shot{};
+    _result_new = false;
 }
 
 void PairPreview::show(uint32_t a, uint32_t b) {
@@ -130,9 +182,19 @@ void PairPreview::clear() {
     _result_new = false;
     _has_request = false;
     _loading = false;
+    _image_dir.clear();
+    _mask_dir.clear();
+    _features_dir.clear();
+    _matches_path.clear();
+    _live_matches.clear();
+    _match_source.clear();
+    _match_fallback.clear();
+    _match_mtime = _match_fallback_mtime = 0;
+    _mask_flipped = false;
     _stems.clear();
     _pairs.clear();
     _pairs_mtime = 0;
+    _pairs_src.clear();
     _w_features_dir.clear();
     _w_matches_path.clear();
 }
@@ -157,12 +219,14 @@ void PairPreview::stop() {
 void PairPreview::worker_loop() {
     for (;;) {
         uint32_t a = 0, b = 0;
+        uint64_t generation = 0;
         {
             std::unique_lock<std::mutex> lk(_mu);
             _cv.wait(lk, [this] { return _stop || _has_request; });
             if (_stop) return;
             a = _load_a = _req_a;
             b = _load_b = _req_b;
+            generation = _config_generation;
             _has_request = false;
             _loading = true;
         }
@@ -170,6 +234,7 @@ void PairPreview::worker_loop() {
         load(a, b, shot);
         std::lock_guard<std::mutex> lk(_mu);
         _loading = false;
+        if (generation != _config_generation) continue;
         // A request for another pair that arrived while this one was loading
         // wins: the cursor has moved on and this is not what it is over.
         if (_has_request && (_req_a != a || _req_b != b)) continue;
@@ -184,19 +249,27 @@ void PairPreview::load(uint32_t a, uint32_t b, Shot& out) {
     out.b = b;
     out.loaded = true;
 
-    std::string image_dir, mask_dir, features_dir, matches_path, live_matches;
+    std::string image_dir, mask_dir, features_dir, matches_path;
+    std::string match_source, match_fallback;
+    int64_t match_mtime = 0, match_fallback_mtime = 0;
+    bool mask_flipped = false;
     {
         std::lock_guard<std::mutex> lk(_mu);
         image_dir = _image_dir;
         mask_dir = _mask_dir;
         features_dir = _features_dir;
         matches_path = _matches_path;
-        live_matches = _live_matches;
+        match_source = _match_source;
+        match_fallback = _match_fallback;
+        match_mtime = _match_mtime;
+        match_fallback_mtime = _match_fallback_mtime;
+        mask_flipped = _mask_flipped;
     }
     if (features_dir != _w_features_dir || matches_path != _w_matches_path) {
         _stems.clear();
         _pairs.clear();
         _pairs_mtime = 0;
+        _pairs_src.clear();
         _w_features_dir = features_dir;
         _w_matches_path = matches_path;
     }
@@ -204,12 +277,11 @@ void PairPreview::load(uint32_t a, uint32_t b, Shot& out) {
     // writing it, which is the ordinary case when matching has only just
     // started.
     if (_stems.empty() || a >= _stems.size() || b >= _stems.size()) {
-        _stems = read_image_stems(features_dir, matches_path);
+        _stems = read_image_stems(features_dir, match_source);
         if (_stems.empty()) _stems = stems_from_images(image_dir);
     }
     if (a >= _stems.size() || b >= _stems.size()) return;
 
-    std::error_code ec;
     int target = 0;
     {
         std::lock_guard<std::mutex> lk(_mu);
@@ -227,18 +299,20 @@ void PairPreview::load(uint32_t a, uint32_t b, Shot& out) {
         std::string mask;
         if (!mask_dir.empty()) {
             const fs::path m = fs::path(mask_dir) / (stem + ".png");
+            std::error_code ec;
             if (fs::exists(m, ec)) mask = m.string();
         }
-        if (!load_picture(image_for_stem(image_dir, stem), mask, target, s.pic))
+        if (!load_picture(image_for_stem(image_dir, stem), mask, target, s.pic,
+                          mask_flipped))
             continue;
         if (features_dir.empty()) continue;
         const std::string feat =
             (fs::path(features_dir) / (stem + ".bin")).string();
-        std::vector<KeyPoint2D> px;
-        if (!read_keypoints_file(feat, s.pic.src_w, s.pic.src_h, px)) continue;
         const float w = (float)std::max(1, s.pic.src_w);
         const float h = (float)std::max(1, s.pic.src_h);
         const float span = std::max(w, h);
+        std::vector<KeyPoint2D> px;
+        if (!read_keypoints_file(feat, s.pic.src_w, s.pic.src_h, px)) continue;
         kp[k].reserve(px.size());
         for (const KeyPoint2D& q : px)
             kp[k].push_back({q.x / w, q.y / h, q.r / span});
@@ -247,25 +321,26 @@ void PairPreview::load(uint32_t a, uint32_t b, Shot& out) {
     out.ready = !out.left.pic.empty() || !out.right.pic.empty();
 
 #ifdef SS_TOOL_SFM
-    if (matches_path.empty() || kp[0].empty() || kp[1].empty()) return;
-    // While matching runs there is no matches.bin yet, only the file the stage
-    // is appending to; hovering a cell then still draws the pair's matches
-    // rather than nothing (sfm/core/Progress.h, live_matches.bin).
-    std::string src = matches_path;
-    if (!fs::exists(src, ec) && !live_matches.empty() &&
-        fs::exists(live_matches, ec))
-        src = live_matches;
-    const auto stamp = fs::last_write_time(src, ec);
-    if (ec) return;
-    if (src != _pairs_src) {
-        _pairs.clear();
-        _pairs_mtime = 0;
-        _pairs_src = src;
-    }
-    if (_pairs.empty() || stamp.time_since_epoch().count() != _pairs_mtime) {
-        sfm::MatchesIndex idx;
-        if (!sfm::indexMatches(src, idx)) return;
-        _pairs_mtime = stamp.time_since_epoch().count();
+    if (match_source.empty() || kp[0].empty() || kp[1].empty()) return;
+    // While matching runs, the live file is the freshest readable source until
+    // the finished matches.bin takes over.
+    std::string src = match_source;
+    int64_t stamp = match_mtime;
+    sfm::MatchesIndex idx;
+    const bool rebuild = src != _pairs_src || stamp != _pairs_mtime ||
+                         _pairs.empty();
+    if (rebuild) {
+        if (!sfm::indexMatches(src, idx)) {
+            src = match_fallback;
+            stamp = match_fallback_mtime;
+            if (src.empty() || !sfm::indexMatches(src, idx)) return;
+        }
+        if (src != _pairs_src) {
+            _pairs.clear();
+            _pairs_mtime = 0;
+            _pairs_src = src;
+        }
+        _pairs_mtime = stamp;
         _pairs.clear();
         _pairs.reserve(idx.pairs.size());
         for (const sfm::MatchesIndex::Entry& e : idx.pairs)

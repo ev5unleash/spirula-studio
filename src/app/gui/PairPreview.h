@@ -31,14 +31,15 @@ class PairPreview {
 public:
     ~PairPreview();
 
-    // Where this run's files are. Cheap every frame; a change is what makes it
-    // re-read the image list.
+    // Where this run's files are. Call at the owner's poll cadence: besides
+    // paths, it observes the final/live match source and its freshness.
     // `live_matches` is read while matching runs and matches.bin is not
-    // there yet; empty when the run has none.
+    // there yet; empty when the run has none. `mask_flipped` is true when
+    // white means remove rather than keep.
     void configure(const std::string& image_dir, const std::string& mask_dir,
                    const std::string& features_dir,
                    const std::string& matches_path,
-                   const std::string& live_matches = {});
+                   const std::string& live_matches, bool mask_flipped);
     // Draw these two images, numbered as the reconstruction numbers them.
     void show(uint32_t a, uint32_t b);
     bool empty() const;
@@ -94,7 +95,12 @@ private:
 
     std::string _image_dir, _mask_dir, _features_dir, _matches_path;
     std::string _live_matches;
-    bool _paths_dirty = false;
+    // Selected by configure from the valid final/live files; the other source
+    // is a fallback if the selected file is not indexable yet.
+    std::string _match_source, _match_fallback;
+    int64_t _match_mtime = 0, _match_fallback_mtime = 0;
+    bool _mask_flipped = false;
+    uint64_t _config_generation = 0;
     // The pair asked for, the one the worker is on, and the one that came
     // back. All three are needed because show() is called on every frame the
     // cursor is over a cell: without knowing what is already in flight it
