@@ -1,22 +1,8 @@
-// spirula-sam -- segmentation, tracking and frame extraction from a shell.
+// spirula sam -- segmentation, tracking and frame extraction from a shell.
 //
-//   spirula-sam devices
-//   spirula-sam segment --model m.ggml --image cat.jpg --text "cat" --out out/
-//   spirula-sam segment --model m.ggml --image cat.jpg --point 315,250 --out out/
-//   spirula-sam track   --model m.ggml --frames frames/ --text "person" --out out/
-//   spirula-sam video   --info clip.mp4
-//   spirula-sam extract clip.mp4 --skip 30 --model m.ggml --text "person"
-//
-// The GUI drives the same library in-process (src/app/gui/DatasetPrep.cpp);
-// this is the scriptable face of it, and how a masking or extraction problem
-// gets reproduced without the GUI in the way.
-//
-// `video` and `extract` need the in-process decoder, which is only built with
-// -DSS_ENABLE_PATENTED=ON (src/app/cli/sam_extract.cpp); without it they
-// say so and point at ffmpeg.
-//
-// Diagnostics go to stderr, the result table to stdout, so a run pipes cleanly:
-//   spirula-sam segment ... 2>/dev/null > detections.tsv
+// GUI and CLI share src/app/DatasetPrep.cpp; the CLI is the repro surface.
+// Video decoding needs SS_ENABLE_PATENTED; otherwise extraction uses ffmpeg.
+// Diagnostics use stderr and the machine-readable result table uses stdout.
 
 #include "app/Tools.h"
 #include "i18n/catalog/Cli.h"

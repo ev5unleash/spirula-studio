@@ -187,7 +187,7 @@ private:
         std::string job_id;
         size_t phase_index = 0;
         std::thread thread;
-        OutputLease output_lease;
+        OutputLease path_lease;
         std::atomic<bool> cancel{false};
         std::atomic<bool> stop{false};
         std::atomic<bool> finished{false};

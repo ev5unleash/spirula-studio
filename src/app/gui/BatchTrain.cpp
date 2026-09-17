@@ -347,6 +347,7 @@ std::vector<BatchJob> load_batch_list() {
             if (const JsonValue* v = j.find("preset_name")) b.preset_name = v->as_string();
             if (const JsonValue* v = j.find("output_dir")) b.output_dir = v->as_string();
             if (const JsonValue* v = j.find("device")) b.device = v->as_string();
+            if (const JsonValue* v = j.find("scheduler_id")) b.scheduler_id = v->as_string();
             if (const JsonValue* v = j.find("cap_max")) b.cap_max_override = v->as_string();
             if (const JsonValue* v = j.find("sh_degree")) b.sh_degree_override = v->as_string();
             if (const JsonValue* v = j.find("num_iterations"))
@@ -371,11 +372,12 @@ void save_batch_list(const std::vector<BatchJob>& jobs) {
         std::fprintf(f,
                      "%s\n        {\"dataset\": %s, \"preset_path\": %s, "
                      "\"preset_name\": %s, \"output_dir\": %s, \"device\": %s, "
-                     "\"cap_max\": %s, \"sh_degree\": %s, "
-                     "\"num_iterations\": %s}",
+                     "\"scheduler_id\": %s, \"cap_max\": %s, "
+                     "\"sh_degree\": %s, \"num_iterations\": %s}",
                      i ? "," : "", quote(b.dataset).c_str(),
                      quote(b.preset_path).c_str(), quote(b.preset_name).c_str(),
                      quote(b.output_dir).c_str(), quote(b.device).c_str(),
+                     quote(b.scheduler_id).c_str(),
                      quote(b.cap_max_override).c_str(),
                      quote(b.sh_degree_override).c_str(),
                      quote(b.iterations_override).c_str());

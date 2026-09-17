@@ -52,7 +52,7 @@ struct BatchJob {
     std::string cap_max_override;
     std::string sh_degree_override;
     std::string iterations_override;
-    // Runtime association; scheduler state remains authoritative.
+    // Stable association only; scheduler state remains authoritative.
     std::string scheduler_id;
 
     // From the last batch_check(); empty until one has run.

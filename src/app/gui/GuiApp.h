@@ -356,7 +356,6 @@ private:
     void draw_batch_table();
     void draw_batch_preset_combo(BatchJob& job, int row);
     void draw_batch_issues();
-    void draw_batch_progress();      // the running-job block on the trainer screen
     void draw_train_settings();      // left panel
     // Native picker and frozen identity, available from shared settings/View menu.
     void draw_device_picker(bool as_menu = false);
@@ -637,7 +636,6 @@ private:
     bool _batch_dirty = false;        // edited -> persist once the widget is idle
     bool _batch_checked = false;      // a pre-flight has run since the last edit
     bool _batch_active = false;
-    int  _batch_current = -1;         // which row that is
     std::string _batch_msg;           // already formatted; "" when there is none
     bool _batch_msg_err = false;
     std::string _scheduled_device_request;

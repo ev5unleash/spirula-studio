@@ -193,7 +193,8 @@ public:
     // its image and mask folders.
     std::vector<std::string> scheduler_args(const SfmJob& job,
                                             const std::string& image_dir,
-                                            const std::string& mask_dir);
+                                            const std::string& mask_dir,
+                                            std::string& manifest_payload);
     // `films` are the screen's picture reels, null for a caller with no
     // screen; they outlive the run.
     void start(const SfmJob& job, RunFilms films = {});

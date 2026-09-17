@@ -18,6 +18,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -214,6 +215,38 @@ int main(int argc, char** argv) {
             std::lock_guard<std::mutex> lk(events_mu);
             events.push_back(e);
         });
+        app::OutputLease workspace_hold;
+        const fs::path workflow_workspace = root / "workflow-workspace";
+        std::string workspace_error;
+        check(workspace_hold.acquire(workflow_workspace, workspace_error),
+              "test holds workflow workspace");
+        sched::WorkflowSubmitOpts workflow;
+        workflow.work_dir = root.u8string();
+        workflow.workspace = workflow_workspace.u8string();
+        workflow.path_claims.push_back({workflow.workspace, true});
+        workflow.add_scheduler_publish = false;
+        sched::Phase prep;
+        prep.phase = "prep";
+        prep.planned_device = "gpu-workflow";
+        prep.output = (root / "source-images").u8string();
+        workflow.phases.push_back(std::move(prep));
+        const std::string workflow_id = s.submit(workflow);
+        check(wait_for([&] {
+            for (const auto& job : s.list())
+                if (job.job_id == workflow_id &&
+                    job.state == sched::JobState::Blocked)
+                    return true;
+            return false;
+        }), "dataset phase leases its workspace");
+        for (const auto& job : s.list())
+            if (job.job_id == workflow_id)
+                check(job.path_claims.size() == 1,
+                      "phase artifacts are not implicit write claims");
+        check(!fs::exists(root / "source-images" / ".spirula-output.lock"),
+              "dataset phase does not lock its read-only artifact");
+        workspace_hold.release();
+        s.remove(workflow_id);
+
 
         sched::SubmitOpts a;
         a.phase = "train";

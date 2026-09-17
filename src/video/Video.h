@@ -5,7 +5,7 @@
 // the pipeline uses. There is no software fallback and no ffmpeg here: on a
 // device or driver without video decode, open() fails with a message naming
 // what is missing, and the caller falls back to an external ffmpeg (that is
-// what src/app/gui/DatasetPrep.cpp does).
+// what src/app/DatasetPrep.cpp does).
 //
 // The whole subsystem is compiled only when SS_ENABLE_PATENTED is ON --
 // H.264 / H.265 / AV1 bitstream parsing is the patent-encumbered part of this

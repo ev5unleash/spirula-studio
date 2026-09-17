@@ -98,9 +98,7 @@ list(APPEND SS_TOOL_DEFS SS_TOOL_TRAIN=1)
 
 # ---- scheduler worker: one phase per process ----
 # Always on; the dispatcher stubs out phases its build lacks.
-list(APPEND SS_TOOL_SOURCES
-     ${SS_SRC}/app/cli/worker_main.cpp
-     ${SS_SRC}/app/WorkerRequest.cpp)
+list(APPEND SS_TOOL_SOURCES ${SS_SRC}/app/cli/worker_main.cpp)
 list(APPEND SS_TOOL_DEFS SS_TOOL_WORKER=1)
 
 # ---- mesh extraction ----
@@ -340,9 +338,5 @@ file(GLOB SS_CORE_TESTS CONFIGURE_DEPENDS
 foreach(test_src ${SS_CORE_TESTS})
     get_filename_component(test_name ${test_src} NAME_WE)
     add_executable(${test_name} ${test_src})
-    if(test_name STREQUAL "worker_request_test" OR
-       test_name STREQUAL "scheduler_test")
-        target_sources(${test_name} PRIVATE ${SS_SRC}/app/WorkerRequest.cpp)
-    endif()
     ss_configure_app(${test_name})
 endforeach()

@@ -714,7 +714,7 @@ void GuiApp::update_scheduler_admission() {
 }
 
 void GuiApp::apply_preset(const std::string& preset) {
-    if (native_work_busy() || _batch_active) return;
+    if (native_work_busy()) return;
     TrainConfig fresh;
     train_apply_preset(fresh, preset);
     // Keep GUI-managed context across preset switches.
@@ -743,7 +743,7 @@ void GuiApp::apply_preset(const std::string& preset) {
 // built-in preset does -- but the same four fields stay out of its reach
 // (SS_PRESET_CONTEXT_FIELDS), because a preset is "how", not "where".
 void GuiApp::apply_user_preset(const TrainPreset& p) {
-    if (native_work_busy() || _batch_active) return;
+    if (native_work_busy()) return;
     const TrainConfig stock;
     TrainConfig fresh = p.cfg;
     fresh.data = _cfg.data;
@@ -778,7 +778,7 @@ void GuiApp::load_preset_file(const std::string& path) {
     if (path.empty()) return;
     // Applying a preset re-parses the dataset, which takes a live session
     // down with it. Refuse while native work is running.
-    if (native_work_busy() || _batch_active) {
+    if (native_work_busy()) {
         _preset_msg = dmsg::log_drop_while_training.get();
         _preset_msg_err = true;
         log(_preset_msg);
@@ -1195,7 +1195,6 @@ void GuiApp::start_batch(bool skip_invalid) {
 
     _scheduler.pause_dispatch(false);
     _batch_active = true;
-    _batch_current = -1;
     _batch_msg = i18n::format(msg::batch_log_started, {(long long)submitted});
     _batch_msg_err = false;
     log(_batch_msg);
@@ -1203,7 +1202,6 @@ void GuiApp::start_batch(bool skip_invalid) {
 }
 
 void GuiApp::advance_batch() {
-    int active = -1;
     bool live = false;
     for (size_t i = 0; i < _batch.size(); ++i) {
         const BatchJob& row = _batch[i];
@@ -1217,13 +1215,11 @@ void GuiApp::advance_batch() {
             case app::sched::JobState::Running:
             case app::sched::JobState::Stopping:
                 live = true;
-                if (active < 0) active = (int)i;
                 break;
             default:
                 break;
         }
     }
-    _batch_current = active;
     if (live) {
         _batch_active = true;
     } else if (_batch_active) {
@@ -1248,7 +1244,6 @@ void GuiApp::finish_batch() {
     }
     _batch_active = false;
     _scheduler.pause_dispatch(false);
-    _batch_current = -1;
     _batch_msg = i18n::format(msg::batch_log_summary,
                               {(long long)done, (long long)failed,
                                (long long)other});
@@ -2872,7 +2867,8 @@ void GuiApp::start_dataset_job() {
     sfm.phase = "sfm";
     sfm.output = (fs::path(frozen.workspace) / "sparse" / "0").u8string();
     device(sfm);
-    sfm.args = _sfm.scheduler_args(scheduled_sfm, image_dir, mask_dir);
+    sfm.args = _sfm.scheduler_args(scheduled_sfm, image_dir, mask_dir,
+                                   sfm.payload);
     submit.phases.push_back(std::move(sfm));
 
     if (_geometry.enable) {
@@ -5591,11 +5587,8 @@ void GuiApp::draw_train() {
     if (_batch_active) {
         if (ui::Button(msg::batch_show_list)) _screen = Screen::Batch;
         ImGui::SameLine();
-        ui::TextDisabledRaw(_batch_current >= 0 ? _batch[_batch_current].dataset
-                                                : std::string());
-    } else {
-        ui::TextDisabledRaw(_cfg.data);
     }
+    ui::TextDisabledRaw(_cfg.data);
     // Two ways to watch a run: the scene in 3D, or one training photograph
     // beside the render of the same camera. Right-aligned on the header row so
     // it costs the preview below no height.
@@ -6332,10 +6325,6 @@ void GuiApp::draw_batch() {
     refresh_presets();
 
     if (ui::Button(msg::back_home)) request_go_home();
-    if (_batch_active) {
-        ImGui::SameLine();
-        if (ui::Button(msg::batch_show_training)) _screen = Screen::Train;
-    }
     ImGui::SameLine();
     ui::Text(msg::batch_title);
 
@@ -6348,6 +6337,17 @@ void GuiApp::draw_batch() {
     ui::Text(msg::menu_device);
     ImGui::SameLine();
     draw_scheduled_device_picker();
+    if (_batch_active) {
+        ImGui::SameLine();
+        if (_scheduler.dispatch_paused()) {
+            if (ui::Button(msg::resume)) _scheduler.pause_dispatch(false);
+        } else {
+            if (ui::Button(msg::pause)) _scheduler.pause_dispatch(true);
+        }
+        ui::help_on_hover(msg::scheduler_paused);
+        if (_scheduler.dispatch_paused())
+            ui::TextColored(kWarn, msg::scheduler_paused);
+    }
 
     const float log_h = log_height(ImGui::GetContentRegionAvail().y);
     ImGui::BeginChild("##batchlist", ImVec2(0, body_height(log_h)));
@@ -6465,7 +6465,9 @@ void GuiApp::draw_batch_table() {
             (scheduled->state == app::sched::JobState::Starting ||
              scheduled->state == app::sched::JobState::Running ||
              scheduled->state == app::sched::JobState::Stopping);
-        const bool config_locked = _batch_active || scheduled != nullptr;
+        const bool config_locked = scheduled &&
+            (scheduled->state == app::sched::JobState::Queued ||
+             scheduled_active);
 
         ImGui::TableNextColumn();
         ui::TextDisabledRaw(std::to_string(i + 1));
@@ -6763,37 +6765,26 @@ void GuiApp::draw_train_settings() {
     }
 #endif
 
-    // ---- preset + options ----
-    // A batch owns the config while it runs -- each row's comes from its own
-    // preset -- so the editor would be showing something that is not what is
-    // training. What the row IS training goes here instead.
-    if (_batch_active) {
-        draw_batch_progress();
-    } else {
-        // Snapshot: any change to a dataset-parsing option below triggers an
-        // automatic reload (deferred until the edited widget loses focus).
-        TrainConfig parse_before = _cfg;
-        ImGui::BeginDisabled(busy);
-        ui::SeparatorText(msg::section_preset);
-        draw_preset_picker();
+    // Snapshot: any change to a dataset-parsing option below triggers an
+    // automatic reload (deferred until the edited widget loses focus).
+    TrainConfig parse_before = _cfg;
+    ImGui::BeginDisabled(busy);
+    ui::SeparatorText(msg::section_preset);
+    draw_preset_picker();
 
-        ui::SeparatorText(msg::section_basic_options);
-        draw_basic_options();
+    ui::SeparatorText(msg::section_basic_options);
+    draw_basic_options();
 
-        ImGui::Spacing();
-        if (ui::CollapsingHeader(msg::section_all_options))
-            draw_config_editor(_cfg, _defaults, _cfg_ui);
-        ImGui::EndDisabled();
+    ImGui::Spacing();
+    if (ui::CollapsingHeader(msg::section_all_options))
+        draw_config_editor(_cfg, _defaults, _cfg_ui);
+    ImGui::EndDisabled();
 
-        // The macro options (quality, floater_suppression, ...) fill in the
-        // flags they stand for, skipping any the user has edited by hand -- so
-        // the two panels above always show the values the run will actually
-        // use. None of what they write is a dataset-parsing field, so this
-        // cannot make the snapshot below think the dataset went stale.
-        train_resolve_macros(_cfg, _cfg_ui.touched);
+    // Macro expansion only writes non-parser flags, so it cannot make
+    // parse_settings_equal report a stale dataset.
+    train_resolve_macros(_cfg, _cfg_ui.touched);
 
-        if (!parse_settings_equal(parse_before, _cfg)) _parse_dirty = true;
-    }
+    if (!parse_settings_equal(parse_before, _cfg)) _parse_dirty = true;
 
     // ---- controls + metrics ----
     ui::SeparatorText(msg::section_training);
@@ -7036,39 +7027,6 @@ void GuiApp::draw_preset_save_modal() {
     ImGui::EndPopup();
 }
 
-// What the trainer screen's left panel says while a batch owns it: which row
-// is running, out of how many, and the two ways to stop.
-void GuiApp::draw_batch_progress() {
-    ui::SeparatorText(msg::batch_title);
-    const long long total = (long long)_batch.size();
-    ui::Text(msg::batch_running_banner,
-             {(long long)(_batch_current + 1), total});
-    if (_batch_current >= 0 && _batch_current < (int)_batch.size()) {
-        const BatchJob& j = _batch[_batch_current];
-        ImGui::PushTextWrapPos();
-        ui::TextDisabled(msg::batch_running_dataset, {j.dataset});
-        ui::TextDisabled(msg::batch_running_preset, {j.preset_name});
-        ImGui::PopTextWrapPos();
-    }
-    if (_scheduler.dispatch_paused()) ui::TextColored(kWarn, msg::batch_stopping);
-
-    if (ui::Button(msg::batch_show_list, ImVec2(-8, 0)))
-        _screen = Screen::Batch;
-    ImGui::BeginDisabled(_scheduler.dispatch_paused());
-    if (ui::Button(msg::batch_stop_after, ImVec2(-8, 0)))
-        _scheduler.pause_dispatch(true);
-    ui::help_on_hover(msg::batch_stop_after_help);
-    ImGui::EndDisabled();
-    if (ui::Button(msg::batch_stop_now, ImVec2(-8, 0))) {
-        _scheduler.pause_dispatch(true);
-        for (const BatchJob& row : _batch)
-            if (!row.scheduler_id.empty()) {
-                _scheduler.cancel(row.scheduler_id);
-                _scheduler.stop_and_save(row.scheduler_id);
-            }
-    }
-    ui::help_on_hover(msg::batch_stop_now_help);
-}
 
 // Every edit here records itself in _cfg_ui.touched, the same way the
 // generated editor does: a flag the user set by hand is off limits to the

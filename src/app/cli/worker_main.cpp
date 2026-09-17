@@ -9,6 +9,7 @@
 #include "sfm/Pipeline.h"
 #endif
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <climits>
@@ -17,6 +18,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -119,6 +121,21 @@ int run_sfm(const app::worker::Request& r, app::worker::Result& result) {
 #ifdef SS_TOOL_SFM
     std::vector<std::string> args = r.args;
     if (!args.empty() && args.front() == "auto") args.erase(args.begin());
+    if (!r.payload.empty() && r.payload != "{}") {
+        auto manifest = std::find(args.begin(), args.end(), "--manifest");
+        if (manifest == args.end() || ++manifest == args.end()) {
+            result.outcome = "failed"; result.message = "worker: SfM manifest path missing"; return 2;
+        }
+        const fs::path path = fs::u8path(*manifest);
+        std::error_code ec;
+        fs::create_directories(path.parent_path(), ec);
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        out << r.payload;
+        out.flush();
+        if (ec || !out) {
+            result.outcome = "failed"; result.message = "worker: cannot write SfM manifest"; return 2;
+        }
+    }
     args.push_back("--device"); args.push_back(r.device);
     sfm::AutoRequest request;
     if (const std::string error = sfm::parse_auto_args(args, request); !error.empty()) {
@@ -193,7 +210,14 @@ int run_tool_phase(const app::worker::Request& r, app::worker::Result& result) {
     }
     if (r.phase == "geometry") {
 #ifdef SS_TOOL_GEOMETRY
-        return spirula_geometry_main(argc, argv.data());
+        const int rc = spirula_geometry_main(argc, argv.data());
+        if (rc == 0) {
+            if (std::find(r.args.begin(), r.args.end(), "--depth") != r.args.end())
+                result.outputs.push_back((fs::u8path(r.workspace) / "depths").u8string());
+            if (std::find(r.args.begin(), r.args.end(), "--no-normal") == r.args.end())
+                result.outputs.push_back((fs::u8path(r.workspace) / "normals").u8string());
+        }
+        return rc;
 #else
         result.outcome = "spawn_failed"; result.message = "worker: geometry phase unavailable in this build"; return 100;
 #endif

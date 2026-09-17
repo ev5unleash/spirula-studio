@@ -219,7 +219,7 @@ std::string SfmRunner::availability() {
 
 std::vector<std::string> SfmRunner::scheduler_args(
     const SfmJob& job, const std::string& image_dir,
-    const std::string& mask_dir) {
+    const std::string& mask_dir, std::string& manifest_payload) {
     PrepResult prep;
     prep.image_dir = image_dir;
     prep.mask_dir = mask_dir;
@@ -237,18 +237,10 @@ std::vector<std::string> SfmRunner::scheduler_args(
         "--progress-dir", (fs::path(job.prep.workspace) / ".progress").string()};
     for (size_t i = 0; i < model_args.size(); ++i) {
         if (model_args[i] == "--manifest" && i + 1 < model_args.size()) {
-            const fs::path manifest = fs::path(job.prep.workspace) /
-                                      ".spirula_manifest.yaml";
-            std::error_code ec;
-            fs::create_directories(manifest.parent_path(), ec);
-            if (ec) throw std::runtime_error(
-                "cannot create SfM workspace: " + ec.message());
-            std::ofstream out(manifest, std::ios::binary | std::ios::trunc);
-            if (!out) throw std::runtime_error("cannot write SfM manifest");
-            out << model_args[++i];
-            if (!out) throw std::runtime_error("cannot write SfM manifest");
+            manifest_payload = model_args[++i];
             args.push_back("--manifest");
-            args.push_back(manifest.u8string());
+            args.push_back((fs::path(job.prep.workspace) /
+                            ".spirula_manifest.yaml").u8string());
         } else {
             args.push_back(model_args[i]);
         }

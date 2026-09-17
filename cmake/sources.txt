@@ -43,6 +43,7 @@ src/app/EvalMetrics.cpp
 src/app/OutputLease.cpp
 src/app/Subprocess.cpp
 src/app/JobScheduler.cpp
+src/app/WorkerRequest.cpp
 src/external/*.cpp
 src/external/*.c
 
@@ -62,5 +63,6 @@ src/app/EvalMetrics.cpp
 src/app/OutputLease.cpp
 src/app/Subprocess.cpp
 src/app/JobScheduler.cpp
+src/app/WorkerRequest.cpp
 src/external/*.cpp
 src/external/*.c

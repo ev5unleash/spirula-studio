@@ -202,9 +202,6 @@ void set_arg_value(std::vector<std::string>& args, const char* key, const std::s
     args.push_back(key); args.push_back(value);
 }
 
-bool phase_worker(const std::string& phase) {
-    return phase != "publish";
-}
 
 bool output_exists(const std::string& path) {
     if (path.empty()) return false;
@@ -232,6 +229,10 @@ bool validate_phase_result(const Job& job, const Phase& phase, const app::worker
             error = "SfM worker produced no validated sparse model";
             return false;
         }
+    }
+    if (phase.phase == "geometry" && result.outputs.empty()) {
+        error = "geometry worker produced no validated output";
+        return false;
     }
     for (const std::string& output : result.outputs) {
         if (!output_exists(output)) { error = "worker output does not exist: " + output; return false; }
@@ -532,6 +533,14 @@ std::string JobScheduler::submit(const WorkflowSubmitOpts& o) {
             }
         }
         if (!phase.output.empty()) phase.output = canonical_claim_path(phase.output);
+        if (phase.phase == "train" && !phase.output.empty()) {
+            bool claimed = false;
+            for (const PathClaim& claim : j->path_claims)
+                if (claim.write &&
+                    canonical_claim_path(claim.path) == phase.output)
+                    claimed = true;
+            if (!claimed) j->path_claims.push_back({phase.output, true});
+        }
     }
     j->created_at = now_iso();
     j->state = JobState::Queued;
@@ -550,16 +559,6 @@ std::string JobScheduler::submit(const WorkflowSubmitOpts& o) {
         }
     }
     j->phases.front().output = j->output_dir;
-    for (const Phase& phase : j->phases) {
-        if (phase.output.empty()) continue;
-        bool present = false;
-        for (const PathClaim& claim : j->path_claims)
-            if (claim.write && canonical_claim_path(claim.path) == canonical_claim_path(phase.output))
-                present = true;
-        if (!present) j->path_claims.push_back({phase.output, true});
-    }
-    if (j->path_claims.empty() && !j->output_dir.empty())
-        j->path_claims.push_back({j->output_dir, true});
     for (PathClaim& claim : j->path_claims)
         claim.path = canonical_claim_path(claim.path);
     const fs::path dir = fs::u8path(_config_dir) / "jobs" / j->job_id;
@@ -960,9 +959,13 @@ void JobScheduler::dispatch_one() {
                 continue;
             }
             auto candidate = std::make_shared<Attempt>();
-            if (!p.output.empty()) {
+            std::string lease_path = p.output;
+            if ((p.phase == "prep" || p.phase == "sfm" ||
+                 p.phase == "geometry") && !j->workspace.empty())
+                lease_path = j->workspace;
+            if (!lease_path.empty()) {
                 std::string error;
-                if (!candidate->output_lease.acquire(fs::u8path(p.output), error)) { _queue.erase(_queue.begin() + (ptrdiff_t)idx); transition_locked(*j, JobState::Blocked, error.empty() ? "output directory is unavailable" : error); save_locked(); continue; }
+                if (!candidate->path_lease.acquire(fs::u8path(lease_path), error)) { _queue.erase(_queue.begin() + (ptrdiff_t)idx); transition_locked(*j, JobState::Blocked, error.empty() ? "output directory is unavailable" : error); save_locked(); continue; }
             }
             const JobState previous_state = j->state; const std::string previous_attempt = j->attempt_id; const std::string previous_error = j->error;
             j->attempt_id = new_attempt_id(); p.actual_device = p.planned_device; p.actual_device_name = p.planned_device_name; p.outcome = "running"; j->state = JobState::Starting; j->error.clear();
@@ -985,12 +988,12 @@ void JobScheduler::supervisor_main(std::shared_ptr<Attempt> att) {
     catch (const std::exception& e) { std::lock_guard<std::mutex> lk(_mu); transition_locked(*j, JobState::Failed, e.what()); _leases.erase(phase.planned_device); att->finished.store(true); save_locked(); _cv.notify_all(); return; }
     std::ofstream log_file(log_path, std::ios::binary | std::ios::trunc);
     proc::ProcessOptions opts; opts.argv = {_exe_path, "worker", "--request", req_path.u8string()}; opts.cwd = j->work_dir; opts.cancel = &att->cancel; opts.stop = &att->stop; opts.stop_token = "STOP\n"; opts.grace_period_ms = phase.phase == "train" ? 300000 : 30000; opts.env_overrides = {{"SS_WORKER_CONTROL", "1"}, {"WORKER_CONTROL", "1"}, {"SS_CRASH_DIR", j->run_dir}};
-    if (att->output_lease.valid()) {
+    if (att->path_lease.valid()) {
         opts.env_overrides.push_back({"SS_OUTPUT_LEASE_HELD", "1"});
 #ifdef _WIN32
-        opts.inherit_handles.push_back(att->output_lease.native_handle()); opts.env_overrides.push_back({"SS_OUTPUT_LEASE_HANDLE", std::to_string(reinterpret_cast<uintptr_t>(att->output_lease.native_handle()))});
+        opts.inherit_handles.push_back(att->path_lease.native_handle()); opts.env_overrides.push_back({"SS_OUTPUT_LEASE_HANDLE", std::to_string(reinterpret_cast<uintptr_t>(att->path_lease.native_handle()))});
 #else
-        opts.inherit_fds.push_back(att->output_lease.native_fd()); opts.env_overrides.push_back({"SS_OUTPUT_LEASE_FD", std::to_string(att->output_lease.native_fd())});
+        opts.inherit_fds.push_back(att->path_lease.native_fd()); opts.env_overrides.push_back({"SS_OUTPUT_LEASE_FD", std::to_string(att->path_lease.native_fd())});
 #endif
     }
     opts.on_line = [this, &log_file, job_id = att->job_id](const std::string& line) { if (log_file) { log_file << line << '\n'; log_file.flush(); } std::lock_guard<std::mutex> lk(_mu); auto it = _jobs.find(job_id); if (it != _jobs.end()) queue_event_locked(*it->second, line); };
