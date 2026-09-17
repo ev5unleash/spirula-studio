@@ -366,7 +366,7 @@ That future plan must separately address dynamic splat creation/deletion, stable
 ## 9. Implementation status and evidence
 
 The implementation landed on `feature/device-job-scheduling` in commits
-`00f25860` through `0c4d590a`. It provides:
+`00f25860` through `1a0f0a7b`. It provides:
 
 - one durable local scheduler with per-device admission, workspace/run leases,
   fixed dataset and training phases, atomic state recovery, and bounded event
@@ -379,17 +379,27 @@ The implementation landed on `feature/device-job-scheduling` in commits
   pending target selection, per-job retry/Later recovery, and all catalog copy
   in the 13 supported languages.
 
+The follow-up in `1a0f0a7b` separates the desktop GPU from the queued native
+dataset target: scheduled submission resolves and freezes its own device in
+the immutable phase requests without calling desktop session fixation. The GUI
+labels both selectors explicitly. The same change adds durable per-workflow
+write leases across phase gaps, survivor-held scheduler-state ownership,
+collision-safe run directories, canonical persisted paths with per-job failure,
+truthful phase stop controls, SfM cancellation, and phase-aware shutdown grace.
+
 The Windows Vulkan integration build passed for `spirula`, `scheduler_test`,
 `worker_request_test`, and `subprocess_test`. The three executables then passed:
 
 - `scheduler_test`: output/state ownership, schema migration, path-claim
   conflicts, same-device serialization, unrelated-device progress, foreground
-  reservations, pause/resume, persistence, recovery, and failed-publication
-  behavior;
+  reservations, pause/resume, persistence, malformed-path failure, recovery,
+  and failed-publication behavior;
 - `worker_request_test`: request validation, path freezing, preparation payload
-  round-trip, and rejection of external Python masking;
+  round-trip of every execution option, and rejection of external Python
+  masking;
 - `subprocess_test`: environment isolation, line capture, cooperative and
-  forced stop, spawn failure, and inherited output-lease lifetime.
+  forced stop, spawn failure, inherited output-lease lifetime, and the Windows
+  nested-helper path without a second Job Object.
 
 The rebuilt Vulkan GUI target also passed the comment/i18n/font/build gates
 after the integration cleanup. A fresh `SS_BUILD_GUI=OFF`,
@@ -400,6 +410,13 @@ built `spirula` successfully, and its `--help` command exited successfully.
 
 The milestone is not complete until these external/manual rows are exercised
 and recorded:
+
+- A computer-use retry on 2026-09-17 exposed only the Codex in-app browser and
+  no native-app controller, so it could not launch or inspect the Spirula
+  desktop. The proposed fixture
+  `Z:\3d\outside test 1\photos\UnknownDevice\VID_20260912_110208_00_001`
+  was verified read-only to contain 152 JPEGs plus `Thumbs.db`, but no desktop
+  dataset run was performed or counted as acceptance evidence.
 
 - the real desktop Phase 4 gate: preserve a live foreground device, run two
   independent jobs, retarget pending work, stop one, restart, retry, and verify
