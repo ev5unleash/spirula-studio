@@ -12,6 +12,8 @@
 
 #include "data/DatasetParser.h"
 
+#include "app/gui/PrepProgress.h"
+
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -70,6 +72,10 @@ struct RunStatus {
 };
 
 bool read_status(const std::string& dir, int64_t& mtime, RunStatus& out);
+bool sfm_progress_for_attempt(const std::string& dir,
+                              const std::string& attempt_id);
+void apply_sfm_status(RunProgress& progress, const RunStatus& status);
+int sfm_preview_tab(uint32_t stage);
 
 // Where the mapping bar stops with every image placed: the finishing solves
 // come after the last one, and a phase that places none holds it here or at

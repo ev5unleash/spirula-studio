@@ -4,6 +4,8 @@
 
 #include "core/CameraModel.h"
 
+#include "i18n/catalog/Log.h"
+
 #include "sfm/core/Progress.h"
 #ifdef SS_TOOL_SFM
 #include "sfm/core/Features.h"
@@ -11,6 +13,7 @@
 #endif
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -57,7 +60,16 @@ struct Reader {
     float f32() { float v = 0; take(&v, 4); return v; }
 };
 
+void set_sfm_stage(RunProgress& progress, Stage stage, const char* detail) {
+    if (progress.current() == stage && progress.stage(stage).detail == detail)
+        return;
+    progress.enter(stage, detail);
+    progress.note("==== " + std::string(detail) + " ====", false);
+}
+
 }  // namespace
+
+namespace lmsg = spirula::i18n::msg::log;
 
 bool read_status(const std::string& dir, int64_t& mtime, RunStatus& out) {
     if (dir.empty()) return false;
@@ -85,10 +97,92 @@ bool read_status(const std::string& dir, int64_t& mtime, RunStatus& out) {
     return true;
 }
 
+bool sfm_progress_for_attempt(const std::string& dir,
+                              const std::string& attempt_id) {
+    if (dir.empty() || attempt_id.empty()) return false;
+    std::ifstream f(fs::path(dir) / "attempt", std::ios::binary);
+    if (!f) return false;
+    const std::string token((std::istreambuf_iterator<char>(f)),
+                            std::istreambuf_iterator<char>());
+    size_t first = 0, last = token.size();
+    while (first < last &&
+           std::isspace(static_cast<unsigned char>(token[first])))
+        ++first;
+    while (last > first &&
+           std::isspace(static_cast<unsigned char>(token[last - 1])))
+        --last;
+    return last > first && last - first == attempt_id.size() &&
+           token.compare(first, attempt_id.size(), attempt_id) == 0;
+}
+
 float mapping_fraction(int64_t done, int64_t total) {
     if (total <= 0) return -1.0f;
     const double x = std::min(1.0, (double)done / (double)total);
     return (float)(kMappingBarFull * x * std::sqrt(x));
+}
+
+void apply_sfm_status(RunProgress& progress, const RunStatus& status) {
+    switch (status.stage) {
+        case 0:
+            set_sfm_stage(progress, Stage::Features,
+                          lmsg::stage_finding_features.get());
+            progress.count(Stage::Features, status.done, status.total);
+            break;
+        case 6:
+            set_sfm_stage(progress, Stage::Matching,
+                          lmsg::stage_reading_features.get());
+            progress.count(Stage::Matching, status.done, status.total);
+            break;
+        case 7:
+            set_sfm_stage(progress, Stage::Matching,
+                          lmsg::stage_selecting_pairs.get());
+            progress.count(Stage::Matching, status.done, status.total);
+            break;
+        case 1:
+            set_sfm_stage(progress, Stage::Matching,
+                          lmsg::stage_matching_images.get());
+            progress.count(Stage::Matching, status.done, status.total);
+            break;
+        case 2:
+        case 3:
+        case 4:
+            set_sfm_stage(progress, Stage::Mapping,
+                          lmsg::stage_reconstructing.get());
+            progress.count(Stage::Mapping, status.done, status.total);
+            progress.fraction(Stage::Mapping,
+                              mapping_fraction(status.done, status.total));
+            break;
+        case 8:
+            set_sfm_stage(progress, Stage::Mapping, lmsg::stage_seeding.get());
+            progress.fraction(Stage::Mapping, 0.0f);
+            break;
+        case 9:
+            set_sfm_stage(progress, Stage::Mapping, lmsg::stage_refining.get());
+            progress.fraction(Stage::Mapping, kMappingBarFull);
+            break;
+        default:
+            break;
+    }
+}
+
+int sfm_preview_tab(uint32_t stage) {
+    switch (stage) {
+        case 0:
+        case 6:
+            return 2;
+        case 1:
+        case 7:
+            return 3;
+        case 2:
+        case 3:
+        case 4:
+        case 5:
+        case 8:
+        case 9:
+            return 4;
+        default:
+            return -1;
+    }
 }
 
 bool read_live_model(const std::string& dir, int64_t& mtime, LiveModel& out) {

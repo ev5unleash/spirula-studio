@@ -423,10 +423,6 @@ void SfmRunner::log(const std::string& line, bool detail) {
     _prog.note(line, detail);
 }
 
-void SfmRunner::set_stage_if_new(Stage st, const char* s) {
-    if (_prog.current() == st && _prog.stage(st).detail == s) return;
-    set_stage(st, s);
-}
 
 void SfmRunner::set_stage(Stage st, const std::string& s) {
     _prog.enter(st, s);
@@ -447,34 +443,7 @@ void SfmRunner::poll_status() {
 // One consumer for both transports: the child's status.bin and the in-process
 // event fold say the same thing in the same shape.
 void SfmRunner::apply_status(const RunStatus& st) {
-    switch (st.stage) {
-        case 0: set_stage_if_new(Stage::Features, lmsg::stage_finding_features.get());
-                _prog.count(Stage::Features, st.done, st.total); break;
-        // Reading the feature files and choosing which pairs to match are both
-        // matching, and both used to leave the screen on a full features bar
-        // with nothing moving -- minutes of it with a learned frontend.
-        case 6: set_stage_if_new(Stage::Matching, lmsg::stage_reading_features.get());
-                _prog.count(Stage::Matching, st.done, st.total); break;
-        case 7: set_stage_if_new(Stage::Matching, lmsg::stage_selecting_pairs.get());
-                _prog.count(Stage::Matching, st.done, st.total); break;
-        case 1: set_stage_if_new(Stage::Matching, lmsg::stage_matching_images.get());
-                _prog.count(Stage::Matching, st.done, st.total); break;
-        case 2: case 3: case 4:
-                set_stage_if_new(Stage::Mapping, lmsg::stage_reconstructing.get());
-                _prog.count(Stage::Mapping, st.done, st.total);
-                _prog.fraction(Stage::Mapping, mapping_fraction(st.done, st.total));
-                break;
-        // Two stretches of the mapping step place no image, so the bar has
-        // nothing to say and the label has to: choosing a focal and a seed
-        // before the first, and the finishing solves after the last.
-        case 8: set_stage_if_new(Stage::Mapping, lmsg::stage_seeding.get());
-                _prog.fraction(Stage::Mapping, 0.0f);
-                break;
-        case 9: set_stage_if_new(Stage::Mapping, lmsg::stage_refining.get());
-                _prog.fraction(Stage::Mapping, kMappingBarFull);
-                break;
-        default: break;
-    }
+    apply_sfm_status(_prog, st);
     if (st.finished) {
         _partial = st.partial;
         _not_metric = !st.metric;
