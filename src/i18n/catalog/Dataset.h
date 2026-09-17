@@ -68,12 +68,10 @@ SS_MSG(desktop_gpu,
     TR("Masaüstü GPU'su"));
 
 SS_MSG(queued_job_gpu,
-    EN("Queued job GPU"), JA("キュー処理の GPU"), ZH_HANS("队列任务 GPU"),
-    ZH_HANT("佇列工作 GPU"), KO("대기 작업 GPU"), DE("GPU des Warteschlangenauftrags"),
-    FR("GPU de la tâche en attente"), ES("GPU de la tarea en cola"),
-    PT("GPU da tarefa na fila"), IT("GPU dell'attività in coda"),
-    NL("GPU voor wachtrijtaak"), RU("GPU задания в очереди"),
-    TR("Kuyruktaki işin GPU'su"));
+    EN("Job GPU"), JA("ジョブ GPU"), ZH_HANS("任务 GPU"), ZH_HANT("工作 GPU"),
+    KO("작업 GPU"), DE("Auftrags-GPU"), FR("GPU de la tâche"),
+    ES("GPU de la tarea"), PT("GPU da tarefa"), IT("GPU dell'attività"),
+    NL("Taak-GPU"), RU("GPU задания"), TR("İş GPU'su"));
 
 SS_MSG(section_advanced,
     EN("Advanced"),      JA("詳細設定"),      ZH_HANS("高级"),     ZH_HANT("進階"),

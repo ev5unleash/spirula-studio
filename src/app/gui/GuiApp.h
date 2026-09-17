@@ -7,6 +7,7 @@
 #include "backend/api/BackendRuntime.h"
 #include "app/JobScheduler.h"
 #include "config/TrainConfig.h"
+#include "i18n/Message.h"
 #include "app/gui/BatchTrain.h"
 #include "app/gui/ColmapRunner.h"
 #include "app/gui/CompareView.h"
@@ -358,7 +359,8 @@ private:
     void draw_batch_issues();
     void draw_train_settings();      // left panel
     // Native picker and frozen identity, available from shared settings/View menu.
-    void draw_device_picker(bool as_menu = false);
+    void draw_device_picker(bool as_menu = false,
+                            const spirula::i18n::Msg* label = nullptr);
     // Lists the native devices once per session. Enumeration is side-effect
     // free (a throwaway Vulkan instance) and never creates a logical device.
     void load_native_devices();

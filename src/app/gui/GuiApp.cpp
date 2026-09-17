@@ -218,7 +218,7 @@ GuiApp::GuiApp()
             auto& tail = _scheduler_log_tail[e.job_id];
             tail.push_back(e.line);
             while (tail.size() > 256) tail.pop_front();
-            log("[" + e.job_id + "] " + e.line, true);
+            log("[" + e.job_id + "] " + e.line);
         }
         if (!e.error.empty()) {
             auto& tail = _scheduler_log_tail[e.job_id];
@@ -3675,7 +3675,8 @@ void GuiApp::load_native_devices() {
     _native_devices_loaded = true;
 }
 
-void GuiApp::draw_device_picker(bool as_menu) {
+void GuiApp::draw_device_picker(bool as_menu,
+                                const spirula::i18n::Msg* label) {
     load_native_devices();
 
     const bool frozen = _native_device_frozen;
@@ -3759,7 +3760,7 @@ void GuiApp::draw_device_picker(bool as_menu) {
     } else {
         ImGui::BeginDisabled(disabled);
         ImGui::SetNextItemWidth(px(220.0f));
-        if (ui::BeginCombo(msg::menu_device,
+        if (ui::BeginCombo(label ? *label : msg::menu_device,
                            no_devices ? msg::no_device_found.get() : shown)) {
             if (ui::Selectable(msg::device_auto, auto_sel)) {
                 _native_device_choice_set = true;
@@ -5295,15 +5296,14 @@ void GuiApp::draw_dataset_form(float height, bool running) {
     // a masking step and the reconstruction all run on it, so it is offered
     // before any of them can be started.
 #if defined(SS_BUILD_SAM) || defined(SS_TOOL_SFM) || defined(SS_BACKEND_VULKAN)
-    ui::Text(dmsg::desktop_gpu);
-    ImGui::SameLine();
-    draw_device_picker();
+    draw_device_picker(false, &dmsg::desktop_gpu);
     if (effective_engine() == Engine::BuiltIn &&
         !_sfm_job.prep.force_external_masking &&
         (!_mask_enable || backends().builtin_masking)) {
-        ui::Text(dmsg::queued_job_gpu);
-        ImGui::SameLine();
+        ImGui::SetNextItemWidth(px(220.0f));
         draw_scheduled_device_picker();
+        ImGui::SameLine();
+        ui::Text(dmsg::queued_job_gpu);
     }
     ImGui::Spacing();
 #endif
@@ -5398,10 +5398,6 @@ void GuiApp::draw_dataset_form(float height, bool running) {
         if (!scheduled->error.empty())
             ui::TextColoredWrapped(kErr, msg::scheduler_reason,
                                    {scheduled->error});
-        const auto logs = _scheduler_log_tail.find(scheduled->job_id);
-        if (logs != _scheduler_log_tail.end())
-            for (const std::string& line : logs->second)
-                ui::TextDisabledRaw(line);
         _ds_action_h = ImGui::GetCursorPosY() - action_y0;
         return;
     }
