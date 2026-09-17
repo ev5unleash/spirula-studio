@@ -231,6 +231,59 @@ void set_arg_value(std::vector<std::string>& args, const char* key, const std::s
     args.push_back(key); args.push_back(value);
 }
 
+void bind_prep_masks(std::vector<std::string>& args,
+                     const std::vector<std::string>& prep_outputs) {
+    const std::string mask_dir =
+        prep_outputs.size() > 1 ? prep_outputs[1] : std::string();
+    const bool have_masks = !mask_dir.empty();
+    bool mask_option_seen = false;
+    std::vector<std::string> bound;
+    bound.reserve(args.size() + (have_masks ? 2 : 1));
+    for (size_t i = 0; i < args.size(); ++i) {
+        const std::string& arg = args[i];
+        if (arg == "--masks") {
+            if (i + 1 >= args.size() || args[i + 1].empty() ||
+                args[i + 1][0] == '-') {
+                throw std::runtime_error("--masks: missing value");
+            }
+            ++i;
+            if (mask_option_seen) continue;
+            if (have_masks) {
+                bound.push_back("--masks");
+                bound.push_back(mask_dir);
+            } else {
+                bound.push_back("--no-masks");
+            }
+            mask_option_seen = true;
+            continue;
+        }
+        if (arg == "--no-masks") {
+            if (mask_option_seen) continue;
+            if (have_masks) {
+                bound.push_back("--masks");
+                bound.push_back(mask_dir);
+            } else {
+                bound.push_back("--no-masks");
+            }
+            mask_option_seen = true;
+            continue;
+        }
+        if (arg == "--flip-mask") {
+            if (have_masks) bound.push_back(arg);
+            continue;
+        }
+        bound.push_back(arg);
+    }
+    if (!mask_option_seen) {
+        if (have_masks) {
+            bound.push_back("--masks");
+            bound.push_back(mask_dir);
+        } else {
+            bound.push_back("--no-masks");
+        }
+    }
+    args = std::move(bound);
+}
 
 bool output_exists(const std::string& path) {
     if (path.empty()) return false;
@@ -1242,10 +1295,34 @@ void JobScheduler::dispatch_one() {
 void JobScheduler::supervisor_main(std::shared_ptr<Attempt> att) {
     std::shared_ptr<Job> j;
     Phase phase;
-    { std::lock_guard<std::mutex> lk(_mu); auto it = _jobs.find(att->job_id); if (it == _jobs.end() || att->phase_index >= it->second->phases.size()) { att->finished.store(true); _cv.notify_all(); return; } j = it->second; phase = j->phases[att->phase_index]; if (j->state == JobState::Starting) { j->state = JobState::Running; save_locked(); queue_event_locked(*j); } }
+    std::vector<std::string> prep_outputs;
+    bool completed_prep = false;
+    {
+        std::lock_guard<std::mutex> lk(_mu);
+        auto it = _jobs.find(att->job_id);
+        if (it == _jobs.end() || att->phase_index >= it->second->phases.size()) {
+            att->finished.store(true);
+            _cv.notify_all();
+            return;
+        }
+        j = it->second;
+        phase = j->phases[att->phase_index];
+        if (phase.phase == "sfm" && att->phase_index > 0) {
+            const Phase& prep = j->phases[att->phase_index - 1];
+            if (prep.phase == "prep" && prep.completed) {
+                completed_prep = true;
+                prep_outputs = prep.outputs;
+            }
+        }
+        if (j->state == JobState::Starting) {
+            j->state = JobState::Running;
+            save_locked();
+            queue_event_locked(*j);
+        }
+    }
     const fs::path run_dir = fs::u8path(j->run_dir); const fs::path req_path = run_dir / ("request-" + att->id + ".json"); const fs::path res_path = run_dir / ("result-" + att->id + ".json"); const fs::path log_path = run_dir / ("log-" + att->id + ".txt");
     app::worker::Request request; request.schema_version = 2; request.request_path = req_path.u8string(); request.job_id = j->job_id; request.attempt_id = att->id; request.phase = phase.phase; request.device = phase.planned_device; request.device_name = phase.planned_device_name; request.work_dir = j->work_dir; request.workspace = j->workspace; request.result_path = res_path.u8string(); request.args = phase.args; request.payload = phase.payload;
-    try { write_request_file(request, req_path); app::worker::validate_request(request); }
+    try { if (completed_prep) bind_prep_masks(request.args, prep_outputs); write_request_file(request, req_path); app::worker::validate_request(request); }
     catch (const std::exception& e) { std::lock_guard<std::mutex> lk(_mu); if (att->phase_index < j->phases.size()) { j->phases[att->phase_index].outcome = "failed"; j->phases[att->phase_index].error = e.what(); } transition_locked(*j, JobState::Failed, e.what()); _leases.erase(phase.planned_device); release_claim_leases_locked(j->job_id); att->finished.store(true); save_locked(); _cv.notify_all(); return; }
     std::ofstream log_file(log_path, std::ios::binary | std::ios::trunc);
     proc::ProcessOptions opts; opts.argv = {_exe_path, "worker", "--request", req_path.u8string()}; opts.cwd = j->work_dir; opts.cancel = &att->cancel; opts.stop = &att->stop; opts.stop_token = "STOP\n"; opts.grace_period_ms = phase.phase == "train" ? 300000 : 30000; opts.env_overrides = {{"SS_WORKER_CONTROL", "1"}, {"SS_CRASH_DIR", j->run_dir}, {"SS_STATE_LOCK_HELD", "1"}};
