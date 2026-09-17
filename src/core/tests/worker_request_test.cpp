@@ -145,6 +145,27 @@ int main() {
                        replace_once(valid, "\"quoted value\"",
                                     "\"bad\\u0000arg\"")),
               "rejects an embedded NUL in args");
+        app::PrepJob prep;
+        prep.workspace = "workspace";
+        app::PrepInput input;
+        input.path = "input/photos";
+        input.subdir = "cam0";
+        prep.inputs.push_back(input);
+        prep.mask_enable = true;
+        prep.force_external_masking = true;
+        std::string freeze_error;
+        check(app::worker::freeze_prep_job(prep, root.u8string(), freeze_error),
+              "freezes prep inputs and workspace to absolute paths");
+        const std::string payload = app::worker::serialize_prep_job(prep);
+        const app::PrepJob decoded = app::worker::deserialize_prep_job(payload);
+        check(decoded.workspace == prep.workspace && decoded.inputs.size() == 1 &&
+                  decoded.inputs[0].path == prep.inputs[0].path &&
+                  decoded.mask_enable,
+              "prep payload roundtrips meaningful options");
+        std::string masking_error;
+        check(app::worker::reject_external_masking(decoded, masking_error) &&
+                  masking_error.find("external Python") != std::string::npos,
+              "scheduled prep rejects external Python masking");
     } catch (const std::exception& e) {
         std::printf("FAIL worker request test setup: %s\n", e.what());
         ++failures;

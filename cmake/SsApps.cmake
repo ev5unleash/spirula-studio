@@ -340,7 +340,8 @@ file(GLOB SS_CORE_TESTS CONFIGURE_DEPENDS
 foreach(test_src ${SS_CORE_TESTS})
     get_filename_component(test_name ${test_src} NAME_WE)
     add_executable(${test_name} ${test_src})
-    if(test_name STREQUAL "worker_request_test")
+    if(test_name STREQUAL "worker_request_test" OR
+       test_name STREQUAL "scheduler_test")
         target_sources(${test_name} PRIVATE ${SS_SRC}/app/WorkerRequest.cpp)
     endif()
     ss_configure_app(${test_name})

@@ -42,17 +42,57 @@ enum class JobState {
     Blocked,
 };
 
+// Fixed workflow phase.  `phase` is deliberately a string at this boundary:
+// the worker allowlist is the one place that knows how to dispatch it.
+struct Phase {
+    std::string phase;             // prep -> sfm -> geometry -> publish -> train
+    bool optional = false;
+    std::string planned_device;
+    std::string planned_device_name;
+    std::string actual_device;
+    std::string actual_device_name;
+    std::string output;
+    std::vector<std::string> outputs;  // validated artifact paths
+    std::vector<std::string> args;
+    std::string payload = "{}";
+    std::string outcome = "pending";
+    bool completed = false;
+    int exit_code = -1;
+    std::string error;
+};
+using PhaseRecord = Phase;
+using JobPhase = Phase;
+
+struct PathClaim {
+    std::string path;
+    bool write = false;
+};
+
+// Canonical claims are component-aware. Existing ancestors are resolved
+// through weakly_canonical; missing leaves remain lexical and Windows folds
+// case before comparison.
+std::string canonical_claim_path(const std::string& path);
+bool path_claims_conflict(const PathClaim& a, const PathClaim& b);
+
 struct Job {
     uint64_t order = 0;
     std::string job_id;
-    std::string phase;        // train | sfm | geometry
-    std::string device;       // resolved device identity
-    std::string device_name;  // display name captured at submission
+    std::string phase;        // current phase for old UI callers
+    std::string device;       // current planned device
+    std::string device_name;  // current planned display name
     std::string work_dir;
     std::string run_dir;      // log/result root for this job
-    std::string output_dir;   // phase output, when known
+    std::string output_dir;   // current phase output, when known
+    std::string workspace;
+    std::vector<std::string> source_paths;
+    std::string options_payload;
     std::vector<std::string> args;
     std::string created_at;   // ISO-ish; display only
+
+    std::vector<Phase> phases;
+    size_t completed_prefix = 0;
+    size_t current_phase = 0;
+    std::vector<PathClaim> path_claims;
 
     JobState state = JobState::Queued;
     std::string attempt_id;   // empty until Starting
@@ -68,7 +108,21 @@ struct SubmitOpts {
     std::string work_dir;
     std::string output_dir;
     std::vector<std::string> args;
+    std::string payload = "{}";
+    std::vector<PathClaim> path_claims;
 };
+
+struct WorkflowSubmitOpts {
+    std::string work_dir;
+    std::string workspace;
+    std::string source;
+    std::vector<std::string> source_paths;
+    std::string options_payload;
+    std::vector<Phase> phases;
+    std::vector<PathClaim> path_claims;
+    bool add_scheduler_publish = true;
+};
+using SubmitWorkflowOpts = WorkflowSubmitOpts;
 
 // Events are queued by worker threads and drained by the owning UI thread.
 struct Event {
@@ -101,8 +155,10 @@ private:
     bool save_locked();
 
 public:
-
+    // Compatibility wrapper: one submitted phase, no implicit descendants.
     std::string submit(const SubmitOpts& o);
+    std::string submit(const WorkflowSubmitOpts& o);
+    std::string submit_workflow(const WorkflowSubmitOpts& o) { return submit(o); }
 
     // UI-facing snapshot. Never blocks on a running attempt.
     std::vector<Job> list() const;
@@ -134,6 +190,7 @@ private:
     struct Attempt {
         std::string id;
         std::string job_id;
+        size_t phase_index = 0;
         std::thread thread;
         OutputLease output_lease;
         std::atomic<bool> cancel{false};
@@ -153,6 +210,10 @@ private:
     static std::string now_iso();
     bool acquire_state_lock();
     void release_state_lock();
+    bool claim_paths_locked(const Job& job, std::string& error) const;
+    bool advance_local_phase_locked(Job& job);
+    static bool valid_phase_order(const std::vector<Phase>& phases,
+                                  std::string& error);
 
     std::string _config_dir;
     std::string _state_path;

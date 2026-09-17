@@ -82,6 +82,38 @@ int main(int argc, char** argv) {
     const std::string exe = fs::exists(exe_path)
                                 ? fs::absolute(exe_path).u8string()
                                 : binary_name;
+    {
+        const fs::path migration = root / "migration";
+        fs::create_directories(migration);
+        const fs::path state = migration / "job-state.json";
+        std::ofstream(state, std::ios::binary | std::ios::trunc)
+            << R"({"schema_version":1,"jobs":[{"order":0,"job_id":"legacy-job","phase":"train","device":"gpu-legacy","device_name":"Legacy GPU","work_dir":")"
+            << migration.u8string()
+            << R"(","run_dir":")" << (migration / "run").u8string()
+            << R"(","output_dir":"","created_at":"created","state":"Queued","attempt_id":"","error":"","pending_resume":false,"last_exit_code":-1,"args":["--help"]}]})";
+        sched::JobScheduler migrated(migration.u8string(), exe);
+        migrated.pause_dispatch(true);
+        migrated.load();
+        const auto rows = migrated.list();
+        check(rows.size() == 1 && rows[0].phases.size() == 1 &&
+                  rows[0].completed_prefix == 0,
+              "schema-1 row migrates to one queued phase");
+        migrated.save();
+        std::ifstream in(state, std::ios::binary);
+        std::ostringstream text;
+        text << in.rdbuf();
+        check(text.str().find("\"schema_version\": 2") != std::string::npos,
+              "migration writes schema 2 only");
+    }
+    check(!sched::path_claims_conflict({(root / "dataset").u8string(), false},
+                                       {(root / "dataset-copy").u8string(), true}),
+          "non-overlapping path claims stay independent");
+    check(!sched::path_claims_conflict({(root / "dataset").u8string(), false},
+                                       {(root / "dataset").u8string(), false}),
+          "read-only path claims share");
+    check(sched::path_claims_conflict({(root / "dataset").u8string(), false},
+                                      {(root / "dataset" / "child").u8string(), true}),
+          "write descendant conflicts with read ancestor");
 
     {
         const fs::path failure_root = root / "submit_failure";
