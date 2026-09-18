@@ -11,6 +11,7 @@
 #include <string>
 
 #include "data/Yaml.h"
+#include "sfm/Pipeline.h"
 #include "sfm/core/Manifest.h"
 #include "sfm/core/Rig.h"
 #include "sfm/tests/TestMain.h"
@@ -197,6 +198,15 @@ static int cmdManifestTest(int, char**) {
     check(cfg2.mask_dir == "given", "a --masks flag beats the file");
     check(image_dir2 == "given/images", "a positional image directory beats the file");
     check(cfg2.camera_mode != "single", "a --camera-mode flag beats the file");
+
+    const std::string masked = dir + "/masked.yaml";
+    write_file(masked, "mask_dir: cutouts\n");
+    AutoRequest request;
+    check(parse_auto_args({"images", "-o", dir + "/output",
+                           "--manifest", masked, "--no-masks"}, request).empty(),
+          "parse an explicit no-masks override");
+    check(request.cfg.mask_dir.empty() && request.in.mask_dir_explicit,
+          "--no-masks overrides the manifest and sibling discovery");
 
     // An unknown lens is caught where it is written, not 40 minutes in.
     write_file(dir + "/bad.yaml", "cameras:\n  - prefix: cam0\n    model: banana\n");

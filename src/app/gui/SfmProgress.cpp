@@ -13,7 +13,6 @@
 #endif
 
 #include <algorithm>
-#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -101,18 +100,8 @@ bool sfm_progress_for_attempt(const std::string& dir,
                               const std::string& attempt_id) {
     if (dir.empty() || attempt_id.empty()) return false;
     std::ifstream f(fs::path(dir) / "attempt", std::ios::binary);
-    if (!f) return false;
-    const std::string token((std::istreambuf_iterator<char>(f)),
-                            std::istreambuf_iterator<char>());
-    size_t first = 0, last = token.size();
-    while (first < last &&
-           std::isspace(static_cast<unsigned char>(token[first])))
-        ++first;
-    while (last > first &&
-           std::isspace(static_cast<unsigned char>(token[last - 1])))
-        --last;
-    return last > first && last - first == attempt_id.size() &&
-           token.compare(first, attempt_id.size(), attempt_id) == 0;
+    std::string token, extra;
+    return (f >> token) && token == attempt_id && !(f >> extra);
 }
 
 float mapping_fraction(int64_t done, int64_t total) {

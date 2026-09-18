@@ -36,6 +36,7 @@
 #include <deque>
 #include <fstream>
 #include <map>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -118,16 +119,17 @@ private:
                    const std::string& start_dir = "", bool multi = false);
 
     // ---- actions ----
-    // By value: callers pass elements of _recents, which open_dataset
-    // mutates via add_recent (a const& here would dangle).
-    // Clears the log panel unless `keep_log`: what is in it belongs to
-    // whatever was open before. The reconstruction handoff passes true,
-    // because there the log is this dataset's own build log.
+    // By value: add_recent mutates the source _recents vector.
+    // nullopt uses mask defaults; an explicit empty path does not inherit them.
     void open_dataset(std::string dir, std::string image_dir = "",
-                      std::string mask_dir = "", bool mask_flipped = false,
+                      std::optional<std::string> mask_dir = std::nullopt,
+                      bool mask_flipped = false,
                       bool keep_log = false);
     // Route for user-initiated opens: confirms first when training.
-    void request_open_dataset(std::string dir);
+    void request_open_dataset(std::string dir, std::string image_dir = "",
+                              std::optional<std::string> mask_dir = std::nullopt,
+                              bool mask_flipped = false,
+                              bool keep_log = false);
 
     // The viewer screen: a splat file (or a checkpoint / run directory) opened
     // for looking at. Takes the engine over, so it goes through the same
@@ -432,6 +434,10 @@ private:
     bool _confirm_was_paused = false;
     Pending _pending = Pending::None;
     std::string _pending_path;       // dataset dir for Pending::OpenDataset
+    std::string _pending_image_dir;
+    std::optional<std::string> _pending_mask_dir;
+    bool _pending_mask_flipped = false;
+    bool _pending_keep_log = false;
     bool _pending_batch_skip = false;  // Pending::StartBatch's argument
     bool _parse_dirty = false;       // dataparser option edited -> reload
     bool _color_space_touched = false;  // see adopt_exr_color_space
@@ -646,6 +652,9 @@ private:
     std::string _scheduled_dataset_id;
     std::string _scheduled_mask_job_id;
     bool _scheduled_mask_flipped = false;
+    RunProgress _scheduled_steps;
+    std::string _scheduled_preview_attempt;
+    bool _scheduled_preview_ready = false;
     std::vector<app::sched::Job> _scheduler_jobs;
     std::map<std::string, std::deque<std::string>> _scheduler_log_tail;
     std::map<std::string, bool> _recovery_dismissed;

@@ -23,11 +23,9 @@ class FeatureWatcher {
 public:
     ~FeatureWatcher();
 
-    // Idempotent for the same folders: starting it again on the ones it is
-    // already watching does nothing, which lets the screen call it every
-    // frame the step is running. `mask_dir` may be empty.
-    // `thumb_dir` is the run's thumbs/ (sfm/core/Progress.h); empty falls back
-    // to decoding the source image, which is what a finished run has left.
+    // Repeated calls with the same paths and mask convention keep the watcher.
+    // Empty thumb_dir falls back to source images; white masks mean remove
+    // only when mask_flipped is true.
     void start(const std::string& image_dir, const std::string& mask_dir,
                const std::string& features_dir, FilmReel* film,
                const std::string& thumb_dir, bool mask_flipped);

@@ -1,7 +1,8 @@
 # Explicit-device process scheduling
 
-Status: Implementation through Phase 4 is present; the desktop device split has
-been observed, while the rest of Phase 4 acceptance and Phases 5-6 remain open.
+Status: Core scheduling and parts of Phase 4 are implemented, not fully accepted.
+Pending-target UI remains incomplete;
+the remaining desktop acceptance and Phases 5-6 are still open.
 
 Target branch: `feature/device-job-scheduling`, based on `feature/native-gpu-selection`.
 
@@ -377,8 +378,8 @@ The implementation landed on `feature/device-job-scheduling` in commits
 - process-tree supervision, cooperative stop versus forced termination, output
   lease handoff, and parent-death handling;
 - native dataset and batch submission in the GUI, distinct lifecycle states,
-  pending target selection, per-job retry/Later recovery, and all catalog copy
-  in the 13 supported languages.
+  submission-time target selection, per-job retry/Later actions, and catalog
+  copy in the 13 supported languages.
 
 The follow-up in `1a0f0a7b` separates the desktop GPU from the queued native
 dataset target: scheduled submission resolves and freezes its own device in
@@ -468,11 +469,21 @@ normalized frame. Its worker result nevertheless records `"metric": true`;
 that result field is inconsistent with the gauge log and is not metric-frame
 evidence for this run.
 
+Desktop follow-up verified recovery Later/restart/retry, compact GPU controls
+and English/Japanese tooltips, running/completed logs, a normal live mask
+overlay, and mask inversion reaching reconstruction. Recovery monitor routing
+and deferred dataset-open metadata are fixed. The matching view, live inverted
+overlay, other log transitions and busy-training handoff still need desktop
+acceptance; the detailed evidence and checklist are in [HANDOFF.md](../../HANDOFF.md).
+
 ### Acceptance still open
 
-The milestone is not complete until these external/manual rows are exercised
-and recorded:
+The milestone is not complete. Remaining implementation and acceptance include:
 
+- pending dataset/phase retarget controls, distinct from the default target for
+  newly submitted jobs;
+- the remaining live-preview, mask and log cases, plus the busy-training dataset
+  handoff recorded in `HANDOFF.md`;
 - the real desktop Phase 4 gate: preserve a live foreground device, run two
   independent jobs, retarget pending work, stop one, restart, retry, and verify
   Later plus mask-overlay color correctness;

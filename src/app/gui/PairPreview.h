@@ -31,11 +31,8 @@ class PairPreview {
 public:
     ~PairPreview();
 
-    // Where this run's files are. Call at the owner's poll cadence: besides
-    // paths, it observes the final/live match source and its freshness.
-    // `live_matches` is read while matching runs and matches.bin is not
-    // there yet; empty when the run has none. `mask_flipped` is true when
-    // white means remove rather than keep.
+    // Poll final/live file freshness at the owner's cadence.
+    // Empty live_matches disables live input; mask_flipped means white removes.
     void configure(const std::string& image_dir, const std::string& mask_dir,
                    const std::string& features_dir,
                    const std::string& matches_path,

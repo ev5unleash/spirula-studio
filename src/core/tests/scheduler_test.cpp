@@ -1,9 +1,5 @@
-// scheduler_test -- JobScheduler admission, persistence and recovery.
-//
-// Uses `--help` as the phase workload: real GPU execution belongs in the
-// Phase-5 matrix, not in a unit test. The point exercised here is the queue:
-// admission, leases, state transitions, atomic persistence, recovery
-// semantics.
+// scheduler_test -- admission, persistence, recovery and prepared request dispatch.
+// Tiny RGBA inputs exercise prep; reconstruction/training stop before GPU work.
 
 #include "app/JobScheduler.h"
 #include "app/OutputLease.h"
@@ -384,10 +380,12 @@ int main(int argc, char** argv) {
             for (const auto& job : scheduler.list())
                 if (job.job_id == retarget_id)
                     run_dir = fs::u8path(job.run_dir);
-            check(find_request(run_dir, "prep", retarget_prep_request),
-                  "retarget observes the original prep worker request");
-            check(find_request(run_dir, "sfm", retarget_sfm_request),
-                  "retarget observes the retargeted worker request");
+            check(find_request(run_dir, "prep", retarget_prep_request) &&
+                      retarget_prep_request.device == "gpu-retarget-prep",
+                  "retarget preserves the original prep worker device");
+            check(find_request(run_dir, "sfm", retarget_sfm_request) &&
+                      retarget_sfm_request.device == "gpu-retarget-new",
+                  "retarget dispatches the current worker on the new device");
             scheduler.set_foreground_device("");
         }
         {
@@ -490,11 +488,7 @@ int main(int argc, char** argv) {
         const std::vector<std::string> implicit_expected = {
             "auto", "--definitely-invalid", "--masks", implicit_mask_dir,
             "--flip-mask"};
-        check(implicit_case.first.args == implicit_expected &&
-                  implicit_case.first.args[3] !=
-                      (implicit_root / "stale-a").u8string() &&
-                  implicit_case.first.args[3] !=
-                      (implicit_root / "stale-b").u8string(),
+        check(implicit_case.first.args == implicit_expected,
               "without disable canonical args consume actual masks and inversion");
     }
 

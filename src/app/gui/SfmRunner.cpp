@@ -227,7 +227,7 @@ std::vector<std::string> SfmRunner::scheduler_args(
                                       ? (double)job.prep.video_fps
                                       : 0.0});
     }
-    const std::vector<std::string> model_args = recon_args(job, prep);
+    const std::vector<std::string> model_args = recon_args(job, prep, false);
     std::vector<std::string> args = {
         "auto", prep.image_dir, "-o", job.prep.workspace,
         "--progress-dir", (fs::path(job.prep.workspace) / ".progress").string()};
@@ -591,7 +591,8 @@ std::vector<sfm::RigDef> SfmRunner::build_rigs(const PrepJob& prep) {
 // model vector feeds the workspace stamp and the launch settings; the frozen
 // device is appended only when launching.
 std::vector<std::string> SfmRunner::recon_args(const SfmJob& job,
-                                               const PrepResult& prep) {
+                                               const PrepResult& prep,
+                                               bool masks_final) {
     std::vector<std::string> argv = {
         "--quality", pick(kQuality, job.quality, 2),
         "--data-type", pick(kDataType, job.data_type),
@@ -686,7 +687,7 @@ std::vector<std::string> SfmRunner::recon_args(const SfmJob& job,
         // Only masks the run handed on untouched are still the other way
         // round; anything it wrote is in the usual convention.
         if (prep.mask_dir_flipped) argv.push_back("--flip-mask");
-    } else {
+    } else if (masks_final) {
         // Otherwise `auto` picks up a stale masks/ sitting beside the images
         // from an earlier run with masking on.
         argv.push_back("--no-masks");
@@ -762,7 +763,7 @@ void SfmRunner::run(SfmJob job) {
         ReconStamp now;
         now.present = true;
         now.engine = "builtin";
-        now.args = recon_args(job, prep);
+        now.args = recon_args(job, prep, true);
         const std::string changed =
             recon_stamp_change(read_recon_stamp(ws.string()), now);
 

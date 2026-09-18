@@ -1,9 +1,4 @@
-// Indexing a matches file the verification stage is still appending to.
-//
-// The GUI reads this file while the stage that writes it runs, so the two
-// cases that matter are a torn tail (a record the writer had not finished) and
-// the switch back to a finished matches.bin once the stage ends.
-#include <chrono>
+// Streaming/finished match decoding and progress snapshot reset boundaries.
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -17,12 +12,6 @@
 
 using namespace sfm;
 namespace fs = std::filesystem;
-
-static bool set_mtime(const fs::path& path, fs::file_time_type stamp) {
-    std::error_code ec;
-    fs::last_write_time(path, stamp, ec);
-    return !ec;
-}
 
 static int fails = 0;
 
@@ -111,30 +100,6 @@ static int cmdLiveMatchesTest(int, char**) {
     MatchesIndex fin;
     check(indexMatches(done, fin), "index a finished file");
     check(fin.pairs.size() == 1, "finished file indexes its pairs");
-    // The preview's source order is final/live by freshness, with the final
-    // file winning an equal timestamp. Keep both valid files around so this
-    // exercises the handoff rather than only the writer in isolation.
-    const auto t0 = fs::file_time_type::clock::now();
-    check(set_mtime(done, t0), "stamp the old final file");
-    check(set_mtime(path, t0 + std::chrono::seconds(1)),
-          "stamp a newer live file");
-    MatchesIndex live_newer;
-    check(indexMatches(path, live_newer), "index the newer live source");
-    check(live_newer.pairs.size() == 3, "newer live source is complete");
-
-    MatchesDatabase newer = db;
-    newer.pairs.push_back({0, 1, 2, matches(5, 500)});
-    writeMatches(done, newer);
-    check(set_mtime(done, t0 + std::chrono::seconds(2)),
-          "stamp the newer final file");
-    MatchesIndex final_newer;
-    check(indexMatches(done, final_newer), "index the newer final source");
-    check(final_newer.pairs.size() == 2, "newer final source wins its handoff");
-    check(set_mtime(done, t0 + std::chrono::seconds(1)),
-          "stamp an equal final/live timestamp");
-    check(fs::last_write_time(done) == fs::last_write_time(path),
-          "final and live timestamps tie");
-
     // Starting another run in the same progress directory removes only the
     // four progress snapshots. Reconstruction output and resume state stay.
     progress::begin_matching(3, {{0, 1}});

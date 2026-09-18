@@ -7,6 +7,7 @@
 
 #ifdef SS_TOOL_SFM
 #include "sfm/Pipeline.h"
+#include "sfm/core/Progress.h"
 #endif
 
 #include <algorithm>
@@ -165,8 +166,18 @@ int run_sfm(const app::worker::Request& r, app::worker::Result& result) {
     }
     sfm::RunContext context;
     context.set_cancel(&control.stop);
+    context.set_progress_dir(request.progress_dir);
+    context.set_events(sfm::progress::status);
     sfm::AutoResult value;
     try {
+        if (!request.progress_dir.empty()) {
+            std::ofstream marker(fs::path(request.progress_dir) / "attempt",
+                                 std::ios::binary | std::ios::trunc);
+            marker << r.attempt_id;
+            marker.close();
+            if (!marker)
+                throw std::runtime_error("worker: cannot publish SfM preview attempt");
+        }
         value = sfm::run_auto(request.cfg, request.in);
     } catch (const sfm::Cancelled&) {
         result.outcome = "stopped";

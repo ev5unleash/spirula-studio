@@ -20,6 +20,7 @@
 #include "i18n/catalog/Dataset.h"
 #include "i18n/catalog/Geometry.h"
 #include "i18n/catalog/Gui.h"
+#include "i18n/catalog/Log.h"
 #include "i18n/catalog/Train.h"
 #include "i18n/catalog/TrainFields.h"
 
@@ -808,34 +809,18 @@ void GuiApp::refresh_presets() {
 }
 
 void GuiApp::open_dataset(std::string dir, std::string image_dir,
-                          std::string mask_dir, bool mask_flipped,
+                          std::optional<std::string> mask_dir, bool mask_flipped,
                           bool keep_log) {
     if (dir.empty() || native_work_busy()) return;
     app::set_crash_note("opening dataset " + dir);
     close_native_previews();
     close_mesh_preview();
     close_splat();
-    // A different dataset means the log so far is about something else --
-    // another capture's reconstruction, another run's warnings -- and keeping
-    // it makes the panel read as if this dataset had already been worked on.
-    //
-    // Two exceptions, both "the log IS about this dataset": reopening the same
-    // one (a reload, not a new job), and the handoff straight out of a
-    // reconstruction, where the log is that reconstruction's and is the first
-    // thing anyone would look at if the result seems wrong.
     if (dir != _cfg.data && !keep_log) clear_log();
     _cfg.data = dir;
-    // image_dir / mask_dir: the runner hands its (possibly external) folders
-    // over in-memory right after a run -- photos indexed where they are keep
-    // their masks there too. Otherwise the dataparser defaults apply and the
-    // user can set data.image_dir / data.mask_dir under Advanced.
     _cfg.image_dir = !image_dir.empty() ? image_dir : _defaults.image_dir;
-    _cfg.mask_dir = !mask_dir.empty() ? mask_dir : _defaults.mask_dir;
+    _cfg.mask_dir = mask_dir.value_or(_defaults.mask_dir);
     _cfg.flip_mask = mask_flipped;
-    // Default the output next to the dataset -- much easier to find than a
-    // CWD-relative "outputs" for someone who launched from a desktop icon.
-    // Follows the dataset unless the user customized it (i.e. it still
-    // matches the previous auto default).
     if (_cfg.output_dir_prefix == "outputs" ||
         _cfg.output_dir_prefix.empty() ||
         _cfg.output_dir_prefix == _defaults.output_dir_prefix)
@@ -845,23 +830,25 @@ void GuiApp::open_dataset(std::string dir, std::string image_dir,
     _defaults.mask_dir = _cfg.mask_dir;
     _defaults.output_dir_prefix = _cfg.output_dir_prefix;
     add_recent(dir);
-    // However it was opened -- picked, dropped, from the recents list -- this
-    // is where the picker starts next time.
     remember_dir("dataset", dir);
     save_settings();
     detach_session_views();
-    // Training is the end of the dataset screen's business with the run, so
-    // this is where what it left for the screen to read goes.
     reset_dataset_preview();
     _runner.load_dataset(_cfg, _preset);
     _screen = Screen::Train;
 }
 
-void GuiApp::request_open_dataset(std::string dir) {
+void GuiApp::request_open_dataset(std::string dir, std::string image_dir,
+                                  std::optional<std::string> mask_dir,
+                                  bool mask_flipped, bool keep_log) {
     const bool loading = _runner.phase() == TrainRunner::Phase::Loading;
     if (training_busy() || loading) {
         _pending = Pending::OpenDataset;
         _pending_path = dir;
+        _pending_image_dir = image_dir;
+        _pending_mask_dir = std::move(mask_dir);
+        _pending_mask_flipped = mask_flipped;
+        _pending_keep_log = keep_log;
         if (loading) {
             _stop_confirmed = true;
             _runner.request_stop();
@@ -871,7 +858,8 @@ void GuiApp::request_open_dataset(std::string dir) {
         return;
     }
     if (native_work_busy()) return;
-    open_dataset(dir);
+    open_dataset(std::move(dir), std::move(image_dir), std::move(mask_dir),
+                 mask_flipped, keep_log);
 }
 
 void GuiApp::request_go_home() {
@@ -1014,7 +1002,11 @@ void GuiApp::run_pending_if_stopped() {
     _pending = Pending::None;
     switch (p) {
         case Pending::GoHome:     _screen = Screen::Home; break;
-        case Pending::OpenDataset: open_dataset(_pending_path); break;
+        case Pending::OpenDataset:
+            open_dataset(std::move(_pending_path), std::move(_pending_image_dir),
+                         std::move(_pending_mask_dir), _pending_mask_flipped,
+                         _pending_keep_log);
+            break;
         case Pending::OpenSplat:  open_splat(_pending_path); break;
         case Pending::Quit:       _quit = true; break;
         case Pending::StartBatch: start_batch(_pending_batch_skip); break;
@@ -2581,6 +2573,7 @@ bool GuiApp::native_work_busy() const {
 }
 
 RunProgress* GuiApp::dataset_steps() {
+    if (scheduler_job(_scheduled_dataset_id)) return &_scheduled_steps;
     return effective_engine() == Engine::BuiltIn ? &_sfm.steps() : &_colmap.steps();
 }
 
@@ -2808,6 +2801,7 @@ void GuiApp::start_dataset_job() {
                                     : (prep_log_file.parent_path() /
                                        ("unreg_" + stamp + ".log")).string());
         write_run_settings(_prep_log);
+        _scheduled_dataset_id.clear();
         reset_dataset_preview(effective_engine() != Engine::BuiltIn);
         const RunFilms films{&_film_frames, &_film_masks, &_film_geometry};
         if (effective_engine() == Engine::BuiltIn) _sfm.start(_sfm_job, films);
@@ -4534,11 +4528,39 @@ void GuiApp::poll_sfm_progress() {
     const bool scheduled_sfm = scheduled_dataset_pending() && scheduled &&
                                scheduled->phase == "sfm" &&
                                scheduled_prep_ready;
-    if (scheduled_sfm) {
+    if (scheduled) {
+        const bool sfm_completed = std::any_of(
+            scheduled->phases.begin(), scheduled->phases.end(),
+            [](const app::sched::Phase& phase) {
+                return phase.phase == "sfm" && phase.completed;
+            });
+        const std::string attempt =
+            scheduled->phase == "sfm" ? scheduled->attempt_id : std::string();
+        if (!sfm_completed && _scheduled_preview_attempt != attempt) {
+            reset_dataset_preview(false);
+            _scheduled_preview_attempt = attempt;
+        }
+        if (!sfm_completed) {
+            if (attempt.empty() || !scheduled_prep_ready) return;
+            if (!_scheduled_preview_ready)
+                _scheduled_preview_ready =
+                    sfm_progress_for_attempt(progress_dir, attempt);
+            if (!_scheduled_preview_ready) return;
+        }
         RunStatus status;
-        if (read_status(progress_dir, _scheduled_status_mtime, status))
-            _preview_last_stage =
-                status.stage == 0 ? 2 : status.stage == 1 ? 3 : 4;
+        if (read_status(progress_dir, _scheduled_status_mtime, status)) {
+            apply_sfm_status(_scheduled_steps, status);
+            _preview_last_stage = sfm_preview_tab(status.stage);
+        }
+        if (scheduled->phase == "geometry") {
+            if (_scheduled_steps.current() != Stage::Geometry)
+                _scheduled_steps.enter(
+                    Stage::Geometry, spirula::i18n::msg::log::stage_geometry.get());
+            _preview_last_stage = 5;
+        }
+        if (!scheduled_dataset_pending())
+            _scheduled_steps.finish(scheduled->state == app::sched::JobState::Succeeded
+                                        ? StageStatus::Done : StageStatus::Failed);
     }
 
     // The frames of the extraction step are shown by whoever writes them; the
@@ -4585,10 +4607,7 @@ void GuiApp::poll_sfm_progress() {
     }
 }
 
-// Everything the dataset screen holds about a run, given up: the previews, and
-// the files behind them. The run leaves its features and its matches on disk
-// precisely so that this screen can go on reading them after it ends, so this
-// -- the screen being done with them -- is where they go.
+// Keep finished-run artifacts until the dataset screen releases its previews.
 void GuiApp::reset_dataset_preview(bool sweep) {
     close_native_previews();
     _features.stop();
@@ -4609,6 +4628,9 @@ void GuiApp::reset_dataset_preview(bool sweep) {
     _model_mtime = _pairs_mtime = _matches_mtime = _scheduled_status_mtime = 0;
     _scheduled_mask_job_id.clear();
     _scheduled_mask_flipped = false;
+    _scheduled_steps.reset();
+    _scheduled_preview_attempt.clear();
+    _scheduled_preview_ready = false;
     _preview_tab = -1;
     _preview_last_stage = -1;
 }
@@ -5498,14 +5520,8 @@ void GuiApp::draw_dataset_form(float height, bool running) {
             ui::TextColoredWrapped(kWarn, dmsg::not_metric_reconstruction);
         ui::TextColoredWrapped(kOk, dmsg::done_at, {st.dir});
         if (ui::Button(dmsg::open_in_trainer)) {
-            if (training_busy()) {
-                _pending = Pending::OpenDataset;
-                _pending_path = st.dir;
-                _open_confirm = true;
-            } else {
-                open_dataset(st.dir, st.image_dir, st.mask_dir, st.mask_flipped,
-                             /*keep_log=*/true);
-            }
+            request_open_dataset(st.dir, st.image_dir, st.mask_dir,
+                                 st.mask_flipped, true);
         }
     } else if (st.failed) {
         ui::TextColoredWrapped(kErr, dmsg::failed, {st.err});
@@ -6390,8 +6406,11 @@ void GuiApp::draw_scheduler_recovery_modal() {
         if (ui::Button(msg::scheduler_recovery_retry)) {
             _recovery_dismissed.erase(job.job_id);
             _scheduler.retry(job.job_id);
-            if (job.options_payload == "gui:native-dataset:v1")
+            if (job.options_payload == "gui:native-dataset:v1") {
                 _scheduled_dataset_id = job.job_id;
+                reset_dataset_preview(false);
+                _screen = Screen::NewDataset;
+            }
         }
         ImGui::SameLine();
         if (ui::Button(msg::scheduler_later))

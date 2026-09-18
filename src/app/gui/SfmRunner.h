@@ -189,8 +189,7 @@ public:
     static std::string availability();
     ~SfmRunner();
 
-    // Arguments for one scheduled native SfM phase after prep has published
-    // its image and mask folders.
+    // Prep's completed output folders override planned mask paths at dispatch.
     std::vector<std::string> scheduler_args(const SfmJob& job,
                                             std::string& manifest_payload);
     // `films` are the screen's picture reels, null for a caller with no
@@ -258,9 +257,6 @@ private:
     void take_geometry(SfmJob& job);
     void log(const std::string& line, bool detail = true);
     void set_stage(Stage st, const std::string& s);
-    // Stage changes driven by the child's output, which repeats a
-    // stage's lines many times over.
-    void set_stage_if_new(Stage st, const char* s);
     // Where the run is: polled from the child's status.bin, or handed over
     // by the in-process run. apply_status is what both feed.
     void poll_status();
@@ -271,7 +267,7 @@ private:
     static std::vector<sfm::RigDef> build_rigs(const PrepJob& prep);
 #endif
     std::vector<std::string> recon_args(const SfmJob& job,
-                                        const PrepResult& prep);
+                                        const PrepResult& prep, bool masks_final);
     // Model flags shared by the workspace stamp and both launch paths. The
     // frozen execution selector is appended only when launching, so changing
     // GPUs does not invalidate a completed model.
