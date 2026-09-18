@@ -1,6 +1,31 @@
 # Headless behavior testing and desktop smoke
 
-Status: **Proposed; implementation has not started.**
+Status: **Headless implementation verified locally; deeper GPU and desktop interaction validation deferred by user.**
+
+The NVIDIA lanes in this original plan are superseded by the current
+[backend support policy](../../AGENTS.md#backend-support-policy). NVIDIA-specific
+implementation, investigation and validation have stopped; no further CUDA or
+NVIDIA-Vulkan checks are required. Existing legacy code remains untouched.
+
+Observed locally on Windows:
+- GUI-enabled Vulkan headless suite: 19/19 passed in 7.63 s; two concurrent
+  invocations passed in 8.65 s and 7.54 s.
+- GUI-OFF core suite: 14/14 passed in 6.65 s; GUI-enabled build restored.
+- Empty selection and deliberate runner failure returned nonzero; failure logs
+  and owned artifacts were retained. CI execution on Linux/macOS remains unobserved.
+- The supported AMD Vulkan training attempt crashed in `amdvlk64.dll`; GPU
+  acceptance remains open. Earlier NVIDIA results do not satisfy the new policy.
+- Desktop first frame rendered the generated scene and normal close exited zero.
+  Submit/cancel remains unverified: background and foreground canvas input did
+  not activate the controls. Prior scheduling desktop backlog remains open.
+- GUI-OFF-to-ON rebuild took 72.73 s, separate from test runtime; this was not a
+  clean-build measurement.
+
+Investigation stopped at the user's request before applying a GPU fix.
+See [the debugging handoff](headless-validation-debugging.md) for observed
+failure order, diagnostic variants, retained artifacts and bounded next steps.
+Deferred validation is not a pass and does not block delivery of the headless
+workflow improvements under the revised scope.
 
 ## 1. Goal and release boundary
 
@@ -21,8 +46,9 @@ This specification covers:
 It does not introduce a GUI-driving CLI, a daemon, a new test framework, a Python
 runtime dependency, a second scheduler, a second configuration parser, automatic
 model downloads, or a universal end-to-end suite for every inference model.
-Existing CUDA/Vulkan parity checks remain necessary for kernel changes. A passing
-headless suite does not certify layout, live previews or real-GPU rendering.
+Kernel changes require relevant numerical checks on supported non-NVIDIA Vulkan
+hardware. A passing headless suite does not certify layout, live previews or
+real-GPU rendering.
 
 ### Paused-work boundary
 
@@ -217,12 +243,11 @@ publication instruction. Deterministic mid-publication fault injection belongs
 to the existing checkpoint/scheduler fault-window acceptance, outside this small
 smoke; no timing-based kill is accepted as evidence for that separate claim.
 
-The baseline GPU check runs separately on Vulkan and CUDA for shared training
-behavior. CUDA's worker selector uses its own supported device syntax; do not
-forward Vulkan UUIDs as CUDA ordinals. Vulkan-only scheduler/device acceptance
-remains governed by the scheduling plan. Multi-GPU concurrency, cross-vendor
-numerical parity and SfM/model quality are separate acceptance workloads, not
-claims made by G1.
+The baseline GPU check targets supported non-NVIDIA Vulkan hardware and is
+currently deferred. CUDA/NVIDIA checks are excluded by the backend policy.
+Vulkan scheduler/device acceptance remains governed by the scheduling plan.
+Multi-GPU concurrency, cross-vendor numerical parity and SfM/model quality are
+separate acceptance workloads, not claims made by G1.
 
 ## 5. Intended developer workflow
 
@@ -367,9 +392,9 @@ support from Phase 3, test build/registration and `docs/testing.md` via Main.
   the explicit distinction between this check, Phase 2's incomplete-sibling
   rejection, and deterministic mid-publication fault-window testing.
 - Register only this self-contained scenario under `gpu` initially, with a shared
-  resource lock. Run it on actual Vulkan and CUDA hardware builds; no hosted-CI
-  software-renderer result substitutes for those runs.
-- Document exact per-backend commands, toolchain/device identity, fixture settings
+  resource lock. When deferred GPU validation resumes, run it on actual supported
+  non-NVIDIA Vulkan hardware; no hosted-CI software-renderer result substitutes.
+- Document the exact command, toolchain/device identity, fixture settings
   and retained failure evidence. Do not auto-download models or parity references.
 
 Acceptance: real direct training and scheduled resume succeed, cooperative stop

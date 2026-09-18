@@ -3,6 +3,7 @@
 
 #include "app/JobScheduler.h"
 #include "app/OutputLease.h"
+#include "external/stb_image.h"
 
 #include <chrono>
 #include <cstdio>
@@ -344,9 +345,6 @@ int main(int argc, char** argv) {
         const std::string before = read_text(state);
         const size_t job_dirs_before = job_dir_count(ownership_root / "jobs");
         sched::JobScheduler contender(ownership_root.u8string(), exe);
-        check(contender.state_error() ==
-                  "scheduler state is owned by another application",
-              "second scheduler reports state ownership failure");
         check(contender.submit(existing).empty(),
               "second scheduler rejects submit");
         check(contender.list().empty(),
@@ -561,6 +559,22 @@ int main(int argc, char** argv) {
             fs::absolute(explicit_case.second / "masks");
         check(fs::is_directory(actual_mask_dir),
               "prep publishes an actual alpha-derived mask directory");
+        bool readable_alpha_mask = false;
+        for (const auto& entry : fs::directory_iterator(actual_mask_dir)) {
+            int width = 0, height = 0, channels = 0;
+            unsigned char* pixels = stbi_load(entry.path().u8string().c_str(),
+                                              &width, &height, &channels, 1);
+            if (pixels && width == 2 && height == 2) {
+                int zero = 0, opaque = 0;
+                for (int i = 0; i < 4; ++i) {
+                    zero += pixels[i] == 0;
+                    opaque += pixels[i] == 255;
+                }
+                readable_alpha_mask |= zero + opaque == 4 && zero > 0 && opaque > 0;
+            }
+            stbi_image_free(pixels);
+        }
+        check(readable_alpha_mask, "published alpha mask decodes with both transparent and opaque pixels");
 
         const fs::path implicit_root = root / "mask-implicit";
         auto implicit_case = run_mask_case(

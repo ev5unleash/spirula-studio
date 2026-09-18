@@ -84,6 +84,9 @@ int main() {
         for (const char* name : {"nerfstudio", "text", "binary", "metashape"}) {
             DatasetParserConfig cfg;
             const auto full = parse_dataset((root / name).u8string(), cfg, "");
+            check(near(full.train_frame_scale, 0.25), "scale uses all six camera positions");
+            for (float coefficient : full.dist_coeffs)
+                check(near(coefficient, 0.0), "pinhole has no distortion");
             check(full.num_cameras == 6 && full.points.num() == 64, "canonical camera and seed counts");
             for (int i = 0; i < full.num_cameras; ++i) {
                 check(fs::path(full.image_filenames[i]).filename() == "view" + std::to_string(i) + ".png",
@@ -97,6 +100,8 @@ int main() {
                 check(near(full.points.xyz[i * 3], (i % 8 - 3.5) * 0.08) &&
                       near(full.points.xyz[i * 3 + 1], (i / 8 - 3.5) * 0.08) &&
                       near(full.points.xyz[i * 3 + 2], 2.0 + 0.03 * ((i % 8 + i / 8) % 3)), "seed coordinates");
+                check(full.points.rgb.at(i * 3) == 128 && full.points.rgb.at(i * 3 + 1) == 160 &&
+                      full.points.rgb.at(i * 3 + 2) == 192, "seed colors");
             }
             if (std::string(name) == "nerfstudio") reference = full;
             else {
@@ -112,6 +117,13 @@ int main() {
                 const auto train = parse_dataset((root / name).u8string(), cfg, "");
                 cfg.split = "eval";
                 const auto eval = parse_dataset((root / name).u8string(), cfg, "");
+                std::set<std::string> expected_train = std::string(split) == "interval"
+                    ? std::set<std::string>{"view1.png", "view2.png", "view4.png", "view5.png"}
+                    : std::set<std::string>{"view0.png", "view2.png", "view5.png"};
+                std::set<std::string> train_names;
+                for (const auto& image : train.image_filenames)
+                    train_names.insert(fs::path(image).filename().u8string());
+                check(train_names == expected_train, "configured split selects expected frames");
                 std::set<std::string> frames(train.image_filenames.begin(), train.image_filenames.end());
                 const auto train_size = frames.size();
                 frames.insert(eval.image_filenames.begin(), eval.image_filenames.end());

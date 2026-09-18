@@ -10,13 +10,31 @@ you write your first comment, not after the review.
 
 **Spirula Studio**, a 3D Gaussian Splatting trainer, formerly spirulae-splat.
 It began as a Nerfstudio/gsplat fork and is now a **standalone C++ codebase**:
-one executable, `spirula`, with two interchangeable compute backends (CUDA and
-Vulkan via Slang). There is no Python package, no pybind module and no PyTorch
-anywhere — the trainer, the dataset parsers, the viewer, resume, meshing and
-eval are all native. **Both backends must keep working** on every change.
+one executable, `spirula`, with Vulkan via Slang as the actively supported
+compute backend. Legacy CUDA code remains in the tree, but NVIDIA support is
+deprecated. There is no Python package, no pybind module and no PyTorch anywhere —
+the trainer, dataset parsers, viewer, resume, meshing and eval are all native.
 
 The repository directory keeps the old name (the GitHub Pages URL under
 `viewer/` depends on it); nothing else does.
+
+## Backend support policy
+
+**NVIDIA support is deprecated. Stop NVIDIA-specific implementation, debugging,
+testing, benchmarking, optimization and compatibility work.** This includes both
+the CUDA backend and Vulkan execution on NVIDIA hardware. Do not build CUDA, run
+NVIDIA validation, generate new CUDA reference dumps, or make NVIDIA/CUDA checks
+a completion requirement unless the user explicitly re-enables that work.
+
+Active development and GPU validation target **Vulkan on non-NVIDIA hardware**.
+CPU-only/headless checks remain in scope. An unavailable or failing supported GPU
+lane must be reported truthfully; do not substitute an NVIDIA run for acceptance.
+
+Keep existing legacy code unless its removal is explicitly requested. Shared
+source and codegen changes required by the active Vulkan path remain allowed;
+they do not require a parallel CUDA implementation or NVIDIA verification.
+This policy supersedes older two-backend and CUDA/NVIDIA validation requirements
+in other plans, skills and documentation.
 
 Direction of travel, so you don't push the wrong way:
 
@@ -166,8 +184,7 @@ src/
 Always use the dev scripts; they run codegen first and pick a sane job count.
 
 ```bash
-# Linux -- one tree per backend, so both can live in one checkout
-bash build_develop.bash -DSS_BACKEND=cuda     # -> build_cuda/
+# Linux
 bash build_develop.bash -DSS_BACKEND=vulkan   # -> build_vulkan/
 # Windows (cmd)
 build_develop.bat -DSS_BACKEND=vulkan         # -> build_vulkan\
@@ -185,9 +202,9 @@ reconstruction and that estimation by re-running itself as a child process, so
 there is no sibling binary to keep next to it. `-DSS_SEPARATE_TOOLS=ON` also builds the old
 per-tool executables.
 
-The dev scripts put each backend in its own tree -- `build_cuda/` or
-`build_vulkan/`, and `build/` on macOS, which has one backend -- so testing
-both needs no reconfiguring and no `-B`. Options:
+The active build tree is `build_vulkan/`, or `build/` on macOS. The legacy
+`build_cuda/` tree and `cuda` option remain available in the source but are not
+part of the supported agent workflow. Options:
 `SS_BACKEND` (`cuda`|`vulkan`), `SS_BUILD_GUI`,
 `SS_BUILD_BACKEND_TESTS`, `SS_DEBUG_SYMBOLS`,
 `SS_BUILD_SFM`, `SS_BUILD_SAM`, `SS_ENABLE_PATENTED`,
@@ -250,10 +267,8 @@ Rules:
 ## The Vulkan-only subsystems
 
 `src/sfm/`, `src/nn/`, `src/sam/`, `src/aliked/`, `src/loma/`,
-`src/metric3d/`, `src/moge/` and `src/video/` are **not** part of the
-two-backend rule below. They are Vulkan + Slang only, carry their own Vulkan
-context, share nothing with the training engine, and are absent from a CUDA
-build by default (`SS_BUILD_SFM` / `SS_BUILD_SAM` default OFF there).
+`src/metric3d/`, `src/moge/` and `src/video/` are Vulkan + Slang only, carry
+their own Vulkan context and share nothing with the training engine.
 Nothing in them goes through `cmake/sources.txt`.
 
 The layering runs one way and must keep doing so:
@@ -273,15 +288,16 @@ depth/geometry model, goes on top of it unchanged -- so model-specific
 constants, weights formats and pipeline policy stay in `sam/` (or the next
 `src/<model>/`), never in `nn/`.
 
-## The two-backend rule
+## The active-backend rule
 
-Every kernel-level change needs **three** things, or the Vulkan build breaks
-or silently diverges:
+Kernel-level changes must keep the active Vulkan implementation and launcher
+correct and include a relevant behavioral or numerical check on supported
+non-NVIDIA hardware. Use the existing shared Slang math and backend test patterns;
+do not add a duplicate implementation for test convenience.
 
-1. the CUDA implementation (`src/kernels/<family>/<Kernel>.cu` + `_kernel.cuh`),
-2. the Slang implementation (`cuda/slang/vulkan/*.slang`) and its launcher
-   (`src/backend/vulkan/kernels/*.cpp`),
-3. a parity test in `src/backend/tests/` that runs both and compares.
+A matching CUDA implementation, CUDA build, NVIDIA hardware run or fresh
+CUDA-vs-Vulkan reference comparison is **not required and must not be undertaken**
+under the deprecated NVIDIA support policy above.
 
 If the Vulkan side isn't ready, `tools/codegen/generate_vulkan_stubs.py` emits a throwing
 stub so the portable engine still links — that's a deliberate TODO marker, not
@@ -293,14 +309,16 @@ before touching anything under `backend/vulkan/`.
 ## Testing
 
 ```bash
-# native parity tests (CUDA build)
-bash build_develop.bash -DSS_BUILD_BACKEND_TESTS=ON && ./build_cuda/<test_name>
-# the Vulkan build produces the same test binaries unconditionally
+# Build the active backend and run the headless behavioral suite.
+bash build_develop.bash -DSS_BACKEND=vulkan
+cmake -E chdir build_vulkan ctest -L headless --output-on-failure --no-tests=error
 ```
 
 Each `src/backend/tests/*.cpp` becomes an executable of the same name.
-`backend/tests/engine/*` drive the real engine end to end. Details and the
-CUDA-vs-Vulkan reference-dump workflow: `docs/testing.md`.
+`backend/tests/engine/*` drive the real engine end to end. Use relevant
+Vulkan-only checks on supported non-NVIDIA hardware for GPU changes.
+`docs/testing.md` describes the runners and retained parity tooling; its legacy
+CUDA/NVIDIA instructions are superseded by the support policy above.
 
 ## Comments — write fewer, and shorter
 

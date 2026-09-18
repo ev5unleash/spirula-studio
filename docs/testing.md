@@ -1,9 +1,80 @@
 # Testing
 
-The native parity tests are the suite. The Python one this file used to
-describe is gone -- see §3 for what it covered and what now does not.
+Use CTest's `headless` label for the ordinary post-build feedback loop. GPU
+integration and native parity tests are separate gates; desktop rendering and
+input still require the real application.
 
-## 1. Native cross-backend parity tests (the important ones)
+**Support policy:** NVIDIA support is deprecated, including CUDA and Vulkan on
+NVIDIA GPUs. Do not run or extend those lanes unless explicitly re-enabled by
+the user. Active GPU checks use Vulkan on non-NVIDIA hardware; CPU-only checks
+remain supported. Historical cross-backend results below are reference material,
+not current acceptance requirements. See [AGENTS.md](../AGENTS.md).
+
+## Quick headless loop
+
+```bat
+build_develop.bat -DSS_BACKEND=vulkan
+cmake -E chdir build_vulkan ctest -L headless --output-on-failure --no-tests=error -j 2
+```
+
+On Linux use `bash build_develop.bash` with the same options; on macOS the
+build directory is `build`. Use `-L fast` for deterministic CPU checks,
+`-L worker` for subprocess/scheduler contracts, and `-R <name>` to focus.
+Keep `--no-tests=error`: an empty selection is not a successful check.
+Do not use bare `ctest` when intending to avoid GPU workloads.
+
+The normal GUI-enabled Vulkan build registers 19 headless tests. None opens a
+window or initializes a compute device. `-DSS_BUILD_GUI=OFF` runs 14 core tests;
+it omits the batch, preset, argv and two stamp tests. CUDA also omits
+`split_faces_test`, `frustum_size_test` and `bilagrid_selector_test` unless built
+with `-DSS_BUILD_BACKEND_TESTS=ON`. Configure output identifies these differences.
+Kernel parity and weight-dependent model tools are not automatically registered.
+
+`cmake/SsRunTest.cmake` allocates a unique root for every CTest invocation of a
+test, sets isolated temp/home/config/cache paths before launching it, and sets
+`SS_NO_AUTO_FETCH=1`. This wrapper also isolates older tests that use fixed names
+inside the system temp directory. Invoke those through CTest rather than assuming
+direct executable invocations are concurrent-safe. Worker drivers receive the
+target-resolved `spirula` path; no PATH lookup chooses another build.
+
+On failure, read `Testing/Temporary/LastTest.log` and the printed directory under
+`Testing/Artifacts/<test>-<unique-id>/`: it retains `process.log`, requests,
+results, isolated application state and relevant outputs. Successful roots are
+removed. CI runs the headless label on Windows, Linux and macOS and uploads its
+job-owned `Testing/` directory on failure. Fast/worker/GPU outer timeouts are
+60/300/600 seconds; subprocess drivers bound and reap their own children.
+
+## Real training lifecycle
+
+After building Vulkan, explicitly select a compatible non-NVIDIA device:
+
+```bat
+rem Prefer the non-NVIDIA device UUID printed by the device listing.
+set SS_TEST_DEVICE=uuid:YOUR_DEVICE_UUID
+cmake -E chdir build_vulkan ctest -L gpu --output-on-failure --no-tests=error
+```
+
+On POSIX prefix the CTest command with `SS_TEST_DEVICE=<selector>`. This
+test-only selector is required and passed explicitly to the production CLI:
+Vulkan accepts its normal selectors and canonicalizes to UUID.
+Missing/unusable hardware fails, never skips. The driver does not change user
+device preferences or download models.
+
+`cli_training_smoke` generates six 64×64 images and 64 seed points, trains
+12 steps with a 256-splat cap and full checkpoints every five steps, then resumes
+through the scheduler/worker to step 24. It validates checkpoint contents using
+the production readers and matches the request/result identity and output paths.
+Longer finite attempts synchronize on a readable checkpoint before cooperative
+stop or force-stop. The former must be resumable; the latter must be interrupted,
+not successful, and retain a valid checkpoint. `checkpoint_resolution_test`
+separately rejects incomplete newer siblings. Neither test claims a deterministic
+kill during the atomic publication window.
+
+The `training_gpu` CTest resource lock serializes this test within an invocation;
+it is not a system-wide reservation against another trainer. Run hardware lanes
+one at a time. No exact stochastic model bytes or loss trajectory are compared.
+
+## 1. Native numerical tests and historical cross-backend results
 
 `src/backend/tests/*.cpp` — currently 20 tools covering projection (fwd, bwd,
 quant-grad), rasterization bwd, tile intersect, warp, FPBO, optimizer (general
@@ -27,9 +98,10 @@ scalar per camera, and the no-GT sentinels passing through untouched).
 `backend/vulkan/tests/` adds 3 Vulkan-only smoke tests (runtime, pipeline,
 sort/scan).
 
-**The same source builds under both backends.** Each file only touches
-`backend::`, the generated launch declarations, and `Tensor.h`. The workflow
-is dump-then-compare:
+**Historical reference-generation workflow — not an active validation requirement.**
+The same source can still build under both backends, but CUDA/NVIDIA execution
+is deprecated. The following recipe documents existing reference provenance;
+do not run its CUDA step or regenerate NVIDIA references under the current policy.
 
 ```bash
 # on the CUDA machine
@@ -88,19 +160,17 @@ of guessing.
 ### Building them
 
 ```bash
-# CUDA branch: opt-in
-bash build_develop.bash -DSS_BACKEND=cuda -DSS_BUILD_BACKEND_TESTS=ON
-# Vulkan branch: built unconditionally
+# Active Vulkan tests are built unconditionally.
 bash build_develop.bash -DSS_BACKEND=vulkan
 ```
 
-Each `.cpp` becomes an executable of the same base name in that backend's
-build tree -- `build_cuda/` or `build_vulkan/` (`build/` on macOS).
+Each `.cpp` becomes an executable of the same base name in `build_vulkan/`
+(`build/` on macOS).
 
-### Cross-machine / cross-vendor runs
+### Historical cross-machine / cross-vendor runs
 
-The comparison target is often a different machine (e.g. an AMD GPU box), and
-often offline. The pattern that works:
+The following transfer procedure describes how existing CUDA references were
+produced. It is historical, not a request to run NVIDIA validation:
 
 1. Transfer a matching `slangc` to the target and point `-DSS_SLANGC=` at
    it — SPIR-V is compiled at build time and never committed, so the target
@@ -151,47 +221,69 @@ display (`DISPLAY=:0`).
 A scripted run that serves the viewer needs **`--keep-viewer-alive 0`**, or
 the process hangs at exit waiting on it.
 
-## 3. What is gone
+### Desktop smoke checklist
 
-The Python suite this document used to describe -- `tests/python/`, the
-dataparser and step-config goldens, the trainer and web-viewer gates -- was
-deleted with the Python trainer it compared against. There is nothing to run
-and nothing to regenerate.
+Use a newly created scratch directory with isolated `APPDATA`/`LOCALAPPDATA`
+(Windows) or `HOME`/`XDG_CONFIG_HOME`/`XDG_CACHE_HOME` (POSIX), and disable
+unattended fetching. Do not point the smoke at the user's queue or private data.
+Use the generated six-view scene from a retained integration fixture.
 
-Its job has not gone away, though, and nothing covers it today:
+1. **D1 — graphics lifecycle:** launch the exact built `spirula` with the dataset
+   directory as its argument. Observe a rendered frame with six camera frustums
+   and the seed points. Close normally and verify exit code zero.
+2. **D2 — actual input and scheduling:** through the real Batch form, choose that
+   dataset, a short training configuration, explicit job GPU and scratch output.
+   Submit; observe queue state and appended bottom-pane logs. Cancel an active
+   attempt, verify its truthful stopped/interrupted state and no remaining child,
+   then close normally. A first-frame screenshot does not satisfy this step.
+3. Device-control changes additionally need a preview on A while a queued job
+   targets B, with actual preview continuity—not merely the target label.
 
-- **The dataset parsers** had a golden over 4 formats x 4 config variants x 2
-  splits, checking the frame set, poses, intrinsics, distortion, seed cloud
-  and train-frame scalars. A native replacement would generate its fixtures
-  from a fixed seed, as that one did, so it needs no dataset on the machine.
-  Two of its checks needed no golden at all and are worth rebuilding first:
-  the train and eval splits must partition the frames (a bug dropping frames
-  from *both* sides leaves each side self-consistent), and every fixture
-  format must describe the same scene.
-- **`build_step_config()`** had a golden over 8 config variants x 4 run states
-  x 20 steps straddling every warmup and decay boundary. Drift in a ported LR
-  schedule used to fail there; now it shows up as a quality regression 20k
-  steps into a run.
+Capture the visible transition and process/state evidence. Canvas input that the
+automation tool reports as delivered but that produces no visible change is not
+successful interaction. Web-viewer CDP checks do not replace these desktop gates,
+and the older scheduling/handoff acceptance backlog remains separate.
 
-Both are `src/backend/tests/`-shaped work: deterministic input, committed
-expectation, one executable. Neither exists yet.
+## 3. Deterministic application contracts
+
+`dataset_parser_test` generates equivalent COLMAP text/binary, Nerfstudio and
+Metashape scenes and checks canonical frame ordering, camera poses, intrinsics,
+pinhole distortion, seed coordinates and train-frame scaling. Interval and
+fraction train/eval splits must be disjoint and cover the complete source set;
+both retain the same normalization. This is native coverage, not a replacement
+for every historical lens/configuration golden.
+
+`step_config_test` calls the shared training implementation around regularization,
+supervision, median and distortion warmups, LR endpoints and an absolute resumed
+midpoint. It also checks non-unit scene scaling and scale-agnostic mean updates.
+
+`batch_process_test` checks preset/override resolution, frozen queued options,
+independent foreground reservations, preflight errors and cancellation.
+`scheduler_result_test` uses a test-only child executable to inject wrong
+identities, malformed results and missing outputs; none may advance the workflow.
+Real worker preparation remains covered by `scheduler_test`, while
+`cli_training_smoke` covers real training. The protocol fixture is not a fake
+successful compute workload. Rapid scheduler shutdown/pause cycles guard the
+condition-variable lost-wake regression found by concurrent headless runs.
 
 ## What to run before calling a change done
 
 | change | gate |
 |---|---|
-| any kernel | CUDA build + Vulkan build + the relevant parity test on both |
-| engine logic | both builds + `engine_render_parity` + `engine_train_step`-level check |
+| any kernel | Vulkan build + relevant behavioral/numerical check on supported non-NVIDIA hardware |
+| engine logic | Vulkan build + relevant real-engine workload on supported non-NVIDIA hardware |
 | config field | add the row in `src/config/TrainConfig.h`; check `spirula train --help` and the GUI's All Options editor |
-| training-loop logic | `TrainerCore.cpp` — `build_step_config()` is the only place it lives |
-| build system | every mode in [build.md](build.md) |
+| training-loop logic | `step_config_test`, then `cli_training_smoke` on supported non-NVIDIA Vulkan hardware |
+| build system | affected supported Vulkan modes in [build.md](build.md) |
 | a comment you wrote | `python3 tools/check_comment_length.py` — the build runs it anyway ([lints](build.md#lints)) |
-| `SS_FILE` or `SS_SOURCE_ROOT` | `source_path` on each toolchain — MSVC, GCC and nvcc spell `__FILE__` differently |
+| `SS_FILE` or `SS_SOURCE_ROOT` | `source_path` on each supported host toolchain |
 | a mesh format, or which colors it carries | `mesh_format_roundtrip` — writes every format and reads it back through the other implementation |
-| a preset field, or a batch row's shape | `preset_roundtrip_test` |
+| a preset field, or a batch row's shape | `preset_roundtrip_test` + `batch_process_test`; actual form wiring also needs D2 |
 | what a typed-in command line becomes, or what a message may carry into it | `command_argv_test` — the message stays one argument and stays JSON-safe |
 | a per-cell optimizer launcher (Vulkan) | `SS_OPTIM_SLICE_CELLS=2048` on `optim_parity` / `optimgeo_parity`, which forces the multi-slice path only an SH buffer past ~24M splats would otherwise take ([SH layouts](notes/sh-quant-layout.md)) |
-| anything | one short training run per backend on a public scene |
+| scheduler / worker protocol | `ctest -L worker`; supported Vulkan train lifecycle when affected |
+| desktop rendering or input | D1 + the affected D2 interaction, on a real display |
+| ordinary host-only change | focused headless behavior test, then the headless label |
 
 ## Profiling
 
