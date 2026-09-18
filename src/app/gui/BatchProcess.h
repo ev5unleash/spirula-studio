@@ -96,6 +96,7 @@ struct BatchRow {
     bool enabled = true;      // kept on the list, left out of this run
     std::string device;
     std::vector<std::string> scheduler_ids;
+    bool scheduler_active = false;
 
     // From the last batch_check_row(); empty until one has run.
     std::vector<BatchIssue> issues;

@@ -1,4 +1,5 @@
 #include "app/gui/BatchProcess.h"
+#include "app/AppPaths.h"
 #include "app/JobScheduler.h"
 #include "app/gui/TrainPreset.h"
 #include "i18n/catalog/Gui.h"
@@ -31,6 +32,15 @@ int main(int argc, char** argv) {
         row.runs[0].iterations = "17";
         row.runs[0].cap_max = "1024";
         row.runs[0].sh_degree = "0";
+        row.scheduler_ids = {"job-first", "job-second"};
+        row.scheduler_active = true;
+        fs::create_directories(fs::u8path(app::config_dir()));
+        gui::save_batch_list({row});
+        const auto persisted = gui::load_batch_list();
+        check(persisted.size() == 1 &&
+                  persisted[0].scheduler_ids == row.scheduler_ids &&
+                  persisted[0].scheduler_active,
+              "active scheduler ownership survives batch reload");
         gui::TrainPreset saved;
         saved.cfg.num_iterations = 40;
         saved.cfg.means_lr = 0.004f;

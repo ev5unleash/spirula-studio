@@ -242,6 +242,8 @@ GuiApp::GuiApp()
             return validate_scheduled_device(device, error);
         });
     _scheduler.load();
+    for (const BatchRow& row : _batch)
+        _batch_active = _batch_active || row.scheduler_active;
     for (const app::sched::Job& job : _scheduler.list()) {
         if (job.options_payload == "gui:native-dataset:v1" &&
             job.state == app::sched::JobState::Queued) {
@@ -1316,7 +1318,8 @@ void GuiApp::advance_scheduler_jobs() {
         for (const std::string& id : row.scheduler_ids) {
             const app::sched::Job* job = scheduler_job(id);
             if (!job) continue;
-            live = live || job->state == app::sched::JobState::Queued ||
+            live = live || job->pending_resume ||
+                   job->state == app::sched::JobState::Queued ||
                    job->state == app::sched::JobState::Starting ||
                    job->state == app::sched::JobState::Running ||
                    job->state == app::sched::JobState::Stopping;
@@ -1462,7 +1465,10 @@ void GuiApp::start_batch(bool skip_invalid) {
         return;
     }
 
-    for (BatchRow& row : _batch) row.scheduler_ids.clear();
+    for (BatchRow& row : _batch) {
+        row.scheduler_ids.clear();
+        row.scheduler_active = false;
+    }
 
     std::error_code ec;
     const std::string work_dir = fs::current_path(ec).u8string();
@@ -1634,6 +1640,7 @@ void GuiApp::start_batch(bool skip_invalid) {
                 continue;
             }
             row.scheduler_ids.push_back(id);
+            row.scheduler_active = true;
             submitted++;
             continue;
         }
@@ -1660,6 +1667,7 @@ void GuiApp::start_batch(bool skip_invalid) {
                 continue;
             }
             row.scheduler_ids.push_back(id);
+            row.scheduler_active = true;
             submitted++;
         }
     }
@@ -1704,13 +1712,24 @@ void GuiApp::finish_batch() {
                                (long long)other});
     _batch_msg_err = failed > 0;
     log(_batch_msg);
-    if (_batch_dirty) {
-        _batch_dirty = false;
-        save_batch_list(_batch);
-    }
+    for (BatchRow& row : _batch) row.scheduler_active = false;
+    _batch_dirty = false;
+    save_batch_list(_batch);
     run_batch_command(i18n::format(msg::batch_cmd_message,
                                    {(long long)done, (long long)failed,
                                     (long long)other}));
+}
+
+void GuiApp::resume_batch_job(const std::string& job_id) {
+    for (BatchRow& row : _batch) {
+        if (std::find(row.scheduler_ids.begin(), row.scheduler_ids.end(),
+                      job_id) == row.scheduler_ids.end())
+            continue;
+        row.scheduler_active = true;
+        _batch_active = true;
+        save_batch_list(_batch);
+        return;
+    }
 }
 
 // The whole point of an unattended queue is not watching it, so the one thing
@@ -6998,6 +7017,7 @@ void GuiApp::draw_scheduler_queue() {
             if (ui::Button(msg::scheduler_retry)) {
                 _recovery_dismissed.erase(job.job_id);
                 _scheduler.retry(job.job_id);
+                resume_batch_job(job.job_id);
             }
         }
         ImGui::PopID();
@@ -7036,6 +7056,7 @@ void GuiApp::draw_scheduler_recovery_modal() {
         if (ui::Button(msg::scheduler_recovery_retry)) {
             _recovery_dismissed.erase(job.job_id);
             _scheduler.retry(job.job_id);
+            resume_batch_job(job.job_id);
             if (job.options_payload == "gui:native-dataset:v1") {
                 _scheduled_dataset_id = job.job_id;
                 reset_dataset_preview(false);

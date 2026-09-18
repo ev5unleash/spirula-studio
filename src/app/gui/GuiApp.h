@@ -249,6 +249,7 @@ private:
 
     void finish_batch();
     void cancel_batch(bool save);
+    void resume_batch_job(const std::string& job_id);
     // Refresh scheduler-backed batch and dataset rows from the UI-thread
     // snapshot, including a completed native dataset handoff.
     void advance_scheduler_jobs();

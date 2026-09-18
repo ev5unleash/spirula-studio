@@ -694,6 +694,12 @@ BatchRow read_row(const JsonValue& j) {
     if (const JsonValue* v = j.find("model")) r.model = v->as_string();
     if (const JsonValue* v = j.find("output_dir")) r.output_dir = v->as_string();
     if (const JsonValue* v = j.find("device")) r.device = v->as_string();
+    if (const JsonValue* v = j.find("scheduler_ids"); v && v->is_array())
+        for (const JsonValue& e : v->arr)
+            if (!e.as_string().empty())
+                r.scheduler_ids.push_back(e.as_string());
+    if (const JsonValue* v = j.find("scheduler_active"))
+        r.scheduler_active = v->as_bool();
     r.dataset_preset = read_preset(j.find("dataset_preset"));
     if (r.dataset_preset.path.empty() && r.dataset_preset.name.empty())
         r.dataset_preset.name = "general";
@@ -787,6 +793,10 @@ void save_batch_list(const std::vector<BatchRow>& rows) {
         w.field("model", r.model);
         w.field("output_dir", r.output_dir);
         w.field("device", r.device);
+        w.key("scheduler_ids").array();
+        for (const std::string& id : r.scheduler_ids) w.value(id);
+        w.end();
+        w.field("scheduler_active", r.scheduler_active);
         write_preset(w, "dataset_preset", r.dataset_preset);
         w.key("mesh").object();
         write_preset(w, "preset", r.mesh.preset);
