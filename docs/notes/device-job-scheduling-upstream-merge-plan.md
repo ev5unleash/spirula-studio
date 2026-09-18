@@ -4,6 +4,45 @@
 the source of truth for continuation. The external legacy plan and handoff are
 historical evidence, not commands to rerun.
 
+## Cross-machine handoff
+
+The user explicitly authorized a one-time push to the fork so work can continue
+elsewhere, and approved a separate sanitized continuation branch:
+
+- Remote: `origin`, `https://github.com/ev5unleash/spirula-studio.git`.
+- Branch: `continue/device-job-scheduling-headless`.
+- This is a work-in-progress checkpoint, not full GPU/UI acceptance or a PR.
+- The original integration branch remains intact locally and must not be pushed:
+  its generated `batch-fixture` history contains machine-local paths.
+
+The sanitized copy removes only the five generated fixture paths from the
+unpublished history. Every copied commit's remaining tree, author/message, and
+parent relationships were checked; the current `AGENTS.md` blob is unchanged.
+The separate handoff-note commit changes only this document.
+
+| Historical local commit | Sanitized continuation commit |
+|---|---|
+| Merge `4847da4e5831012fa6b3fefe533806e31632408d` | `4f1587241eaa579ba2189f4552d1bbfd690e9e31` |
+| Headless work `6f5ce221af358710a2356a768248139bdf35d160` | `9d03b0fb5a26f7858a9d0d21f772ed70c259de0b` |
+| Plan draft `9fd3bc692625cc87373621fa5be18c44b3ac0561` | `354e5fc5b1cb6adb97d1832ec621195c5a503b57` |
+| Policy/reconciliation `b5dda1f13ffc5951fdfb246a6f885a2f8a9a87c9` | `fdb38c8735d825e4d5d9d4a39eb8d68deef501b3` |
+
+The merge still has parents `9fc6dde5` and selected upstream `d579cf8c`.
+Older OIDs and branch names below describe the preserved local history; use the
+continuation branch and mapped commits on another machine. No force-push,
+upstream push, or PR is authorized; future publication remains opt-in.
+
+In an existing checkout of the fork, create the local tracking branch with:
+
+```bash
+git fetch origin
+git switch --track origin/continue/device-job-scheduling-headless
+```
+
+Ignored build outputs, GPU diagnostic archives, model weights, and external
+temporary handoffs are not included. The committed plans preserve the observed
+results and reproduction instructions; all deferred validation remains open.
+
 ## 1. Precedence and non-negotiable contracts
 
 This plan supersedes old instructions to restart a pending merge, require all
@@ -67,7 +106,7 @@ prerequisite or paused investigation prevents proof; **historical** means old
 candidate evidence; **diagnostic** means useful but excluded from acceptance.
 Blocked and deferred are not passed.
 
-## 2. Reconciled snapshot (not remote-live)
+## 2. Reconciliation baseline before the fork handoff
 
 No fetch or live remote verification was performed during reconciliation. The
 verified record was:
@@ -92,14 +131,11 @@ the existing merge. Local feature, cached origin feature, and backup refs point
 at `2850f729d1da98e8fb90449d54f9f6d5bee8aebd`; cached upstream points at
 `d579cf8c755f475d43eebaf7e2f0874eb633e595`.
 
-The parent relationship is structurally valid but is not an ownership approval.
-The first parent includes formerly protected user-owned ValidationSkill work,
-and `.clangd` is now tracked user-owned tooling configuration. Treat both as
-preserved additions outside the original merge baseline. Do not infer owner
-intent merely because they are committed. Before local feature promotion, obtain
-recorded explicit approval to include both paths, or use a separately approved
-corrective follow-up commit; never rewrite, drop, reset, or silently relocate
-them.
+The first parent includes the formerly protected ValidationSkill work, and
+`.clangd` is tracked tooling configuration. The user's explicit request to push
+all work authorizes retaining both in this fork handoff. Neither was removed
+with the generated fixture data. This does not promote the original feature
+branch or imply completion of its runtime acceptance.
 
 After this document lands, capture the actual continuation candidate anew:
 branch, full status, stash list, current `HEAD`, merge state, and relevant ref
@@ -417,16 +453,13 @@ controls. Do not add production automation solely to bypass input failure.
 
 ## 8. Ownership and hygiene
 
-The historical ValidationSkill dirty file is represented by the preserved
-`9fc6dde5` parent, and `.clangd` is tracked user-owned tooling configuration
-(`CompilationDatabase: build_vulkan`). Neither is missing WIP or disposable
-fixture output; `.clangd` is separate from the five generated batch-fixture
-files below and must never be lumped into their cleanup. Preserve both and
-require explicit inclusion approval (or a separately approved corrective
-follow-up) before local feature promotion; a commit does not imply owner consent.
+The preserved ValidationSkill commit and `.clangd` tooling configuration
+(`CompilationDatabase: build_vulkan`) are included in the explicitly authorized
+fork handoff. They are not disposable fixture output; never lump them into
+generated-data cleanup.
 
-Five tracked runtime outputs from the old direct test were committed in
-`4847da4e`:
+These five generated paths were present in original local commit `4847da4e`
+and have been removed from every unpublished commit in the sanitized copy:
 
 - `batch-fixture/dataset/transforms.json`
 - `batch-fixture/queue/job-state.json`
@@ -434,12 +467,11 @@ Five tracked runtime outputs from the old direct test were committed in
 - `batch-fixture/output/job-510e09a34d01cc7a/.spirula-output.lock`
 - `batch-fixture/queue/jobs/job-510e09a34d01cc7a/.spirula-output.lock`
 
-Before declaring the local candidate complete, confirm no live owner, preserve
-useful evidence, and remove only these generated outputs in a normal follow-up
-commit. Inspect the resulting index/combined diff to prove tooling and unrelated
-user work remain intact.
-This plan removes nothing; this is tracked-source hygiene, not untracked cleanup.
-Never use `git clean` or broad `git add`.
+The original branch and files remain intact locally. Removing these files only
+from a later tip would still publish their private paths in ancestor commits,
+which is why the user approved the sanitized copy. Tree-by-tree comparison
+verified that no other source or tooling content was removed. Never push the
+unsanitized branch, use `git clean`, or include its refs through a broad push.
 
 Before future writing waves, record branch/status/stashes. Main owns dirty paths
 and shared integration; isolated lanes are disjoint and begin from a clean
@@ -449,14 +481,14 @@ the lost-wake fix are current.
 
 ## 9. Next runnable work and local acceptance
 
-This task changes documentation only; it does not authorize source fixes,
-feature publication, GPU debugging, or desktop interaction. When work resumes:
+The fork checkpoint does not reopen deferred GPU/desktop debugging or certify
+complete integration. When implementation work resumes:
 
 1. Capture actual post-document branch/status/stashes, `HEAD`, merge state, and
    refs; do not replay equal-tip/start-merge commands or abort the committed
    candidate.
-2. Review candidate/source/acceptance and obtain explicit disposition for
-   ValidationSkill and `.clangd`; inventory the five tracked runtime outputs.
+2. Review the current candidate and acceptance ledger. The five generated paths
+   are already excluded; ValidationSkill and `.clangd` are retained intentionally.
 3. Use the existing headless command for the ordinary review loop. For subsequent
    behavior changes, select the affected `-R` or `-L worker`/`fast` check, then
    run the integrated `headless` gate once. Close reachable host-side gaps,
