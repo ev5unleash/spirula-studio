@@ -395,6 +395,7 @@ ResolvedCheckpoint resolve_checkpoint(const fs::path& path) {
         return {path.parent_path(), path};
 
     std::vector<fs::path> ckpts;
+    fs::path run_dir = path;
     if (fs::is_directory(path)) {
         for (const auto& e : fs::directory_iterator(path)) {
             const std::string b = e.path().filename().string();
@@ -402,12 +403,27 @@ ResolvedCheckpoint resolve_checkpoint(const fs::path& path) {
                 b.compare(b.size() - 5, 5, ".ckpt") == 0)
                 ckpts.push_back(e.path());
         }
+    } else if (!fs::exists(path) && name.rfind("step-", 0) == 0 &&
+               name.size() > 5 &&
+               name.compare(name.size() - 5, 5, ".ckpt") == 0) {
+        run_dir = path.parent_path();
+        if (run_dir.empty()) run_dir = ".";
+        const std::string prefix =
+            name.substr(0, name.size() - 5) + "-replaced-";
+        if (fs::is_directory(run_dir)) {
+            for (const auto& e : fs::directory_iterator(run_dir)) {
+                const std::string b = e.path().filename().string();
+                if (b.rfind(prefix, 0) == 0 && b.size() > 5 &&
+                    b.compare(b.size() - 5, 5, ".ckpt") == 0)
+                    ckpts.push_back(e.path());
+            }
+        }
     }
     std::sort(ckpts.begin(), ckpts.end());
     while (!ckpts.empty()) {
         const fs::path c = ckpts.back();
         ckpts.pop_back();
-        if (valid_checkpoint(c, true)) return {path, c};
+        if (valid_checkpoint(c, true)) return {run_dir, c};
     }
     throw std::runtime_error("no valid state.tar or step-*.ckpt found under " +
                              path.string());

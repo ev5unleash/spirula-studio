@@ -1050,82 +1050,64 @@ void TrainerSession::save_checkpoint(int step) {
         json_parse_file(config.string());
     };
 
-    bool published = false;
-    if (fs::exists(ckpt)) {
-        try {
-            validate(ckpt);
-            published = true;
-        } catch (...) {
-        }
-    }
-
     fs::path staging;
-    if (!published) {
-        std::random_device random;
-        for (int attempt = 0; attempt < 16; ++attempt) {
-            const uint64_t nonce =
-                (uint64_t)std::chrono::high_resolution_clock::now()
-                    .time_since_epoch().count() ^
-                ((uint64_t)random() << 32) ^ random();
-            const fs::path candidate =
-                out_dir / (".staging-" + std::string(name) + "-" +
-                           std::to_string(nonce));
-            std::error_code ec;
-            if (fs::create_directory(candidate, ec)) {
-                staging = candidate;
-                break;
-            }
-            if (ec)
-                throw std::runtime_error(
-                    "cannot create checkpoint staging directory: " + ec.message());
+    uint64_t staging_nonce = 0;
+    std::random_device random;
+    for (int attempt = 0; attempt < 16; ++attempt) {
+        const uint64_t nonce =
+            (uint64_t)std::chrono::high_resolution_clock::now()
+                .time_since_epoch().count() ^
+            ((uint64_t)random() << 32) ^ random();
+        const fs::path candidate =
+            out_dir / (".staging-" + std::string(name) + "-" +
+                       std::to_string(nonce));
+        std::error_code ec;
+        if (fs::create_directory(candidate, ec)) {
+            staging = candidate;
+            staging_nonce = nonce;
+            break;
         }
-        if (staging.empty())
-            throw std::runtime_error("cannot allocate checkpoint staging directory");
+        if (ec)
+            throw std::runtime_error(
+                "cannot create checkpoint staging directory: " + ec.message());
+    }
+    if (staging.empty())
+        throw std::runtime_error("cannot allocate checkpoint staging directory");
 
-        try {
-            const OptimConfig checkpoint_optim =
-                build_step_config(cfg, st, step).optim;
-            engine_save_checkpoint(staging.string(), cfg.save_full_checkpoint,
-                                   step, &checkpoint_optim);
-            save_config_json(cfg, staging, preset);
-            validate(staging);
+    try {
+        const OptimConfig checkpoint_optim =
+            build_step_config(cfg, st, step).optim;
+        engine_save_checkpoint(staging.string(), cfg.save_full_checkpoint,
+                               step, &checkpoint_optim);
+        save_config_json(cfg, staging, preset);
+        validate(staging);
 
-            bool destination_valid = false;
-            if (fs::exists(ckpt)) {
-                try {
-                    validate(ckpt);
-                    destination_valid = true;
-                } catch (...) {
-                }
-            }
-            if (destination_valid) {
-                remove_tree(staging);
-            } else if (fs::exists(ckpt)) {
-                const fs::path backup =
-                    out_dir / (".replaced-" + staging.filename().string());
-                fs::rename(ckpt, backup);
-                try {
-                    fs::rename(staging, ckpt);
-                } catch (...) {
-                    std::error_code restore_error;
-                    fs::rename(backup, ckpt, restore_error);
-                    if (restore_error)
-                        throw std::runtime_error(
-                            "checkpoint publication failed; previous directory retained at " +
-                            backup.string());
-                    throw;
-                }
-                std::error_code ignored;
-                fs::remove_all(backup, ignored);
-            } else {
+        if (fs::exists(ckpt)) {
+            const std::string checkpoint_name(name);
+            const fs::path backup = out_dir /
+                (checkpoint_name.substr(0, checkpoint_name.size() - 5) +
+                 "-replaced-" + std::to_string(staging_nonce) + ".ckpt");
+            fs::rename(ckpt, backup);
+            try {
                 fs::rename(staging, ckpt);
+            } catch (...) {
+                std::error_code restore_error;
+                fs::rename(backup, ckpt, restore_error);
+                if (restore_error)
+                    throw std::runtime_error(
+                        "checkpoint publication failed; previous directory retained at " +
+                        backup.string());
+                throw;
             }
-            published = true;
-        } catch (...) {
             std::error_code ignored;
-            fs::remove_all(staging, ignored);
-            throw;
+            fs::remove_all(backup, ignored);
+        } else {
+            fs::rename(staging, ckpt);
         }
+    } catch (...) {
+        std::error_code ignored;
+        fs::remove_all(staging, ignored);
+        throw;
     }
 
     if (cfg.save_only_latest_checkpoint) {

@@ -536,9 +536,25 @@ int main() {
           "rejects an explicitly selected unpublished staging directory");
 
     const fs::path second = root / "step-000002000.ckpt";
+
+    const fs::path replaced =
+        root / "step-000002000-replaced-42.ckpt";
+    write_checkpoint(replaced, 2000);
+    check(ckpt::resolve_checkpoint(root).ckpt_dir == replaced,
+          "retains the previous checkpoint during replacement");
+    check(ckpt::resolve_checkpoint(second).ckpt_dir == replaced,
+          "recovers a pinned checkpoint during replacement");
+    const fs::path previous_dir = fs::current_path();
+    fs::current_path(root);
+    const ckpt::ResolvedCheckpoint relative_recovered =
+        ckpt::resolve_checkpoint(second.filename());
+    fs::current_path(previous_dir);
+    check(relative_recovered.ckpt_dir.filename() == replaced.filename(),
+          "recovers a relative pinned checkpoint during replacement");
+
     write_checkpoint(second, 2000);
     check(ckpt::resolve_checkpoint(root).ckpt_dir == second,
-          "selects the latest valid checkpoint");
+          "prefers the published checkpoint over its replacement backup");
     std::ofstream(root / "config.json") << "{\"cap_max\":2}";
     std::ofstream(second / "config.json") << "{\"cap_max\":1,\"sh_degree\":0}";
     TrainConfig cli;
