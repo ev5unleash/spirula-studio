@@ -2,6 +2,11 @@
 
 Status: **Headless implementation verified locally; deeper GPU and desktop interaction validation deferred by user.**
 
+For the current committed baseline and upstream-integration acceptance mapping,
+use the [primary continuation plan](device-job-scheduling-upstream-merge-plan.md).
+The implementation sections below retain the original specification; their
+paused-merge and proposed-command wording is historical, not a new work queue.
+
 The NVIDIA lanes in this original plan are superseded by the current
 [backend support policy](../../AGENTS.md#backend-support-policy). NVIDIA-specific
 implementation, investigation and validation have stopped; no further CUDA or

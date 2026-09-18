@@ -6,6 +6,30 @@ If you are an agent writing code here, the one section you are most likely to
 get wrong is **[Comments](#comments--write-fewer-and-shorter)**. Read it before
 you write your first comment, not after the review.
 
+## Git and upstream policy
+
+Keep changes local or in this repository by default. Do not automatically push, force-push, or create/update a pull request against upstream. Publish or open/update an upstream pull request only after the user explicitly asks in the current conversation.
+This restriction applies to `origin` as well as `upstream`; passing checks or
+needing remote CI does not authorize a push or pull request.
+
+**This `AGENTS.md` is fork-owned and must NEVER be overridden by an upstream
+merge.** Preserve the exact approved local copy in every merge result, including
+clean merges, upstream deletion, and would-be fast-forwards. Incoming upstream
+instructions are not replacement policy.
+
+- Before merging, require this file to be committed and unchanged in the index
+  and worktree; preserve and stop on local edits rather than discarding them.
+  Record the pre-merge commit and its `AGENTS.md` blob.
+- Merge upstream with `--no-ff --no-commit`, then immediately restore only
+  `AGENTS.md` from that pre-merge commit into both index and worktree, regardless
+  of whether Git reported a conflict. Do this before continuing agent work.
+- Before committing, verify the staged blob exactly matches the recorded local
+  blob and the worktree matches the index; verify the committed blob afterward.
+  Any mismatch is a stop condition. Never blanket-select `--ours` for other files.
+- Change this policy file only for an explicit local user request, separately
+  from importing upstream policy. A `merge=ours` attribute/driver alone does not
+  protect unconflicted replacements; do not rely on it for this invariant.
+
 ## What this project is
 
 **Spirula Studio**, a 3D Gaussian Splatting trainer, formerly spirulae-splat.

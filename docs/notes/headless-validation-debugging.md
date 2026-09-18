@@ -27,6 +27,11 @@ those lanes when resuming this work.
 See [the implementation plan](headless-testing-plan.md) and
 [testing instructions](../testing.md) for the implemented checks and their scope.
 
+Continue upstream integration from the
+[reconciled primary plan](device-job-scheduling-upstream-merge-plan.md).
+It credits the completed programmatic checks without reopening or passing the
+GPU and desktop investigations deferred here.
+
 ## Local evidence inventory
 
 These artifacts are local, ignored build output, not committed fixtures. Preserve
