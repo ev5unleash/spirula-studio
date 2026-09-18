@@ -1,24 +1,9 @@
-// ENGINE-level end-to-end TRAINING parity: drives the fused train-step
-// entrypoints an app uses — engine_train_step (plain pinhole batches with
-// byte GT: u8 rgb + u16 depth + u8 normal + u8 mask, exercising the raw
-// byte->float conversion kernels inside set_training_data) and
-// engine_train_step_warped (fisheye and equirectangular inputs split to
-// pinhole faces, exercising the fused byte->float GT warp kernels) — each
-// running the full forward + multi-scale loss/backward + Adam pipeline.
-// The SAME source builds under both backends:
-//
-//   CUDA build:   ./engine_train_parity dump ref.bin
-//   Vulkan build: ./engine_train_parity compare ref.bin   (per device)
-//
-// Ref format: [nt tight floats] [nl loose floats].
-//
-// Tight: the engine's GT buffers after the last (equirectangular) warped
-// upload — deterministic per-pixel warp output read straight from
-// engine().gt (isolated boundary-flip pixels only). Loose: the per-step
-// loss maps returned by the train steps (atomic accumulation order, and
-// one-iteration-behind on both backends) and the splat parameters after
-// all optimizer steps (fed by atomically accumulated gradients).
-// Densification is disabled so the splat count stays fixed.
+// Engine-level training numerical and cross-backend parity tool.
+// It drives plain and warped production train steps through the full forward,
+// loss, backward, and Adam pipeline. `check` runs independent finite-loss
+// invariants; `dump` and `compare` use [nt tight floats] [nl loose floats].
+// Deterministic GT warp outputs are tight; atomic losses and splat updates are
+// loose. Densification stays disabled so the splat count remains fixed.
 
 #include <backend/tests/DistortionFixture.h>
 #include <engine/Engine.h>
@@ -40,6 +25,7 @@ static constexpr int64_t N = 3000;
 static constexpr int NUM_SH = 15;  // degree 3 buffer
 
 static std::vector<float> g_tight, g_loose;
+static bool g_bad_loss = false;
 
 TorchTensorView ttv(const void* p, uint32_t elem,
                     std::vector<int64_t> shape) {
@@ -76,7 +62,13 @@ static void readback_dev_f(std::vector<float>& acc, const void* d,
 }
 
 static void push_losses(const std::map<std::string, float>& m) {
-    for (const auto& kv : m) g_loose.push_back(kv.second);
+    const auto rgb = m.find("rgb_loss");
+    g_bad_loss =
+        g_bad_loss || rgb == m.end() || !std::isfinite(rgb->second);
+    for (const auto& kv : m) {
+        g_bad_loss = g_bad_loss || !std::isfinite(kv.second);
+        g_loose.push_back(kv.second);
+    }
 }
 
 // [K, 3, 3] unit face frames (see warp_parity.cpp).
@@ -105,12 +97,16 @@ static std::vector<float> make_axes(int K) {
 }
 
 int main(int argc, char** argv) {
-    if (argc != 3 ||
-        (std::strcmp(argv[1], "dump") && std::strcmp(argv[1], "compare"))) {
-        std::fprintf(stderr, "usage: %s dump|compare <ref.bin>\n", argv[0]);
+    const bool checking = argc == 2 && std::strcmp(argv[1], "check") == 0;
+    if (!checking &&
+        (argc != 3 ||
+         (std::strcmp(argv[1], "dump") && std::strcmp(argv[1], "compare")))) {
+        std::fprintf(stderr,
+                     "usage: %s check | dump <ref.bin> | compare <ref.bin>\n",
+                     argv[0]);
         return 2;
     }
-    const bool dumping = std::strcmp(argv[1], "dump") == 0;
+    const bool dumping = !checking && std::strcmp(argv[1], "dump") == 0;
 
     // Kernel parity, not binning policy: pin the granularity so a reference
     // stays comparable across runs that would otherwise adapt it.
@@ -358,6 +354,14 @@ int main(int argc, char** argv) {
                 ttv(dist.data(), 4, {C, kCameraDistortionParams}),
                 ttv(gt_rgb.data(), 1, {C, H, W, 3}), ttv_null(), ttv_null(),
                 ttv_null(), ttv_null(), bg_cfg);
+            const auto rgb = losses.find("rgb_loss");
+            if (rgb == losses.end() || !std::isfinite(rgb->second)) {
+                std::fprintf(stderr,
+                             "missing or non-finite background rgb_loss in "
+                             "mode %d\n",
+                             mode);
+                return 1;
+            }
             for (const auto& kv : losses) {
                 if (!std::isfinite(kv.second)) {
                     std::fprintf(stderr, "non-finite background loss in mode %d\n",
@@ -374,6 +378,15 @@ int main(int argc, char** argv) {
         }
         std::printf("engine_train_parity: all background training modes passed\n");
     }
+    if (checking) {
+        if (g_bad_loss) {
+            std::fputs("missing or non-finite training loss\n", stderr);
+            return 1;
+        }
+        std::puts("engine_train_parity: independent checks passed");
+        return 0;
+    }
+
     if (dumping) {
         std::ofstream f(argv[2], std::ios::binary);
         f.write((const char*)&nt, 8);

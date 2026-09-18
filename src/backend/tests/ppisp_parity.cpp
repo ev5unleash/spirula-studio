@@ -1,12 +1,9 @@
-// Backend parity tool for the PPISP image-transform + regularization launch
-// APIs, across every param type and cam_indices on/off. One source, both
-// backends: `./ppisp_parity dump ref.bin`, then `compare ref.bin` per device.
-// Ref format: [nf tight floats] [nl loose floats].
-//
-// Both backends run the same shaders/ppisp.slang math, so per-pixel outputs
-// and per-image gradients differ only by fast-math rounding -> tight channel;
-// atomically accumulated buffers -> loose. The regularization BACKWARD is fed
-// synthetic host-side raw_losses/v_losses so it stays deterministic (tight).
+// PPISP numerical and cross-backend parity tool.
+// `check` runs the independent invariants on one backend. `dump` and `compare`
+// use [nf tight floats] [nl loose floats] references across backends.
+// Per-pixel outputs and per-image gradients use the tight channel; atomically
+// accumulated buffers use the loose channel. Synthetic regularization
+// gradients keep the backward check deterministic.
 
 #include <kernels/pixelwise/PixelWise.cuh>
 #include <engine/EngineInternal.h>
@@ -82,12 +79,16 @@ struct TypeInfo {
 };
 
 int main(int argc, char** argv) {
-    if (argc != 3 ||
-        (std::strcmp(argv[1], "dump") && std::strcmp(argv[1], "compare"))) {
-        std::fprintf(stderr, "usage: %s dump|compare <ref.bin>\n", argv[0]);
+    const bool checking = argc == 2 && std::strcmp(argv[1], "check") == 0;
+    if (!checking &&
+        (argc != 3 ||
+         (std::strcmp(argv[1], "dump") && std::strcmp(argv[1], "compare")))) {
+        std::fprintf(stderr,
+                     "usage: %s check | dump <ref.bin> | compare <ref.bin>\n",
+                     argv[0]);
         return 2;
     }
-    const bool dumping = std::strcmp(argv[1], "dump") == 0;
+    const bool dumping = !checking && std::strcmp(argv[1], "dump") == 0;
 
     Rng r(260719u), r_arith(260914u);
 
@@ -387,6 +388,23 @@ int main(int argc, char** argv) {
         readback_f(g_tight, clamped, 3 * np);
         readback_f(g_tight, v_in_clamp, 3 * np);
         readback_f(g_loose, v_params_clamp, Bc * n_params);
+    }
+
+    if (checking) {
+        for (float v : g_tight) {
+            if (!std::isfinite(v)) {
+                std::fputs("ppisp_parity: non-finite tight output\n", stderr);
+                return 1;
+            }
+        }
+        for (float v : g_loose) {
+            if (!std::isfinite(v)) {
+                std::fputs("ppisp_parity: non-finite loose output\n", stderr);
+                return 1;
+            }
+        }
+        std::puts("ppisp_parity: independent checks passed");
+        return 0;
     }
 
     auto write_all = [&](const char* path) {

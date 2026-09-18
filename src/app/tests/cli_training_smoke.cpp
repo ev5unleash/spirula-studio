@@ -8,8 +8,11 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
+#include <cstdlib>
 #include <cstdio>
 #include <future>
+#include <map>
 #include <thread>
 
 namespace fs = std::filesystem;
@@ -30,6 +33,17 @@ void require(bool ok, const char* message) {
     std::printf("ok   %s\n", message);
 }
 
+bool has_nonfinite_number(const std::string& line) {
+    size_t pos = 0;
+    while ((pos = line.find('=', pos)) != std::string::npos) {
+        const char* start = line.c_str() + ++pos;
+        char* end = nullptr;
+        const float value = std::strtof(start, &end);
+        if (end != start && !std::isfinite(value)) return true;
+    }
+    return false;
+}
+
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     try {
@@ -48,6 +62,20 @@ int main(int argc, char** argv) {
         const auto info = backend::device_info(backend::device_current());
         require(info.usable, "selected hardware supports the workload");
         std::printf("GPU: %s; selector: %s\n", info.name, device.c_str());
+        std::string second_device, second_name;
+#ifdef SS_BACKEND_VULKAN
+        if (const char* selector_b = spirula::env("TEST_DEVICE_B")) {
+            second_device = backend::device_resolve_identity(selector_b);
+            require(!second_device.empty() && second_device != device,
+                    "second Vulkan test device resolves distinctly");
+            for (int i = 0; i < backend::device_count(); ++i) {
+                if (backend::device_selector(i) != second_device) continue;
+                const auto candidate = backend::device_info(i);
+                if (candidate.usable) second_name = candidate.name;
+            }
+            require(!second_name.empty(), "second Vulkan test device is usable");
+        }
+#endif
         const fs::path root = fs::current_path() / "training-fixture";
         const fs::path dataset = root / "dataset";
         const fs::path outputs = root / "outputs";
@@ -62,13 +90,29 @@ int main(int argc, char** argv) {
         };
         auto direct_args = args(12);
         direct_args.insert(direct_args.end(), {"--output-dir-name", "direct", "--device", device});
+        int metric_lines = 0;
+        bool nonfinite = false;
+        auto observe = [&](const std::string& line) {
+            std::printf("%s\n", line.c_str());
+            const size_t metric = line.find("rgb_loss=");
+            if (metric != std::string::npos) {
+                const char* start = line.c_str() + metric + 9;
+                char* end = nullptr;
+                const float value = std::strtof(start, &end);
+                if (end == start || !std::isfinite(value))
+                    nonfinite = true;
+                else
+                    metric_lines++;
+            }
+            nonfinite = nonfinite || has_nonfinite_number(line);
+        };
         app::proc::ProcessOptions process;
         process.argv = {exe, "train"};
         process.argv.insert(process.argv.end(), direct_args.begin(), direct_args.end());
         process.cwd = root.u8string();
         std::atomic<bool> cancel{false};
         process.cancel = &cancel;
-        process.on_line = [](const std::string& line) { std::printf("%s\n", line.c_str()); };
+        process.on_line = observe;
         auto running = std::async(std::launch::async, [&] { return app::proc::run_process(process); });
         if (running.wait_for(std::chrono::seconds(120)) != std::future_status::ready) {
             cancel.store(true);
@@ -80,8 +124,27 @@ int main(int argc, char** argv) {
                 "real CLI training completes");
         const int direct_step = checkpoint_step(outputs / "direct");
         require(direct_step == 12, "full checkpoint records completed direct training step");
+        require(metric_lines > 0 && !nonfinite,
+                "direct training reports finite metrics");
+        metric_lines = 0;
+        nonfinite = false;
 
         sched::JobScheduler scheduler((root / "queue").u8string(), exe);
+        std::map<std::string, bool> selected_row;
+        std::map<std::string, std::string> actual_devices;
+        scheduler.set_event_callback([&](const sched::Event& event) {
+            if (event.line.empty()) return;
+            observe(event.line);
+            if (event.line.find("* [") != std::string::npos) {
+                selected_row[event.job_id] = true;
+            } else if (selected_row[event.job_id]) {
+                const size_t pos = event.line.find("uuid:");
+                if (pos != std::string::npos) {
+                    actual_devices[event.job_id] = event.line.substr(pos, 37);
+                    selected_row[event.job_id] = false;
+                }
+            }
+        });
         auto submit = [&](int steps, const std::string& resume) {
             sched::SubmitOpts opts;
             opts.phase = "train"; opts.device = device; opts.device_name = info.name;
@@ -98,6 +161,7 @@ int main(int argc, char** argv) {
         auto wait = [&](const std::string& id, auto predicate) {
             const auto deadline = Clock::now() + std::chrono::seconds(90);
             while (Clock::now() < deadline) {
+                scheduler.drain_events();
                 const auto current = job(id);
                 if (predicate(current)) return current;
                 if (current.state == sched::JobState::Failed || current.state == sched::JobState::Blocked)
@@ -122,6 +186,48 @@ int main(int argc, char** argv) {
                 for (const auto& output : result.outputs) require(fs::exists(fs::u8path(output)), "worker output exists");
             }
             require(matched_result, "scheduled result matches its published attempt");
+            if (!second_device.empty()) {
+                scheduler.pause_dispatch(true);
+                const auto first = submit(100000, "");
+                const auto retargeted = submit(100000, "");
+                scheduler.pause_dispatch(false);
+                const auto first_active = wait(first, [&](const auto& j) {
+                    if (j.state != sched::JobState::Running ||
+                        actual_devices[first] != device)
+                        return false;
+                    try { return checkpoint_step(fs::u8path(j.output_dir)) >= 5; }
+                    catch (const std::exception&) { return false; }
+                });
+                require(job(retargeted).state == sched::JobState::Queued,
+                        "same-device work waits behind the active lease");
+                scheduler.set_device(retargeted, second_device, second_name);
+                const auto second_active = wait(retargeted, [&](const auto& j) {
+                    if (j.state != sched::JobState::Running ||
+                        actual_devices[retargeted] != second_device)
+                        return false;
+                    try { return checkpoint_step(fs::u8path(j.output_dir)) >= 5; }
+                    catch (const std::exception&) { return false; }
+                });
+                require(job(first).state == sched::JobState::Running,
+                        "first device keeps running after queued retarget");
+                require(actual_devices[first] == device,
+                        "first worker reports its actual device");
+                require(actual_devices[retargeted] == second_device,
+                        "retargeted worker reports its actual device");
+                scheduler.force_stop(first);
+                scheduler.force_stop(retargeted);
+                const auto first_stopped = wait(first, [](const auto& j) {
+                    return j.state == sched::JobState::Interrupted;
+                });
+                const auto second_stopped = wait(retargeted, [](const auto& j) {
+                    return j.state == sched::JobState::Interrupted;
+                });
+                require(first_stopped.pending_resume &&
+                            checkpoint_step(fs::u8path(first_active.output_dir)) >= 5 &&
+                            second_stopped.pending_resume &&
+                            checkpoint_step(fs::u8path(second_active.output_dir)) >= 5,
+                        "both physical devices retain resumable checkpoints");
+            }
             for (bool force : {false, true}) {
                 const auto id = submit(100000, "");
                 const auto active = wait(id, [&](const auto& j) {
@@ -142,6 +248,9 @@ int main(int argc, char** argv) {
             throw;
         }
         scheduler.shutdown();
+        scheduler.drain_events();
+        require(metric_lines > 0 && !nonfinite,
+                "scheduled training reports finite metrics");
         std::puts("PASS real CLI and scheduled training lifecycle");
         return 0;
     } catch (const std::exception& e) {

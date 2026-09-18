@@ -245,6 +245,53 @@ The script's optional codegen is not proof of idempotence; inspect generated
 drift explicitly and repeat generators against the reviewed index. This
 documentation-only wave does not rerun the list.
 
+### 4.3 Resumed local acceptance evidence
+
+The deferred hardware and desktop work resumed on 2026-09-18 on two supported
+physical devices:
+
+- `[0] AMD Radeon AI PRO R9700`, 32,624 MB,
+  `uuid:00000000010000000000000000000000`
+- `[1] AMD Radeon AI PRO R9700`, 32,624 MB,
+  `uuid:00000000020000000000000000000000`
+
+The production byte converter passed all 781 byte values spanning multiple
+workgroups on both UUIDs, with validation enabled, in native-byte and
+`SS_VK_NATIVE_INT8=0` modes. No converter defect reproduced, so no shader or
+capability workaround was added. Independent PPISP checks covered negative
+intensities and clamping against closed-form expectations. Engine training
+passed every retained background mode with finite metrics.
+
+`cli_training_smoke` then proved direct step-12 training, scheduled resume to
+step 24, cooperative stop/save, forced interruption with a valid resume point,
+and finite metrics. Its two-device lane held one worker on device A while a
+queued sibling was retargeted to B; both workers reported their actual UUIDs
+and retained checkpoints. `sfm_map_test` passed 8/8 on each device, including
+partial, continuation, audit, disconnected-component, and rig-like cases; this
+hardware lacks device float64, so bundle adjustment used the logged CPU
+fallback. Real MoGe-2 `vits` inference passed on A and Metric3D `small` passed
+on B with finite depth and normals.
+
+The actual desktop accepted ordinary ImGui activation, submitted a real
+100,000-step batch job on A, showed finite progress, and stopped/saved at steps
+3,001 and 8,297. Restart showed recovery; Later preserved it and Retry created
+a distinct attempt against the same output. Device pickers distinguished
+identical names as `[0]` and `[1]`, and changing the new-job default to B did
+not rewrite the existing A job. The video workflow exercised the
+patent-disabled ffmpeg path and adaptive controls; a one-frame input produced
+one selected image and the truthful minimum-three-images failure.
+
+The final integrated Vulkan/GUI/SfM/SAM, patented-disabled build passed, as did
+the 19-test headless label in 6.76 seconds. Incremental comment, private-path,
+and patch-whitespace checks passed. Compatible protected parity references were
+not present and were not fabricated from the candidate. SAM model terms and
+weights were not accepted in the isolated desktop profile, so actual mask
+preview/overlay acceptance remains open. The Windows desktop became unavailable
+after the visible workflow; argv substitution, subprocess success, missing
+executable handling, and a file-writing notification command were exercised
+separately, but automatic post-publish desktop notification remains open.
+
+
 ## 5. R1-R9 acceptance matrix
 
 The nine original rows remain stable crossreferences. Each row distinguishes
@@ -253,124 +300,104 @@ status.
 
 ### R1 — Image/video/adaptive/ffmpeg/previews
 
-**Status: partial.** Adaptive payload round-tripping and real CPU RGBA preparation
-are covered; the decode range `[1,16]` is enforced in source. Actual adaptive
-video extraction is not covered by those assertions. Earlier photo/video/mask
-GUI observations remain diagnostic where device provenance excludes acceptance.
+**Status: partial.** The actual desktop exposed the source, adaptive-rate,
+spread, sharpness, and ffmpeg-fallback controls. Patent-disabled ffmpeg
+extraction and adaptive selection ran through the production path; a one-frame
+input produced one image and the truthful minimum-three-images failure.
+Successful multi-frame adaptive extraction, live previews, and mask colors
+remain open.
 
-Programmatic continuation: verify real image/video artifacts, adaptive frame
-selection, patent-disabled ffmpeg fallback, and preview/mask data through the
-production paths. UI continuation: verify source/adaptive-option controls produce
-the intended request, previews remain responsive, and mask colors are correct.
-Do not repeat computation through the GUI once its programmatic gate passes.
+Continuation: use a moving multi-frame input and accepted SAM weights to check
+successful adaptive selection, preview responsiveness, and overlay colors. Do
+not repeat already-accepted ffmpeg preparation merely through another GUI path.
 
 ### R2 — Existing masks/depth/normals/features/reuse/rerun/presets/preflight
 
-**Status: partial.** Host tests cover request/preflight/preset serialization,
-ownership, and result validation. The shared writer smoke retained `A H` and
-reached the deliberately invalid SfM option; a manual `attrib -H` workaround
-was diagnostic only and cannot satisfy this row.
+**Status: partial.** Host serialization, preflight, preset, ownership, and
+result checks pass. The desktop exposed existing mask, depth/normal, feature,
+reuse/rerun, preset, and summary controls. Real MoGe-2 and Metric3D inference
+produced finite geometry on the two supported GPUs. SAM preview and output
+reuse/rerun artifacts remain open because the isolated profile had no accepted
+SAM weights.
 
-Programmatic continuation: verify masks, depth, normals, counts, existing
-feature/model reuse, explicit rerun controls, persisted outputs, and immutable
-request/preflight agreement without clearing the hidden manifest condition. UI
-continuation checks the update, feature-retention, reuse/rerun, preset, and
-summary controls against the submitted request. A second full GPU update through
-the GUI is not required to re-prove those already-accepted outputs.
+Continuation: accept the applicable model terms, then verify mask, preview,
+reuse/rerun, and persisted-output truth without clearing the hidden manifest
+condition. Do not rerun accepted geometry inference through the GUI.
 
 ### R3 — Native scheduled workflow and single-phase wrapper
 
-**Status: partial.** Scheduler, request/result, lease, persistence, and lost-wake
-checks cover real boundaries and identity/output handling; a protocol child is
-not model-compute success.
+**Status: partial.** Scheduler, request/result, lease, persistence, and
+lost-wake checks pass. The desktop submitted, monitored, stopped, recovered,
+and retried a real train-only scheduled job. The complete
+`prep → SfM → [geometry] → [linked train] → publish` workflow is not yet
+accepted end to end.
 
-Programmatic continuation: exercise real `prep → SfM → [geometry] → [linked
-train] → publish`, checking artifacts, attempt identities, canonical request-local
-result paths, ordered transitions, child runtime device identity, and no duplicate
-foreground executor.
-Also exercise the train-only single-phase wrapper through the same scheduler. UI
-continuation: Batch UI submission, visible queue/log/phase transitions, result,
-and linked output require the actual desktop surface.
+Continuation: run one real linked workflow and check phase order, canonical
+attempt results, output publication, and actual child device identity. Existing
+train-only scheduler and desktop evidence need not be repeated.
 
 ### R4 — Queued A→B targeting and ownership
 
-**Status: blocked for two-device proof; partial for routing/UI.** Canonical UUID
-resolution, queued-only picker wiring, `set_device`, index-disambiguated labels,
-and scheduler retarget regression prove routing semantics; synthetic identities
-do not prove compute.
-
-Programmatic continuation: with two eligible physical non-NVIDIA GPUs, prove
-queued A→B retarget, next worker on B, and the running worker staying on A.
-Observe actual runtime device identity, not an echoed request/result UUID.
-Prove default changes do not rewrite pending targets. UI continuation: use the
-queued picker, distinguish labels, and observe uninterrupted preview on desktop
-A without context recreation. Only one eligible non-NVIDIA physical GPU is
-known, so two-device execution remains blocked; do not substitute NVIDIA.
+**Status: complete on this host.** Two physical non-NVIDIA GPUs were resolved
+by canonical UUID. A running worker remained on A while a queued sibling was
+retargeted to B; each child reported its actual UUID and retained a checkpoint.
+The desktop picker distinguished identical names with `[0]`/`[1]`, and changing
+the default for new jobs did not rewrite the existing A job.
 
 ### R5 — Metric/partial/nonmetric/failure SfM outcomes
 
-**Status: partial; real reconstruction outcomes remain unaccepted.** Parser and
-scheduler-result tests provide host evidence. SfM manifest/live-match checks
-have historical native-test evidence outside the 19-test suite; rig checks need
-their actual Vulkan/fallback path recorded. None proves successful supported-GPU
-reconstruction or all four outcomes.
+**Status: partial.** `sfm_map_test` passed 8/8 on both supported GPUs, covering
+manifest/live-match, partial, continuation, audit, disconnected-component, and
+rig-like cases. Device float64 was unavailable and the logged CPU bundle
+adjustment fallback ran. A full reconstruction and the desktop presentation of
+metric success, preserved partial, preserved nonmetric, and genuine failure
+remain open.
 
-Programmatic continuation: separately check real manifest/live-match, rig/device,
-and actual metric success, preserved partial, preserved nonmetric, and genuine
-failure with correct phase/error/artifacts. UI continuation: show each outcome
-and artifact truthfully. Never turn failure into success to preserve a path.
+Continuation: run one real reconstruction and preserve each of the four
+terminal outcomes with truthful phase, error, and artifacts.
 
 ### R6 — Training stop/save and non-training force-stop
 
-**Status: partial; supported-device lifecycle blocked.** Process, leases,
-checkpoint-reader, and incomplete-sibling tests cover boundaries. The AMD
-`cli_training_smoke` execution failed before valid numerical acceptance;
-readable checkpoints or lifecycle-only evidence are insufficient.
+**Status: partial.** Finite direct training, scheduled resume, cooperative
+stop-and-save, forced interruption, resumable checkpoints, process cleanup,
+and the desktop Stop and save control passed on supported hardware. A
+non-training prep/SfM/geometry force-stop was not exercised through the desktop.
 
-Programmatic continuation: on a verified supported non-NVIDIA UUID, prove real
-finite training, cooperative stop-and-save, and a valid resumable checkpoint.
-For prep/SfM/geometry, force-stop must reap the whole process tree before
-termination and lease release, with truthful stopped/interrupted state. UI
-continuation: only training offers Stop and save; non-training controls say
-force-stop; progress, terminal state, and close must be real.
+Continuation: force-stop one real non-training phase and verify process-tree
+reaping, truthful interrupted state, and lease release. Do not repeat the
+accepted training lifecycle.
 
 ### R7 — Recovery, atomic state, staging, resume, Later/Retry, second owner
 
-**Status: partial; supported training recovery and actual Later/Retry UI remain
-open.** Completed-prefix/reload, checkpoint-reader, incomplete-newer-sibling,
-lease, and fail-closed second-owner checks have host coverage. They do not prove
-every deterministic crash window during checkpoint/state publication.
+**Status: partial.** Interrupted training preserved atomic state, source,
+workspace, options, device, output, and the last valid checkpoint. Restart
+showed recovery; Later preserved it and Retry created a distinct attempt
+against the same output, then stopped/saved successfully. Host tests retain
+second-owner and incomplete-sibling coverage. Exhaustive deterministic crash
+windows remain outside this run.
 
-Programmatic continuation: isolated interrupted workflow must preserve atomic
-state, completed prefix, source/workspace/options/device, restart the interrupted
-phase, retain the last valid checkpoint, resume from a run directory, and reject
-a second owner without duplicate writers. UI continuation: real restart/recovery
-must show Later preserving the pending flag and Retry/recover creating an
-explicit attempt; completed phases must not appear forgotten.
+Continuation: add only a focused crash-window check when a concrete publication
+gap is identified; do not replay the accepted desktop recovery flow.
 
 ### R8 — Final-publish notification and safe failure
 
-**Status: open; notification execution is not covered.** There is no existing
-headless notification acceptance in 19/19. `CommandRunner`,
-`GuiApp::run_batch_command`, and `poll_batch_command` remain the targeted
-production path; argv serialization alone does not prove notification execution.
+**Status: partial.** `command_argv_test` passed safe `{message}` substitution;
+`subprocess_test` passed command execution and missing-executable failure; a
+throwaway command wrote the expected completion message without altering the
+completed job artifacts. The desktop became unavailable before an automatic
+post-publish notification could be observed, so that final integration edge
+remains open.
 
-Programmatic continuation: add the smallest production-seam smoke/regression
-only if a plausible missing behavior warrants permanence; otherwise use a
-throwaway run. Prove notification only after final publish, safe failure is
-separate, and a completed artifact stays completed and uncorrupted. UI
-continuation: visible completion/failure separation after the whole workflow.
+Continuation: on an active desktop, finish one short queue and observe the
+configured command only after publication, then test a missing executable
+separately while preserving the completed result.
 
 ### R9 — Interactive-only external COLMAP/Python masking/mesh
 
-**Status: partial.** Request validation and preflight reject external COLMAP and
-Python masking from the native queue; mesh remains explicit. Host rejection is
-not visible-label/input proof.
-
-Programmatic continuation: verify actionable scheduler rejection and retained
-interactive paths, with no hidden mesh phase or revived foreground executor.
-UI continuation: actual menus/labels/clicks must keep these actions explicitly
-interactive and out of the native queue.
+**Status: complete.** Scheduler preflight rejects external COLMAP and Python
+masking from the native queue, mesh remains explicit, and the actual desktop
+kept dataset creation, trained-model viewing, meshing, ffmpeg fallback, Python
+mask fallback, and CPU bundle adjustment visibly interactive.
 
 ## 6. Focused native gates
 
@@ -415,41 +442,24 @@ then restore the old environment value.
 
 ## 7. Blocker ledger and dedicated later GPU work
 
-Only one eligible non-NVIDIA physical GPU is known, so real two-device proof is
-blocked but headless review is not. No NVIDIA/CUDA implementation/testing,
-including Vulkan-on-NVIDIA, is authorized. The AMD byte-conversion path is the
-first suspect before the later driver pipeline crash; no GPU patch is
-integrated. Disabled native-int8/atomics/int64 variants may exit zero but show
-PPISP `inf`/invalid training and are not accepted workarounds.
+Two eligible physical non-NVIDIA GPUs are now verified. Production byte
+conversion, independent PPISP invariants, finite training, resume, stop/save,
+forced interruption, and physical A→B retarget passed without a GPU code fix or
+capability exclusion. NVIDIA/CUDA implementation or testing remains outside
+scope.
 
-When the user explicitly resumes, follow the detailed [debugging handoff](headless-validation-debugging.md)
-instead of duplicating its large reproduction. First isolate production
-`uint8_image_to_float_raw` with bytes `0,127,128,255` across workgroups,
-comparing every scaled float to an independent CPU expectation with default
-native bytes and `SS_VK_NATIVE_INT8=0` on an explicit verified UUID. Then
-separately investigate PPISP inputs, reduction, ABI, and readback. Do not begin
-from the later crash or globally disable capabilities.
+The only native parity blocker is reference provenance: no compatible protected
+`engine_train`, `engine_render`, or `ppisp` reference files were present. Do not
+generate a candidate dump and compare it to itself. When independently
+validated references become available, run the commands in section 6.2 with
+their device, harness, and configuration provenance.
 
-Only after finite numerically valid training, rerun the real lifecycle with an
-explicit UUID (never an index):
-
-```bat
-set "SS_TEST_DEVICE=uuid:REPLACE_WITH_VERIFIED_NON_NVIDIA_UUID"
-cmake -E chdir build_vulkan ctest -L gpu --output-on-failure --no-tests=error
-```
-
-Replace the selector placeholder with the current device's verified UUID before
-running. The test must fail, not skip, when an explicit device is unusable.
-
-Lifecycle alone, readable checkpoints, or zero exit is insufficient numerical
-proof. Preserve diagnostic artifacts under `build_vulkan/Testing/Artifacts` as
-indexed by the handoff before cleanup.
-
-D1 first-frame/normal-close evidence exists but was not AMD-specific. D2
-submit/cancel remains unverified. Tool-reported input success or hover is not
-widget activation. Retain focused UI gaps for queue picker, bottom logs,
-preview matching/inverted masks, busy-training completion, and recovery
-controls. Do not add production automation solely to bypass input failure.
+Desktop first-frame rendering, ordinary widget activation, batch submission,
+finite progress, stop/save, restart, Later/Retry recovery, device selection,
+and normal close were observed. Remaining UI gaps are successful multi-frame
+adaptive extraction, accepted-weight SAM preview/overlay colors, all four SfM
+outcome presentations, a non-training force-stop, the complete linked workflow,
+and automatic post-publish notification.
 
 ## 8. Ownership and hygiene
 
@@ -481,32 +491,20 @@ the lost-wake fix are current.
 
 ## 9. Next runnable work and local acceptance
 
-The fork checkpoint does not reopen deferred GPU/desktop debugging or certify
-complete integration. When implementation work resumes:
+The local candidate now has supported dual-GPU, finite training, recovery, and
+substantial desktop evidence. Remaining runnable work is bounded:
 
-1. Capture actual post-document branch/status/stashes, `HEAD`, merge state, and
-   refs; do not replay equal-tip/start-merge commands or abort the committed
-   candidate.
-2. Review the current candidate and acceptance ledger. The five generated paths
-   are already excluded; ValidationSkill and `.clangd` are retained intentionally.
-3. Use the existing headless command for the ordinary review loop. For subsequent
-   behavior changes, select the affected `-R` or `-L worker`/`fast` check, then
-   run the integrated `headless` gate once. Close reachable host-side gaps,
-   including final-publish/notification-failure behavior through existing
-   production seams. Do not require desktop unlock or infer compute from
-   `--help`, synthetic IDs, protocol children, or copied result files.
-4. Run only applicable focused native gates: background rendering/training,
-   independent PPISP expectation, real SfM/geometry outcomes, finite supported
-   training, and compatible-reference parity.
-5. On resumed desktop work, exercise only outstanding R1-R9 UI surfaces and
-   require a second eligible non-NVIDIA physical GPU for R4. Isolate profile and
-   sacrificial fixtures; close/reap processes and resolve state locks.
-6. Make ordinary scoped follow-up commits only after their checks. Keep deferred
-   behavior explicitly deferred; it is not a pass.
+1. Supply compatible independently validated parity references, preserving
+   their device and harness provenance.
+2. On an active desktop with accepted SAM weights, check mask preview/overlay
+   colors and successful multi-frame adaptive extraction.
+3. Run one complete linked workflow, preserve all four SfM outcome
+   presentations, and force-stop one non-training phase.
+4. Observe the configured completion command after final publication and its
+   safe failure path while the completed artifact remains intact.
 
-Dedicated GPU, multi-GPU, notification, and UI gates block complete
-integration-acceptance claims, not continued host review or delivery of
-headless improvements.
+No push or PR is authorized. Ordinary scoped follow-up commits remain local
+until the user explicitly requests publication.
 
 ## 10. Local completion and protected upstream integration
 

@@ -1,15 +1,31 @@
 # Deferred GPU and desktop validation: debugging handoff
 
-Status: investigation stopped at the user's request. Multi-GPU validation and
-further GPU/desktop debugging belong in a dedicated session. No GPU fix was
-integrated. Diagnostic environment overrides below are experiments, not supported
-workarounds or acceptance results.
+Status: the deferred investigation resumed on 2026-09-18 on two supported AMD
+GPUs. The bounded byte-conversion, PPISP, finite-training, dual-device, and
+desktop checks below are now closed out in the primary plan. This document
+retains the earlier failure analysis and reproduction record.
 
 The [backend support policy](../../AGENTS.md#backend-support-policy) excludes
 NVIDIA implementation and validation, including Vulkan on NVIDIA. Do not restart
 those lanes when resuming this work.
 
-## Accepted evidence and remaining boundaries
+## Resume outcome
+
+Production `uint8_image_to_float_raw` passed all 781 byte values on both AMD
+Radeon AI PRO R9700 UUIDs with validation enabled, using native bytes and
+`SS_VK_NATIVE_INT8=0`. The earlier defect did not reproduce, so no shader fix
+or vendor/capability exclusion was added. Independent PPISP closed-form checks
+and finite engine training passed.
+
+The real CLI/scheduler lifecycle passed direct training, resume, stop/save,
+forced interruption, and physical A→B retarget with child-reported UUIDs.
+Desktop submission, finite progress, stop/save, restart, Later/Retry recovery,
+device controls, patent-disabled ffmpeg fallback, and normal close were
+observed. Remaining UI and parity boundaries are recorded in the
+[primary plan](device-job-scheduling-upstream-merge-plan.md).
+
+
+## Historical handoff evidence and boundaries
 
 - Windows GUI-enabled Vulkan headless suite: 19/19 passed, 7.63 s. Two concurrent
   invocations passed independently in 8.65 s and 7.54 s.
@@ -24,13 +40,11 @@ those lanes when resuming this work.
   through the actual desktop controls remains unverified. The earlier desktop
   render was not an AMD-specific acceptance check.
 
-See [the implementation plan](headless-testing-plan.md) and
-[testing instructions](../testing.md) for the implemented checks and their scope.
-
-Continue upstream integration from the
-[reconciled primary plan](device-job-scheduling-upstream-merge-plan.md).
-It credits the completed programmatic checks without reopening or passing the
-GPU and desktop investigations deferred here.
+See [the implementation plan](headless-testing-plan.md),
+[testing instructions](../testing.md), and the
+[reconciled primary plan](device-job-scheduling-upstream-merge-plan.md). The
+primary plan is the current acceptance ledger; the detailed observations below
+remain historical debugging evidence.
 
 ## Local evidence inventory
 
