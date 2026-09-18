@@ -2034,6 +2034,9 @@ std::string parse_auto_args(const std::vector<std::string>& args, AutoRequest& o
             out.progress_dir = args[(size_t)++i];
             continue;
         }
+        // Claimed, not merely cleared: manifest_apply fills in anything the
+        // command line did not claim, and a manifest naming a mask_dir would
+        // otherwise hand the masks back to a run that just refused them.
         if (a == "--no-masks") {
             cfg.mask_dir.clear();
             maskdir_explicit = true;

@@ -373,13 +373,20 @@ struct BilagridNormal {
 // are the same stateless blend over a different draw; Sh is a trained skybox,
 // SH(world ray dir) + DC color, and carries the only persistent state here.
 struct EngineBackground {
-    enum class Mode { None = 0, Noise = 1, Sh = 2, Pseudorandom = 3 };
+    enum class Mode { None = 0, Noise = 1, Sh = 2, Pseudorandom = 3,
+                      Color = 4, Random = 5 };
     Mode mode    = Mode::None;
     bool enabled = false;
 
     // Common config (set at init time)
     int  splat_transfer = 0;             // noise mode: display -> working space
     bool splat_is_linear = false;
+
+    // Color mode: the user's colour. `color` is what the blend wants (working
+    // space); `color_display` is what the viewer wants back, kept rather than
+    // round-tripped so a clamping transfer cannot move it.
+    float3 color         = {0.0f, 0.0f, 0.0f};
+    float3 color_display = {0.0f, 0.0f, 0.0f};
 
     // SH mode config
     int  sh_degree       = 0;            // 0..4
@@ -401,6 +408,24 @@ struct EngineBackground {
     // (Noise mode) and so the optim step can run after backward (both modes).
     uint32_t cur_seed             = 0;
     float    cur_randomize_weight = 0.0f;
+
+    // The loss pyramid this step, as passed to engine_compute_loss_backward:
+    // the randomized backgrounds draw a cell size uniformly over its levels,
+    // so noise a level of the pyramid would average away still costs something.
+    int      cur_num_loss_scales      = 1;
+    int      cur_loss_scale_min_pixels = 0;
+    // Resolved by the forward (it knows this batch's H/W) and read again by
+    // the backward, which must reconstruct the same background.
+    unsigned cur_block_px         = 0;
+
+    // Per post-split camera slot: the reference image's mean display luma and
+    // the power the randomized draw is raised to. Armed per training forward
+    // (never for a viewer render), consumed into cur_match_luma for the bwd.
+    std::vector<float>  luma_by_cam_host;
+    std::vector<float>  exponent_by_cam_host;
+    DeviceVector<float> exponent_by_cam;
+    bool match_luma_pending = false;
+    bool cur_match_luma     = false;
 };
 
 // Linear / wide-gamut color space conversion.
@@ -445,6 +470,7 @@ struct PpispState {
     bool enabled            = false;
     bool optim_initialized  = false;
     bool use_adagrad        = false;
+    bool exposure_arithmetic_mean = false;
     // Per-iteration mirror of the PpispStepConfig order flags, stashed by the
     // forward path so the backward hooks in EngineLoss.cpp can invert the
     // order they picked. Reset each step.

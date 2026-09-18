@@ -137,6 +137,7 @@ static std::map<std::string, float> _engine_step_fwd_bwd_only(
         cfg.ppisp.run_before_color_space && engine().color_space.splat_enabled;
     engine().ppisp.forward_pending =
         engine().ppisp.enabled && engine().ppisp.cur_run_before_color_space;
+    engine().background.match_luma_pending = cfg.background.match_luminance;
 
     forward_3dgs(primitive, sh_degree, packed, /*output_median=*/false, (int)dist_type);
 
@@ -259,7 +260,9 @@ std::map<std::string, float> _engine_train_step_after_setup(
 
     if (engine().background.enabled) {
         engine_set_background_step_params(cfg.background.seed,
-                                          cfg.background.randomize_weight);
+                                          cfg.background.randomize_weight,
+                                          cfg.loss.num_loss_scales,
+                                          cfg.loss.loss_scale_min_pixels);
     }
 
     auto loss_dict = _engine_step_fwd_bwd_only(
@@ -350,7 +353,9 @@ static std::map<std::string, float> _engine_train_step_split_one_per_camera(
     // background blend reads them per-camera inside the forward kernel).
     if (engine().background.enabled) {
         engine_set_background_step_params(cfg.background.seed,
-                                          cfg.background.randomize_weight);
+                                          cfg.background.randomize_weight,
+                                          cfg.loss.num_loss_scales,
+                                          cfg.loss.loss_scale_min_pixels);
     }
 
     // color_shift_reg EMA: the per-call decay is beta. In single-batch mode
@@ -494,7 +499,9 @@ std::map<std::string, float> engine_train_step_hetero(
 
     if (engine().background.enabled) {
         engine_set_background_step_params(cfg.background.seed,
-                                          cfg.background.randomize_weight);
+                                          cfg.background.randomize_weight,
+                                          cfg.loss.num_loss_scales,
+                                          cfg.loss.loss_scale_min_pixels);
     }
 
     // color_shift_reg EMA: the hook runs once per fwd/bwd, i.e. total_cams
@@ -686,7 +693,9 @@ static std::map<std::string, float> _engine_train_step_split_warped(
 
     if (engine().background.enabled) {
         engine_set_background_step_params(cfg.background.seed,
-                                          cfg.background.randomize_weight);
+                                          cfg.background.randomize_weight,
+                                          cfg.loss.num_loss_scales,
+                                          cfg.loss.loss_scale_min_pixels);
     }
 
     EngineStepConfig cfg_sub = cfg;

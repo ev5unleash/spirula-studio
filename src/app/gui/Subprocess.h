@@ -26,9 +26,22 @@ inline bool command_exists(const std::string& exe) {
     return app::proc::command_exists(exe);
 }
 
-inline std::vector<std::string> split_args(const std::string& s) {
-    return app::proc::split_args(s);
-}
+// Splits a flag or command string the way a shell would for the simple cases:
+// whitespace separates (a line break included), "quoted runs" stay together,
+// and a backslash before a break continues the line instead of being an arg.
+std::vector<std::string> split_args(const std::string& s);
+
+// A MESSAGE made safe to hand to another program: no backslash, no straight
+// quote, no control character, so it needs no escaping in a JSON payload or a
+// command line. Quotes curl (” ’), a backslash becomes '/', spaces collapse.
+std::string safe_arg(const std::string& text);
+
+// split_args(command) with every `token` inside an argument replaced by
+// safe_arg(value). The value lands in ONE argument whether or not the token
+// was quoted, so nothing in it can be read as syntax.
+std::vector<std::string> command_argv(const std::string& command,
+                                      const std::string& token,
+                                      const std::string& value);
 
 inline bool open_url(const std::string& url) {
     return app::proc::open_url(url);

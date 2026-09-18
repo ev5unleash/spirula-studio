@@ -2514,99 +2514,161 @@ SS_MSG(background_mode,
     KO("배경"), DE("Hintergrund"), FR("Arrière-plan"), ES("Fondo"),
     PT("Fundo"), IT("Sfondo"), NL("Achtergrond"), RU("Фон"), TR("Arka plan"));
 SS_MSG(background_mode_help,
-    EN("What fills pixels no splat covers. `black` is the usual choice. "
-       "`noise` and `pseudorandom` both discourage half-transparent "
+    EN("What fills pixels no splat covers. `color` is the usual choice: one "
+       "colour you pick, and black costs nothing at all. `noise`, "
+       "`pseudorandom` and `random` all discourage half-transparent "
        "surfaces by making a pixel left uncovered land on a colour that "
-       "changes every step; pseudorandom draws vivid tiles rather than "
-       "per-pixel speckle, which the loss cannot average away, so it "
-       "presses harder. `sh` learns a skybox so distant background is "
-       "represented instead of ignored."),
-    JA("スプラットが覆わない画素を何で埋めるかです。`black"
-       "` が通常の選択です。`noise` と `"
-       "pseudorandom` はどちらも、覆われていない画"
+       "changes every step; they differ in how big the patches are, from "
+       "one pixel to vivid tiles to the whole frame, and the bigger ones "
+       "the loss cannot average away press harder. `sh` learns a skybox so "
+       "distant background is represented instead of ignored."),
+    JA("スプラットが覆わない画素を何で埋めるかです。`color"
+       "` が通常の選択で、選んだ一つの色を使います。黒なら何"
+       "の処理もしません。`noise` と `pseudorandom` と "
+       "`random` はどれも、覆われていない画"
        "素の色が毎ステップ変わるようにして半透明な面を抑えます。"
-       "`pseudorandom` は画素ごとの細かいノイズで"
-       "はなく鮮やかなタイルを使うため、損失に平均化されず効き目"
-       "が強くなります。`sh` は空を学習し、遠くの背景を無視"
+       "色のまとまりの大きさが違い、画素ごと、鮮やかなタイル、画"
+       "面全体と大きくなります。大きいほど損失に平均化されず効き"
+       "目が強くなります。`sh` は空を学習し、遠くの背景を無視"
        "せず表現します。"),
-    ZH_HANS("用什么填充没有泼溅覆盖的像素。`black` 是通常的选"
-            "择。`noise` 和 `pseudorandom` 都"
-            "通过让未覆盖像素的颜色每步都变来抑制半透明表面；`"
-            "pseudorandom` 用的是鲜艳的色块而不是逐像素"
-            "的细噪点，损失无法把它平均掉，所以压得更狠。`sh` 会"
+    ZH_HANS("用什么填充没有泼溅覆盖的像素。`color` 是通常的选"
+            "择，用你指定的一种颜色；黑色则完全不做处理。`noise`、"
+            "`pseudorandom` 和 `random` "
+            "都通过让未覆盖像素的颜色每步都变来抑制半透明表面；区别"
+            "在于色块的大小，从逐像素到鲜艳的色块再到整帧一色，越大"
+            "损失越难把它平均掉，压得也越狠。`sh` 会"
             "学习一个天空盒，让远处背景被表示而不是被忽略。"),
-    ZH_HANT("用什麼填充沒有潑濺覆蓋的像素。`black` 是通常的選"
-            "擇。`noise` 和 `pseudorandom` 都"
-            "透過讓未覆蓋像素的顏色每步都變來抑制半透明表面；`"
-            "pseudorandom` 用的是鮮豔的色塊而不是逐像素"
-            "的細雜訊，損失無法把它平均掉，所以壓得更狠。`sh` 會"
+    ZH_HANT("用什麼填充沒有潑濺覆蓋的像素。`color` 是通常的選"
+            "擇，用你指定的一種顏色；黑色則完全不做處理。`noise`、"
+            "`pseudorandom` 和 `random` "
+            "都透過讓未覆蓋像素的顏色每步都變來抑制半透明表面；區別"
+            "在於色塊的大小，從逐像素到鮮豔的色塊再到整幀一色，越大"
+            "損失越難把它平均掉，壓得也越狠。`sh` 會"
             "學習一個天空盒，讓遠處背景被表示而不是被忽略。"),
     KO("스플랫이 덮지 않은 픽셀을 무엇으로 채울지입니다. "
-       "`black`이 보통의 선택입니다. `noise`와"
-       " `pseudorandom`은 덮이지 않은 픽셀의 "
-       "색이 매 스텝 바뀌게 해서 반투명한 표면을 억제합니"
-       "다. `pseudorandom`은 픽셀 단위의 잔 "
-       "노이즈 대신 선명한 타일을 쓰므로 손실이 평균으로 "
-       "지워 버리지 못해 더 세게 누릅니다. `sh`는 스"
+       "`color`가 보통의 선택으로, 직접 고른 한 가지 "
+       "색을 씁니다. 검정이면 아무 처리도 하지 않습니다. "
+       "`noise`와 `pseudorandom`과 `random`은 "
+       "모두 덮이지 않은 픽셀의 색이 매 스텝 바뀌게 해서 "
+       "반투명한 표면을 억제합니다. 색 덩어리의 크기가 다"
+       "른데, 픽셀 단위에서 선명한 타일, 화면 전체 한 색"
+       "으로 커집니다. 클수록 손실이 평균으로 지워 버리지 "
+       "못해 더 세게 누릅니다. `sh`는 스"
        "카이박스를 학습해 먼 배경을 무시하지 않고 표현합니"
        "다."),
-    DE("Was Pixel füllt, die kein Splat bedeckt. `black` ist die übliche "
-       "Wahl. `noise` und `pseudorandom` entmutigen beide "
+    DE("Was Pixel füllt, die kein Splat bedeckt. `color` ist die übliche "
+       "Wahl: eine Farbe nach Wahl, und Schwarz kostet gar nichts. `noise`, "
+       "`pseudorandom` und `random` entmutigen alle "
        "halbdurchsichtige Flächen, indem ein unbedecktes Pixel auf einer "
-       "Farbe landet, die sich jeden Schritt ändert; pseudorandom zeichnet "
-       "kräftige Kacheln statt Sprenkel pro Pixel, die der Verlust nicht "
-       "wegmitteln kann, und drückt deshalb stärker. `sh` lernt eine "
+       "Farbe landet, die sich jeden Schritt ändert; sie unterscheiden sich "
+       "in der Fleckengröße -- pro Pixel, kräftige Kacheln oder eine Farbe "
+       "für das ganze Bild -- und je größer, desto weniger kann der Verlust "
+       "sie wegmitteln. `sh` lernt eine "
        "Skybox, damit ferner Hintergrund dargestellt statt ignoriert wird."),
-    FR("Ce qui remplit les pixels qu'aucun splat ne couvre. `black` est le "
-       "choix habituel. `noise` et `pseudorandom` découragent tous deux "
+    FR("Ce qui remplit les pixels qu'aucun splat ne couvre. `color` est le "
+       "choix habituel : une couleur de votre choix, et le noir ne coûte "
+       "rien. `noise`, `pseudorandom` et `random` découragent tous "
        "les surfaces à demi transparentes en faisant tomber un pixel non "
-       "couvert sur une couleur qui change à chaque étape ; pseudorandom "
-       "dessine des tuiles vives plutôt qu'un grain par pixel, que la "
-       "perte ne peut pas moyenner, et appuie donc plus fort. `sh` apprend "
+       "couvert sur une couleur qui change à chaque étape ; ils diffèrent "
+       "par la taille des taches -- par pixel, tuiles vives, ou une seule "
+       "couleur pour toute l'image -- et plus elles sont grandes, moins la "
+       "perte peut les moyenner. `sh` apprend "
        "une skybox pour que l'arrière-plan lointain soit représenté au "
        "lieu d'être ignoré."),
-    ES("Qué rellena los píxeles que ningún splat cubre. `black` es la "
-       "elección habitual. `noise` y `pseudorandom` desincentivan las "
+    ES("Qué rellena los píxeles que ningún splat cubre. `color` es la "
+       "elección habitual: un color que eliges, y el negro no cuesta nada. "
+       "`noise`, `pseudorandom` y `random` desincentivan las "
        "superficies semitransparentes haciendo que un píxel sin cubrir "
-       "caiga sobre un color que cambia en cada paso; pseudorandom dibuja "
-       "baldosas vivas en vez de grano por píxel, que la pérdida no puede "
-       "promediar, así que aprieta más. `sh` aprende un cielo para que el "
+       "caiga sobre un color que cambia en cada paso; se diferencian en el "
+       "tamaño de las manchas -- por píxel, baldosas vivas o un solo color "
+       "para todo el fotograma -- y cuanto mayores, menos puede "
+       "promediarlas la pérdida. `sh` aprende un cielo para que el "
        "fondo lejano quede representado en vez de ignorado."),
-    PT("O que preenche os pixels que nenhum splat cobre. `black` é a "
-       "escolha habitual. `noise` e `pseudorandom` desencorajam "
+    PT("O que preenche os pixels que nenhum splat cobre. `color` é a "
+       "escolha habitual: uma cor à sua escolha, e o preto não custa nada. "
+       "`noise`, `pseudorandom` e `random` desencorajam "
        "superfícies semitransparentes fazendo um pixel descoberto cair "
-       "sobre uma cor que muda a cada passo; pseudorandom desenha "
-       "ladrilhos vivos em vez de grão por pixel, que a perda não consegue "
-       "mediar, então aperta mais. `sh` aprende um céu para que o fundo "
+       "sobre uma cor que muda a cada passo; diferem no tamanho das manchas "
+       "-- por pixel, ladrilhos vivos ou uma só cor para o quadro inteiro "
+       "-- e quanto maiores, menos a perda consegue "
+       "mediá-las. `sh` aprende um céu para que o fundo "
        "distante seja representado em vez de ignorado."),
-    IT("Che cosa riempie i pixel che nessuno splat copre. `black` è la "
-       "scelta abituale. `noise` e `pseudorandom` scoraggiano entrambi le "
+    IT("Che cosa riempie i pixel che nessuno splat copre. `color` è la "
+       "scelta abituale: un colore a tua scelta, e il nero non costa nulla. "
+       "`noise`, `pseudorandom` e `random` scoraggiano le "
        "superfici semitrasparenti facendo cadere un pixel scoperto su un "
-       "colore che cambia a ogni passo; pseudorandom disegna piastrelle "
-       "vivaci invece di grana per pixel, che la perdita non può mediare, "
-       "e quindi preme di più. `sh` impara un cielo perché lo sfondo "
+       "colore che cambia a ogni passo; differiscono per la dimensione "
+       "delle chiazze -- per pixel, piastrelle vivaci o un solo colore per "
+       "l'intero fotogramma -- e più sono grandi, meno la perdita può "
+       "mediarle. `sh` impara un cielo perché lo sfondo "
        "lontano sia rappresentato invece che ignorato."),
-    NL("Wat pixels vult die geen splat bedekt. `black` is de gebruikelijke "
-       "keuze. `noise` en `pseudorandom` ontmoedigen allebei "
+    NL("Wat pixels vult die geen splat bedekt. `color` is de gebruikelijke "
+       "keuze: een kleur naar keuze, en zwart kost helemaal niets. `noise`, "
+       "`pseudorandom` en `random` ontmoedigen allemaal "
        "halfdoorzichtige oppervlakken doordat een onbedekte pixel op een "
-       "kleur valt die elke stap verandert; pseudorandom tekent felle "
-       "tegels in plaats van korrel per pixel, die het verlies niet kan "
-       "wegmiddelen, en drukt dus harder. `sh` leert een skybox zodat "
+       "kleur valt die elke stap verandert; ze verschillen in de grootte "
+       "van de vlekken -- per pixel, felle tegels of één kleur voor het "
+       "hele beeld -- en hoe groter, hoe minder het verlies ze kan "
+       "wegmiddelen. `sh` leert een skybox zodat "
        "verre achtergrond wordt weergegeven in plaats van genegeerd."),
-    RU("Чем заполняются пиксели, которые не покрыл ни один сплат. `black` "
-       "— обычный выбор. `noise` и `pseudorandom` оба мешают "
+    RU("Чем заполняются пиксели, которые не покрыл ни один сплат. `color` "
+       "— обычный выбор: любой заданный вами цвет, а чёрный не стоит "
+       "ничего. `noise`, `pseudorandom` и `random` мешают "
        "полупрозрачным поверхностям: непокрытый пиксель попадает на цвет, "
-       "меняющийся каждый шаг; pseudorandom рисует яркие плитки, а не "
-       "зерно на каждый пиксель, и функция потерь не может их усреднить, "
-       "поэтому давит сильнее. `sh` обучает скайбокс, чтобы дальний фон "
+       "меняющийся каждый шаг; они отличаются размером пятен — на пиксель, "
+       "яркие плитки или один цвет на весь кадр — и чем крупнее, тем хуже "
+       "функция потерь их усредняет. `sh` обучает скайбокс, чтобы дальний фон "
        "был представлен, а не проигнорирован."),
-    TR("Hiçbir splat'ın kaplamadığı pikselleri neyin dolduracağı. `black` "
-       "alışılmış seçimdir. `noise` ve `pseudorandom` yarı saydam "
+    TR("Hiçbir splat'ın kaplamadığı pikselleri neyin dolduracağı. `color` "
+       "alışılmış seçimdir: seçtiğiniz bir renk, siyah ise hiçbir şeye mal "
+       "olmaz. `noise`, `pseudorandom` ve `random` yarı saydam "
        "yüzeyleri caydırır: kaplanmamış bir piksel her adımda değişen bir "
-       "renge düşer; pseudorandom piksel başına tanecik yerine canlı "
-       "karolar çizer, kayıp bunları ortalamayla silemez, bu yüzden daha "
-       "çok bastırır. `sh` bir gökyüzü öğrenir, böylece uzak arka plan yok "
+       "renge düşer; benek boyutlarıyla ayrılırlar -- piksel başına, canlı "
+       "karolar ya da tüm kare için tek renk -- ve büyüdükçe kayıp bunları "
+       "ortalamayla silemez. `sh` bir gökyüzü öğrenir, böylece uzak arka plan yok "
        "sayılmak yerine temsil edilir."));
+
+SS_MSG(background_color,
+    EN("Background color"), JA("背景色"), ZH_HANS("背景颜色"),
+    ZH_HANT("背景顏色"), KO("배경색"), DE("Hintergrundfarbe"),
+    FR("Couleur de l'arrière-plan"), ES("Color del fondo"),
+    PT("Cor do fundo"), IT("Colore dello sfondo"), NL("Achtergrondkleur"),
+    RU("Цвет фона"), TR("Arka plan rengi"));
+SS_MSG(background_color_help,
+    EN("The color that fills pixels no splat covers. Black is free -- it skips "
+       "the blend entirely. Only used with the `color` background."),
+    JA("スプラットが覆わない画素を埋める色です。黒なら合成そのものを省くので費"
+       "用はかかりません。背景が `color` のときだけ使われます。"),
+    ZH_HANS("用来填充没有泼溅覆盖的像素的颜色。黑色是免费的，会整个跳过混合。"
+            "仅在背景为 `color` 时使用。"),
+    ZH_HANT("用來填充沒有潑濺覆蓋的像素的顏色。黑色是免費的，會整個跳過混合。"
+            "僅在背景為 `color` 時使用。"),
+    KO("스플랫이 덮지 않은 픽셀을 채우는 색입니다. 검정은 합성 자체를 건너뛰므"
+       "로 비용이 없습니다. 배경이 `color`일 때만 쓰입니다."),
+    DE("Die Farbe, die Pixel füllt, die kein Splat bedeckt. Schwarz ist "
+       "kostenlos -- es überspringt die Überblendung ganz. Wird nur mit dem "
+       "Hintergrund `color` verwendet."),
+    FR("La couleur qui remplit les pixels qu'aucun splat ne couvre. Le noir "
+       "est gratuit : il saute entièrement le mélange. Utilisée "
+       "uniquement avec l'arrière-plan `color`."),
+    ES("El color que rellena los píxeles que ningún splat cubre. El negro es "
+       "gratis: se salta la mezcla por completo. Solo se usa "
+       "con el fondo `color`."),
+    PT("A cor que preenche os pixels que nenhum splat cobre. O preto é de "
+       "graça: ignora a mistura por completo. Só é usada com o "
+       "fundo `color`."),
+    IT("Il colore che riempie i pixel che nessuno splat copre. Il nero è "
+       "gratis: salta del tutto la fusione. Usato solo con "
+       "lo sfondo `color`."),
+    NL("De kleur die pixels vult die geen splat bedekt. Zwart is gratis: het "
+       "slaat het mengen helemaal over. Wordt alleen bij "
+       "achtergrond `color` gebruikt."),
+    RU("Цвет, которым заполняются пиксели, не покрытые ни одним сплатом. "
+       "Чёрный бесплатен: смешивание пропускается целиком. "
+       "Используется только с фоном `color`."),
+    TR("Hiçbir splat'ın kaplamadığı pikselleri dolduran renk. Siyah "
+       "bedavadır: harmanlamayı tümüyle atlar. Yalnızca "
+       "`color` arka planıyla kullanılır."));
 
 SS_MSG(background_sh_degree,
     EN("Skybox detail"), JA("スカイボックスの細かさ"), ZH_HANS("天空盒细节"),
@@ -2654,30 +2716,98 @@ SS_MSG(background_noise_warmup,
     TR("Arka plan gürültüsü ısınması"));
 SS_MSG(background_noise_warmup_help,
     EN("How many steps the background noise takes to reach full strength. Only "
-       "used with the `noise` background."),
-    JA("背景ノイズが最大の強さになるまでのステップ数です。背景が `noise` のと"
-       "きだけ使われます。"),
-    ZH_HANS("背景噪声达到最大强度所需的步数。仅在背景为 `noise` 时使用。"),
-    ZH_HANT("背景雜訊達到最大強度所需的步數。僅在背景為 `noise` 時使用。"),
-    KO("배경 노이즈가 최대 세기에 이르기까지의 스텝 수입니다. 배경이 `noise`일"
-       " 때만 쓰입니다."),
+       "used with the `noise` / `pseudorandom` / `random` backgrounds."),
+    JA("背景ノイズが最大の強さになるまでのステップ数です。背景が `noise` / "
+       "`pseudorandom` / `random` のときだけ使われます。"),
+    ZH_HANS("背景噪声达到最大强度所需的步数。仅在背景为 `noise` / "
+            "`pseudorandom` / `random` 时使用。"),
+    ZH_HANT("背景雜訊達到最大強度所需的步數。僅在背景為 `noise` / "
+            "`pseudorandom` / `random` 時使用。"),
+    KO("배경 노이즈가 최대 세기에 이르기까지의 스텝 수입니다. 배경이 `noise` /"
+       " `pseudorandom` / `random`일 때만 쓰입니다."),
     DE("Wie viele Schritte das Hintergrundrauschen braucht, um volle Stärke zu "
-       "erreichen. Wird nur mit dem Hintergrund `noise` verwendet."),
+       "erreichen. Wird nur mit den Hintergründen `noise` / `pseudorandom` / "
+       "`random` verwendet."),
     FR("Combien d'étapes le bruit de fond met à atteindre sa pleine force. Utilisé "
-       "uniquement avec l'arrière-plan `noise`."),
+       "uniquement avec les arrière-plans `noise` / `pseudorandom` / `random`."),
     ES("Cuántos pasos tarda el ruido de fondo en alcanzar toda su fuerza. Solo "
-       "se usa con el fondo `noise`."),
+       "se usa con los fondos `noise` / `pseudorandom` / `random`."),
     PT("Quantos passos o ruído de fundo leva para atingir força total. Só é usado "
-       "com o fundo `noise`."),
+       "com os fundos `noise` / `pseudorandom` / `random`."),
     IT("Quanti passi impiega il rumore di fondo a raggiungere la piena forza. "
-       "Usato solo con lo sfondo `noise`."),
+       "Usato solo con gli sfondi `noise` / `pseudorandom` / `random`."),
     NL("Hoeveel stappen de achtergrondruis nodig heeft om op volle sterkte te "
-       "komen. Wordt alleen bij achtergrond `noise` gebruikt."),
+       "komen. Wordt alleen bij de achtergronden `noise` / `pseudorandom` / "
+       "`random` gebruikt."),
     RU("За сколько шагов фоновый шум набирает полную силу. Используется только "
-       "с фоном `noise`."),
+       "с фонами `noise` / `pseudorandom` / `random`."),
     TR("Arka plan gürültüsünün tam güce ulaşması için gereken adım sayısı. Yalnızca "
-       "`noise` arka planıyla kullanılır."));
+       "`noise` / `pseudorandom` / `random` arka planlarıyla kullanılır."));
 
+SS_MSG(background_match_luminance,
+    EN("Match background to image brightness"), JA("背景を画像の明るさに合わせる"),
+    ZH_HANS("背景亮度匹配图像"), ZH_HANT("背景亮度匹配圖像"),
+    KO("배경을 이미지 밝기에 맞춤"), DE("Hintergrund an Bildhelligkeit anpassen"),
+    FR("Adapter le fond à la luminosité de l'image"),
+    ES("Ajustar el fondo al brillo de la imagen"),
+    PT("Ajustar o fundo ao brilho da imagem"),
+    IT("Adatta lo sfondo alla luminosità dell'immagine"),
+    NL("Achtergrond aan beeldhelderheid aanpassen"),
+    RU("Подогнать фон под яркость снимка"),
+    TR("Arka planı görüntü parlaklığına uydur"));
+SS_MSG(background_match_luminance_help,
+    EN("Raises the randomized background to a power so its typical brightness lands "
+       "on each photo's mean brightness, corrected for that photo's exposure. Keeps "
+       "dark scenes from being plugged with haze to hide a bright background. Only "
+       "used with the `noise` / `pseudorandom` / `random` backgrounds."),
+    JA("ランダム背景をべき乗して、その典型的な明るさが各写真の平均の明るさ（露出補正済み）"
+       "になるようにします。暗いシーンで明るい背景を隠すためにもやが詰め込まれるのを防ぎ"
+       "ます。背景が `noise` / `pseudorandom` / `random` のときだけ使われます。"),
+    ZH_HANS("对随机背景做幂运算，使其典型亮度落在每张照片的平均亮度上（已按该照片的曝光"
+            "校正）。避免暗场景为了遮住明亮背景而被雾状泼溅填满。仅在背景为 `noise` / "
+            "`pseudorandom` / `random` 时使用。"),
+    ZH_HANT("對隨機背景做冪運算，使其典型亮度落在每張照片的平均亮度上（已按該照片的曝光"
+            "校正）。避免暗場景為了遮住明亮背景而被霧狀潑濺填滿。僅在背景為 `noise` / "
+            "`pseudorandom` / `random` 時使用。"),
+    KO("무작위 배경을 거듭제곱하여 그 전형적인 밝기가 각 사진의 평균 밝기(노출 보정 후)에 "
+       "오도록 합니다. 어두운 장면이 밝은 배경을 가리려고 안개로 채워지는 것을 막습니다. "
+       "배경이 `noise` / `pseudorandom` / `random`일 때만 쓰입니다."),
+    DE("Potenziert den zufälligen Hintergrund, sodass seine typische Helligkeit auf "
+       "der mittleren Helligkeit jedes Fotos landet, um dessen Belichtung korrigiert. "
+       "Verhindert, dass dunkle Szenen mit Dunst zugesetzt werden, um einen hellen "
+       "Hintergrund zu verbergen. Wird nur mit den Hintergründen `noise` / "
+       "`pseudorandom` / `random` verwendet."),
+    FR("Élève le fond aléatoire à une puissance pour que sa luminosité typique tombe "
+       "sur la luminosité moyenne de chaque photo, corrigée de son exposition. Évite "
+       "que les scènes sombres se remplissent de brume pour cacher un fond clair. "
+       "Utilisé uniquement avec les arrière-plans `noise` / `pseudorandom` / `random`."),
+    ES("Eleva el fondo aleatorio a una potencia para que su brillo típico coincida con "
+       "el brillo medio de cada foto, corregido por su exposición. Evita que las "
+       "escenas oscuras se rellenen de neblina para ocultar un fondo claro. Solo se "
+       "usa con los fondos `noise` / `pseudorandom` / `random`."),
+    PT("Eleva o fundo aleatório a uma potência para que o seu brilho típico caia no "
+       "brilho médio de cada foto, corrigido pela exposição dela. Evita que cenas "
+       "escuras sejam preenchidas com névoa para esconder um fundo claro. Só é usado "
+       "com os fundos `noise` / `pseudorandom` / `random`."),
+    IT("Eleva lo sfondo casuale a una potenza così che la sua luminosità tipica "
+       "coincida con la luminosità media di ogni foto, corretta per la sua "
+       "esposizione. Evita che le scene scure si riempiano di foschia per nascondere "
+       "uno sfondo chiaro. Usato solo con gli sfondi `noise` / `pseudorandom` / "
+       "`random`."),
+    NL("Verheft de willekeurige achtergrond tot een macht zodat zijn typische "
+       "helderheid op de gemiddelde helderheid van elke foto valt, gecorrigeerd voor "
+       "de belichting ervan. Voorkomt dat donkere scènes met waas worden dichtgezet om "
+       "een lichte achtergrond te verbergen. Wordt alleen bij de achtergronden "
+       "`noise` / `pseudorandom` / `random` gebruikt."),
+    RU("Возводит случайный фон в степень, чтобы его типичная яркость совпала со "
+       "средней яркостью каждого снимка с поправкой на его экспозицию. Не даёт тёмным "
+       "сценам забиваться дымкой, скрывающей яркий фон. Используется только с фонами "
+       "`noise` / `pseudorandom` / `random`."),
+    TR("Rastgele arka planı bir kuvvete yükselterek tipik parlaklığının her "
+       "fotoğrafın pozlamasına göre düzeltilmiş ortalama parlaklığına denk gelmesini "
+       "sağlar. Karanlık sahnelerin parlak bir arka planı gizlemek için pusla "
+       "dolmasını önler. Yalnızca `noise` / `pseudorandom` / `random` arka "
+       "planlarıyla kullanılır."));
 SS_MSG(background_noise_pre_warmup,
     EN("Initial background noise"), JA("最初の背景ノイズの強さ"),
     ZH_HANS("初始背景噪声强度"), ZH_HANT("初始背景雜訊強度"),
@@ -5325,73 +5455,86 @@ SS_MSG(loss_saturation_threshold_help,
        "ikisi de kırpılmıştır, oradaki hata gerçek değildir. Negatif (varsayılan) "
        "her pikseli tutar."));
 
-SS_MSG(normalize_loss_by_luminance,
-    EN("Scale color error by brightness"), JA("明るさで色の誤差を調整"),
-    ZH_HANS("按亮度缩放颜色误差"), ZH_HANT("依亮度縮放顏色誤差"),
-    KO("밝기로 색 오차 조정"),
-    DE("Farbfehler nach Helligkeit skalieren"),
-    FR("Mettre l'erreur de couleur à l'échelle de la luminosité"),
-    ES("Escalar el error de color según el brillo"),
-    PT("Escalar o erro de cor pelo brilho"),
-    IT("Scalare l'errore di colore con la luminosità"),
-    NL("Kleurfout schalen met de helderheid"),
-    RU("Масштабировать ошибку цвета по яркости"),
-    TR("Renk hatasını parlaklığa göre ölçekle"));
-SS_MSG(normalize_loss_by_luminance_help,
-    EN("Scales the color-error weights (L1, L2 and SSIM) by twice the mean "
-       "brightness of the photo, measured in sRGB, so a dark capture counts for "
-       "as much as a bright one. It is meant for training in linear light, where "
+SS_MSG(loss_luminance_normalization,
+    EN("Brightness normalization of color error"), JA("色の誤差の明るさ正規化"),
+    ZH_HANS("颜色误差的亮度归一化"), ZH_HANT("顏色誤差的亮度正規化"),
+    KO("색 오차의 밝기 정규화"),
+    DE("Helligkeitsnormierung des Farbfehlers"),
+    FR("Normalisation de l'erreur de couleur par la luminosité"),
+    ES("Normalización del error de color por el brillo"),
+    PT("Normalização do erro de cor pelo brilho"),
+    IT("Normalizzazione dell'errore di colore per luminosità"),
+    NL("Helderheidsnormalisatie van de kleurfout"),
+    RU("Нормировка ошибки цвета по яркости"),
+    TR("Renk hatasının parlaklık normalizasyonu"));
+SS_MSG(loss_luminance_normalization_help,
+    EN("Divides the color-error weights (L1, L2 and SSIM) by twice the photo's "
+       "mean brightness, measured in sRGB, raised to this power: 0 leaves them "
+       "alone, 1 makes a dark capture count for as much as a bright one, and "
+       "values in between soften that. Meant for training in linear light, where "
        "the display curve already makes a dark pixel push harder."),
     JA("色の誤差の重み（L1, L2, SSIM）を, sRGB で測った写真の平均的な明るさの二"
-       "倍で調整します。暗い写真も明るい写真と同じだけ効くようになります。線形"
-       "の光での学習を想定しています。そこでは表示曲線のせいで暗い画素のほうが"
-       "強く効いてしまいます。"),
-    ZH_HANS("把颜色误差的权重（L1、L2 和 SSIM）乘以照片在 sRGB 下平均亮度的两"
-            "倍，让偏暗的照片和明亮的照片起同样的作用。它是为线性光下的训练准备"
-            "的：在那里显示曲线本来就让暗像素推得更用力。"),
-    ZH_HANT("把顏色誤差的權重（L1、L2 和 SSIM）乘以照片在 sRGB 下平均亮度的兩"
-            "倍，讓偏暗的照片和明亮的照片起同樣的作用。它是為線性光下的訓練準備"
-            "的：在那裡顯示曲線本來就讓暗像素推得更用力。"),
-    KO("색 오차 가중치(L1, L2, SSIM)에 sRGB로 잰 사진의 평균 밝기의 두 배를 곱"
-       "합니다. 어두운 사진도 밝은 사진만큼 힘을 냅니다. 선형 광에서 학습할 때"
-       "를 위한 것으로, 거기서는 표시 곡선 때문에 어두운 픽셀이 더 세게 밀어붙"
-       "입니다."),
-    DE("Skaliert die Gewichte des Farbfehlers (L1, L2 und SSIM) mit der "
-       "doppelten mittleren Helligkeit des Fotos, gemessen in sRGB, sodass eine "
-       "dunkle Aufnahme so viel zählt wie eine helle. Gedacht für das Training "
-       "in linearem Licht, wo die Anzeigekurve ein dunkles Pixel ohnehin stärker "
-       "drücken lässt."),
-    FR("Met les poids de l'erreur de couleur (L1, L2 et SSIM) à l'échelle du "
-       "double de la luminosité moyenne de la photo, mesurée en sRGB, pour qu'une "
-       "prise sombre compte autant qu'une prise claire. Prévu pour "
-       "l'entraînement en lumière linéaire, où la courbe d'affichage fait déjà "
-       "pousser un pixel sombre plus fort."),
-    ES("Escala los pesos del error de color (L1, L2 y SSIM) por el doble del "
-       "brillo medio de la foto, medido en sRGB, para que una toma oscura cuente "
-       "tanto como una clara. Está pensado para el entrenamiento en luz lineal, "
-       "donde la curva de pantalla ya hace que un píxel oscuro empuje más fuerte."),
-    PT("Escala os pesos do erro de cor (L1, L2 e SSIM) pelo dobro do brilho "
-       "médio da foto, medido em sRGB, para que uma captura escura conte tanto "
-       "quanto uma clara. Destina-se ao treino em luz linear, onde a curva de "
-       "exibição já faz um pixel escuro empurrar com mais força."),
-    IT("Scala i pesi dell'errore di colore (L1, L2 e SSIM) per il doppio della "
-       "luminosità media della foto, misurata in sRGB, così uno scatto scuro "
-       "conta quanto uno chiaro. È pensato per l'addestramento in luce lineare, "
-       "dove la curva di visualizzazione fa già spingere di più un pixel scuro."),
-    NL("Schaalt de gewichten van de kleurfout (L1, L2 en SSIM) met tweemaal de "
-       "gemiddelde helderheid van de foto, gemeten in sRGB, zodat een donkere "
-       "opname net zo zwaar telt als een lichte. Bedoeld voor training in "
-       "lineair licht, waar de weergavecurve een donkere pixel toch al harder "
+       "倍のこの値乗で割ります。0 では何もせず, 1 では暗い写真も明るい写真と同"
+       "じだけ効き, その間の値ではそれを弱めます。線形の光での学習を想定してい"
+       "ます。そこでは表示曲線のせいで暗い画素のほうが強く効いてしまいます。"),
+    ZH_HANS("把颜色误差的权重（L1、L2 和 SSIM）除以照片在 sRGB 下平均亮度两倍的"
+            "此值次幂：0 不做处理，1 让偏暗的照片和明亮的照片起同样的作用，中间"
+            "的值则减弱这种效果。它是为线性光下的训练准备的：在那里显示曲线本来"
+            "就让暗像素推得更用力。"),
+    ZH_HANT("把顏色誤差的權重（L1、L2 和 SSIM）除以照片在 sRGB 下平均亮度兩倍的"
+            "此值次冪：0 不做處理，1 讓偏暗的照片和明亮的照片起同樣的作用，中間"
+            "的值則減弱這種效果。它是為線性光下的訓練準備的：在那裡顯示曲線本來"
+            "就讓暗像素推得更用力。"),
+    KO("색 오차 가중치(L1, L2, SSIM)를 sRGB로 잰 사진의 평균 밝기의 두 배를 이 "
+       "값으로 거듭제곱한 수로 나눕니다. 0은 아무것도 하지 않고, 1은 어두운 사진"
+       "도 밝은 사진만큼 힘을 내게 하며, 그 사이 값은 이를 완화합니다. 선형 광에"
+       "서 학습할 때를 위한 것으로, 거기서는 표시 곡선 때문에 어두운 픽셀이 더 "
+       "세게 밀어붙입니다."),
+    DE("Teilt die Gewichte des Farbfehlers (L1, L2 und SSIM) durch die doppelte "
+       "mittlere Helligkeit des Fotos, gemessen in sRGB, hoch diesen Wert: 0 lässt "
+       "sie unverändert, 1 lässt eine dunkle Aufnahme so viel zählen wie eine "
+       "helle, Werte dazwischen mildern das. Gedacht für das Training in linearem "
+       "Licht, wo die Anzeigekurve ein dunkles Pixel ohnehin stärker drücken "
+       "lässt."),
+    FR("Divise les poids de l'erreur de couleur (L1, L2 et SSIM) par le double de "
+       "la luminosité moyenne de la photo, mesurée en sRGB, élevé à cette "
+       "puissance : 0 ne change rien, 1 fait compter une prise sombre autant "
+       "qu'une prise claire, et les valeurs intermédiaires adoucissent cela. Prévu "
+       "pour l'entraînement en lumière linéaire, où la courbe d'affichage fait "
+       "déjà pousser un pixel sombre plus fort."),
+    ES("Divide los pesos del error de color (L1, L2 y SSIM) por el doble del "
+       "brillo medio de la foto, medido en sRGB, elevado a esta potencia: 0 no "
+       "cambia nada, 1 hace que una toma oscura cuente tanto como una clara, y los "
+       "valores intermedios lo suavizan. Está pensado para el entrenamiento en luz "
+       "lineal, donde la curva de pantalla ya hace que un píxel oscuro empuje más "
+       "fuerte."),
+    PT("Divide os pesos do erro de cor (L1, L2 e SSIM) pelo dobro do brilho médio "
+       "da foto, medido em sRGB, elevado a esta potência: 0 não muda nada, 1 faz "
+       "uma captura escura contar tanto quanto uma clara, e valores intermédios "
+       "suavizam isso. Destina-se ao treino em luz linear, onde a curva de exibição "
+       "já faz um pixel escuro empurrar com mais força."),
+    IT("Divide i pesi dell'errore di colore (L1, L2 e SSIM) per il doppio della "
+       "luminosità media della foto, misurata in sRGB, elevato a questa potenza: 0 "
+       "non cambia nulla, 1 fa contare uno scatto scuro quanto uno chiaro, e i "
+       "valori intermedi lo attenuano. È pensato per l'addestramento in luce "
+       "lineare, dove la curva di visualizzazione fa già spingere di più un pixel "
+       "scuro."),
+    NL("Deelt de gewichten van de kleurfout (L1, L2 en SSIM) door tweemaal de "
+       "gemiddelde helderheid van de foto, gemeten in sRGB, tot deze macht "
+       "verheven: 0 verandert niets, 1 laat een donkere opname net zo zwaar tellen "
+       "als een lichte, en waarden ertussen verzachten dat. Bedoeld voor training "
+       "in lineair licht, waar de weergavecurve een donkere pixel toch al harder "
        "laat duwen."),
-    RU("Масштабирует веса ошибки цвета (L1, L2 и SSIM) на удвоенную среднюю "
-       "яркость снимка, измеренную в sRGB, чтобы тёмный кадр значил столько же, "
-       "сколько светлый. Предназначено для обучения в линейном свете, где кривая "
+    RU("Делит веса ошибки цвета (L1, L2 и SSIM) на удвоенную среднюю яркость "
+       "снимка, измеренную в sRGB, в этой степени: 0 ничего не меняет, 1 делает "
+       "тёмный кадр столь же весомым, как светлый, промежуточные значения "
+       "смягчают это. Предназначено для обучения в линейном свете, где кривая "
        "отображения и так заставляет тёмный пиксель давить сильнее."),
-    TR("Renk hatası ağırlıklarını, fotoğrafın sRGB'de ölçülen ortalama "
-       "parlaklığının iki katıyla ölçekler (L1, L2 ve SSIM); böylece karanlık bir "
-       "çekim aydınlık olan kadar sayılır. Doğrusal ışıkta eğitim için "
-       "düşünülmüştür; orada görüntüleme eğrisi karanlık pikseli zaten daha sert "
-       "ittirir."));
+    TR("Renk hatası ağırlıklarını (L1, L2 ve SSIM), fotoğrafın sRGB'de ölçülen "
+       "ortalama parlaklığının iki katının bu kuvvetine böler: 0 hiçbir şey "
+       "değiştirmez, 1 karanlık bir çekimi aydınlık olan kadar saydırır, aradaki "
+       "değerler bunu yumuşatır. Doğrusal ışıkta eğitim için düşünülmüştür; orada "
+       "görüntüleme eğrisi karanlık pikseli zaten daha sert ittirir."));
 
 
 // ===========================================================================
@@ -7539,6 +7682,80 @@ SS_MSG(ppisp_exposure_from_exif_help,
        "enstantane, diyafram ve ISO'dan, kümenin ortalamasına göre başlatır. Bu "
        "etiketleri olmayan fotoğraflar ortalamadan başlar. Pozlama çekim boyunca "
        "değişiyorsa yardımcı olur."));
+
+SS_MSG(ppisp_exposure_arithmetic_mean,
+    EN("Neutral exposure by average gain"), JA("平均の倍率で露出を中立に"),
+    ZH_HANS("按平均倍率保持曝光中性"), ZH_HANT("按平均倍率保持曝光中性"),
+    KO("평균 배율로 노출 중립"), DE("Neutrale Belichtung über mittleren Faktor"),
+    FR("Exposition neutre par gain moyen"),
+    ES("Exposición neutra por ganancia media"),
+    PT("Exposição neutra pelo ganho médio"),
+    IT("Esposizione neutra per guadagno medio"),
+    NL("Neutrale belichting via gemiddelde factor"),
+    RU("Нейтральная экспозиция по среднему множителю"),
+    TR("Ortalama çarpanla nötr pozlama"));
+SS_MSG(ppisp_exposure_arithmetic_mean_help,
+    EN("Center the per-photo exposure corrections so their brightness multipliers "
+       "average to 1, rather than their values in stops averaging to 0. Applies "
+       "to both the neutral exposure penalty and the EXIF start. When exposure "
+       "varies widely, this keeps the splats at the photos' average brightness "
+       "instead of darker."),
+    JA("写真ごとの露出補正を、段数での値の平均が 0 になるようにではなく、明るさ"
+       "の倍率の平均が 1 になるように中心を合わせます。露出を中立に保つ強さと "
+       "EXIF による露出の初期化の両方に適用されます。露出の差が大きいとき、スプ"
+       "ラットが暗くならず、写真の平均的な明るさに保たれます。"),
+    ZH_HANS("让逐张照片的曝光校正以亮度倍率的平均值为 1 为中心，而不是以档数"
+            "的平均值为 0。同时作用于保持曝光中性的强度和用 EXIF 初始化曝光。"
+            "曝光差异很大时，这会让泼溅保持在照片的平均亮度，而不是更暗。"),
+    ZH_HANT("讓逐張照片的曝光校正以亮度倍率的平均值為 1 為中心，而不是以檔數"
+            "的平均值為 0。同時作用於保持曝光中性的強度和用 EXIF 初始化曝光。"
+            "曝光差異很大時，這會讓潑濺保持在照片的平均亮度，而不是更暗。"),
+    KO("사진별 노출 보정을, 스톱 단위 값의 평균이 0이 되도록이 아니라 밝기 배율"
+       "의 평균이 1이 되도록 맞춥니다. 노출을 중립으로 유지하는 강도와 EXIF로 노"
+       "출 초기화에 모두 적용됩니다. 노출 차이가 클 때 스플랫이 더 어두워지지 않"
+       "고 사진의 평균 밝기에 맞춰집니다."),
+    DE("Die Belichtungskorrekturen pro Foto so zentrieren, dass ihre "
+       "Helligkeitsfaktoren im Mittel 1 ergeben, statt dass ihre Werte in "
+       "Blendenstufen im Mittel 0 ergeben. Gilt für die Strafe für nicht neutrale "
+       "Belichtung und den Belichtungsstart aus EXIF. Bei stark schwankender "
+       "Belichtung bleiben die Splats so bei der mittleren Helligkeit der Fotos "
+       "statt dunkler."),
+    FR("Centrer les corrections d'exposition par photo pour que leurs facteurs de "
+       "luminosité aient une moyenne de 1, plutôt que leurs valeurs en stops une "
+       "moyenne de 0. S'applique à la pénalité d'exposition non neutre et à "
+       "l'exposition initiale depuis l'EXIF. Quand l'exposition varie fortement, "
+       "les splats restent ainsi à la luminosité moyenne des photos au lieu "
+       "d'être plus sombres."),
+    ES("Centrar las correcciones de exposición por foto para que sus factores de "
+       "brillo promedien 1, en lugar de que sus valores en pasos promedien 0. Se "
+       "aplica a la penalización de exposición no neutra y a la exposición inicial "
+       "desde EXIF. Cuando la exposición varía mucho, así los splats quedan con el "
+       "brillo medio de las fotos en vez de más oscuros."),
+    PT("Centralizar as correções de exposição por foto para que seus fatores de "
+       "brilho tenham média 1, em vez de seus valores em stops terem média 0. Vale "
+       "para a penalidade de exposição não neutra e para a exposição inicial do "
+       "EXIF. Quando a exposição varia muito, os splats ficam assim no brilho "
+       "médio das fotos em vez de mais escuros."),
+    IT("Centrare le correzioni di esposizione di ogni foto in modo che i loro "
+       "fattori di luminosità abbiano media 1, invece che i loro valori in stop "
+       "abbiano media 0. Vale per la penalità di esposizione non neutra e per "
+       "l'esposizione iniziale da EXIF. Quando l'esposizione varia molto, gli "
+       "splat restano così alla luminosità media delle foto invece che più scuri."),
+    NL("De belichtingscorrecties per foto zo centreren dat hun helderheidsfactoren "
+       "gemiddeld 1 zijn, in plaats van dat hun waarden in stops gemiddeld 0 zijn. "
+       "Geldt voor de straf voor niet-neutrale belichting en voor het starten van "
+       "de belichting vanuit EXIF. Bij sterk wisselende belichting blijven de "
+       "splats zo op de gemiddelde helderheid van de foto's in plaats van donkerder."),
+    RU("Центрировать коррекции экспозиции каждого фото так, чтобы в среднем 1 "
+       "давали их множители яркости, а не 0 — их значения в ступенях. Действует и "
+       "на штраф за смещение экспозиции, и на начальную экспозицию из EXIF. При "
+       "сильно различающейся экспозиции сплаты так остаются на средней яркости "
+       "фотографий, а не темнее."),
+    TR("Fotoğraf başına pozlama düzeltmelerini, durak cinsinden değerlerinin "
+       "ortalaması 0 olacak şekilde değil, parlaklık çarpanlarının ortalaması 1 "
+       "olacak şekilde ortalar. Hem nötr olmayan pozlama cezasına hem de EXIF'ten "
+       "pozlama başlangıcına uygulanır. Pozlama çok değiştiğinde splat'lar böylece "
+       "daha karanlık kalmak yerine fotoğrafların ortalama parlaklığında kalır."));
 
 SS_MSG(apply_ppisp_before_bilagrid,
     EN("Camera correction first"), JA("カメラ補正を先に適用"),

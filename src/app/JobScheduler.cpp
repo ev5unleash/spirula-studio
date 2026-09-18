@@ -546,12 +546,37 @@ bool JobScheduler::valid_phase_order(const std::vector<Phase>& phases, std::stri
     if (phases.empty()) { error = "workflow has no phases"; return false; }
     int previous = -1;
     for (const Phase& p : phases) {
-        int rank = p.phase == "prep" ? 0 : p.phase == "sfm" ? 1 : p.phase == "geometry" ? 2 :
-                   p.phase == "publish" ? 3 : p.phase == "train" ? 4 : -1;
+        int rank = p.phase == "prep" ? 0 : p.phase == "sfm" ? 1 :
+                   p.phase == "geometry" ? 2 : p.phase == "train" ? 3 :
+                   p.phase == "publish" ? 4 : -1;
         if (rank < 0) { error = "unsupported workflow phase: " + p.phase; return false; }
         if (rank <= previous) { error = "workflow phases are not ordered"; return false; }
         previous = rank;
         if (p.phase == "publish" && p.optional) { error = "publish phase cannot be optional"; return false; }
+    }
+    return true;
+}
+
+static bool migrate_legacy_publish_order(std::vector<Phase>& phases) {
+    const auto publish = std::find_if(phases.begin(), phases.end(),
+        [](const Phase& phase) { return phase.phase == "publish"; });
+    const auto train = std::find_if(phases.begin(), phases.end(),
+        [](const Phase& phase) { return phase.phase == "train"; });
+    if (publish == phases.end() || train == phases.end() || publish > train)
+        return false;
+    Phase moved = std::move(*publish);
+    phases.erase(publish);
+    phases.push_back(std::move(moved));
+    int previous = -1;
+    for (const Phase& phase : phases) {
+        const int rank = phase.phase == "prep" ? 0 :
+                         phase.phase == "sfm" ? 1 :
+                         phase.phase == "geometry" ? 2 :
+                         phase.phase == "train" ? 3 :
+                         phase.phase == "publish" ? 4 : -1;
+        if (rank <= previous || (phase.phase == "publish" && phase.optional))
+            return false;
+        previous = rank;
     }
     return true;
 }
@@ -567,8 +592,9 @@ bool JobScheduler::claim_paths_locked(const Job& job, std::string& error) const 
         if (claim.path.empty()) { error = "empty path claim"; return false; }
         has_write = has_write || claim.write;
         for (size_t k = i + 1; k < job.path_claims.size(); ++k) {
-            if (path_claims_conflict(claim, job.path_claims[k])) {
-                error = "workflow path claims overlap";
+            if (claim.write && job.path_claims[k].write &&
+                path_claims_conflict(claim, job.path_claims[k])) {
+                error = "workflow write claims overlap";
                 return false;
             }
         }
@@ -633,15 +659,12 @@ std::string JobScheduler::submit(const WorkflowSubmitOpts& o) {
     if (o.phases.empty()) return {};
     std::vector<Phase> phases = o.phases;
     bool publish_seen = false;
-    size_t train_at = phases.size();
-    for (size_t i = 0; i < phases.size(); ++i) {
-        if (phases[i].phase == "publish") publish_seen = true;
-        if (phases[i].phase == "train" && train_at == phases.size()) train_at = i;
-    }
+    for (const Phase& phase : phases)
+        publish_seen = publish_seen || phase.phase == "publish";
     if (o.add_scheduler_publish && !publish_seen) {
         Phase publish;
         publish.phase = "publish";
-        phases.insert(phases.begin() + static_cast<ptrdiff_t>(train_at), std::move(publish));
+        phases.push_back(std::move(publish));
     }
     std::string phase_error;
     if (!valid_phase_order(phases, phase_error)) return {};
@@ -691,11 +714,13 @@ std::string JobScheduler::submit(const WorkflowSubmitOpts& o) {
             phase.output = std::move(normalized);
         }
         if (phase.phase == "train" && !phase.output.empty()) {
-            bool claimed = false;
+            bool claimed =
+                !o.workspace.empty() &&
+                path_claims_conflict({j->workspace, true},
+                                     {phase.output, true});
             for (const PathClaim& claim : j->path_claims)
                 if (claim.write &&
-                    canonical_claim_path(claim.path) ==
-                        canonical_claim_path(phase.output))
+                    path_claims_conflict(claim, {phase.output, true}))
                     claimed = true;
             if (!claimed) j->path_claims.push_back({phase.output, true});
         }
@@ -728,10 +753,12 @@ std::string JobScheduler::submit(const WorkflowSubmitOpts& o) {
     }
     for (const std::string& source : j->source_paths) {
         PathClaim source_claim{source, false};
-        bool covered = false;
+        bool present = false;
         for (const PathClaim& claim : j->path_claims)
-            covered = covered || path_claims_conflict(source_claim, claim);
-        if (!covered) j->path_claims.push_back(std::move(source_claim));
+            present = present || (!claim.write &&
+                canonical_claim_path(claim.path) ==
+                    canonical_claim_path(source_claim.path));
+        if (!present) j->path_claims.push_back(std::move(source_claim));
     }
     for (PathClaim& claim : j->path_claims) {
         std::string normalized;
@@ -882,7 +909,13 @@ void JobScheduler::remove(const std::string& job_id) {
     _jobs.erase(jit); _queue.erase(std::remove(_queue.begin(), _queue.end(), job_id), _queue.end()); save_locked();
 }
 
-void JobScheduler::pause_dispatch(bool on) { _paused.store(on); if (!on) _cv.notify_all(); }
+void JobScheduler::pause_dispatch(bool on) {
+    {
+        std::lock_guard<std::mutex> lk(_mu);
+        _paused.store(on);
+    }
+    if (!on) _cv.notify_all();
+}
 bool JobScheduler::dispatch_paused() const { return _paused.load(); }
 
 bool JobScheduler::save() { std::lock_guard<std::mutex> lk(_mu); return save_locked(); }
@@ -975,14 +1008,15 @@ void JobScheduler::load() {
                     completed > current) {
                     error = "scheduler state has invalid phase cursor"; return false;
                 }
-                int previous_rank = -1;
-                for (const JsonValue& p : phases->arr) {
-                    const Phase parsed = parse_phase(p);
-                    const int rank = parsed.phase == "prep" ? 0 : parsed.phase == "sfm" ? 1 :
-                                     parsed.phase == "geometry" ? 2 : parsed.phase == "publish" ? 3 :
-                                     parsed.phase == "train" ? 4 : -1;
-                    if (rank < 0 || rank <= previous_rank) { error = "scheduler state has invalid phase order"; return false; }
-                    previous_rank = rank;
+                std::vector<Phase> persisted_phases;
+                persisted_phases.reserve(phases->arr.size());
+                for (const JsonValue& p : phases->arr)
+                    persisted_phases.push_back(parse_phase(p));
+                std::string order_error;
+                if (!valid_phase_order(persisted_phases, order_error) &&
+                    !migrate_legacy_publish_order(persisted_phases)) {
+                    error = "scheduler state has invalid phase order";
+                    return false;
                 }
                 (void)path_array(el, "source_paths", false);
                 const JsonValue* claims = el.find("path_claims");
@@ -1024,11 +1058,36 @@ void JobScheduler::load() {
             if (j->current_phase >= j->phases.size()) j->current_phase = j->phases.size() - 1;
         } else {
             const JsonValue& phases = *field(el, "phases");
-            for (const JsonValue& p : phases.arr) j->phases.push_back(parse_phase(p));
+            for (const JsonValue& p : phases.arr)
+                j->phases.push_back(parse_phase(p));
             j->completed_prefix = (size_t)number_field(el, "completed_prefix");
             j->current_phase = (size_t)number_field(el, "current_phase");
+            if (migrate_legacy_publish_order(j->phases)) {
+                Phase& publish = j->phases.back();
+                const Phase& train = j->phases[j->phases.size() - 2];
+                if (train.completed) {
+                    publish.output = train.output;
+                    publish.outputs = train.outputs;
+                    if (publish.outputs.empty() && !publish.output.empty())
+                        publish.outputs.push_back(publish.output);
+                } else {
+                    publish.completed = false;
+                    publish.outcome = "pending";
+                    publish.output.clear();
+                    publish.outputs.clear();
+                    publish.error.clear();
+                    publish.exit_code = -1;
+                }
+                j->completed_prefix = 0;
+                while (j->completed_prefix < j->phases.size() &&
+                       j->phases[j->completed_prefix].completed)
+                    ++j->completed_prefix;
+                j->current_phase = j->completed_prefix;
+                load_changed = true;
+            }
             for (const JsonValue& c : field(el, "path_claims")->arr)
-                j->path_claims.push_back({raw_string_field(c, "path"), bool_field(c, "write")});
+                j->path_claims.push_back(
+                    {raw_string_field(c, "path"), bool_field(c, "write")});
         }
         JobState s = loaded_job_state;
         if (s == JobState::Starting || s == JobState::Running || s == JobState::Stopping) {
@@ -1364,7 +1423,10 @@ void JobScheduler::supervisor_main(std::shared_ptr<Attempt> att) {
 }
 
 void JobScheduler::shutdown() {
-    bool expected = false; if (!_shutdown.compare_exchange_strong(expected, true)) return;
+    {
+        std::lock_guard<std::mutex> lk(_mu);
+        if (_shutdown.exchange(true)) return;
+    }
     _cv.notify_all(); if (_dispatcher.joinable()) _dispatcher.join();
     std::vector<std::shared_ptr<Attempt>> live; { std::lock_guard<std::mutex> lk(_mu); for (auto& [_, a] : _active) live.push_back(a); }
     for (auto& a : live) a->stop.store(true);

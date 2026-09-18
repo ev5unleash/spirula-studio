@@ -158,7 +158,13 @@ int main() {
         input.video_tracks = 2;
         input.subcameras.push_back(
             {"cam1", "PINHOLE", 0.61f, app::kRigOwn});
-        input.eac360 = {4096, 1344, 1344, 32};
+        input.pano360.packing = app::Pano360Packing::Sphere;
+        input.pano360.track_w = 4096;
+        input.pano360.track_h = 1344;
+        input.pano360.face = 1344;
+        input.pano360.strip = 32;
+        input.pano360.margin = 24;
+        input.pano360_unsupported = true;
         input.stencil.detect_border = true;
         input.stencil.shrink = 0.03f;
         input.stencil.mask.image = "input/stencil.png";
@@ -173,6 +179,8 @@ int main() {
         prep.device = "uuid:0123456789abcdef0123456789abcdef";
         prep.pano = {app::Pano360Mode::Faces, 768, 12.0f, -8.0f, 180.0f};
         prep.video_fps = 1.5f;
+        prep.adaptive_fps = true;
+        prep.adaptive_range = 8.0f;
         prep.sharp_window = 5;
         prep.sync_tracks = false;
         prep.max_frames = 321;
@@ -232,6 +240,8 @@ int main() {
                   decoded.pano.pitch == prep.pano.pitch &&
                   decoded.pano.roll == prep.pano.roll &&
                   decoded.video_fps == prep.video_fps &&
+                  decoded.adaptive_fps == prep.adaptive_fps &&
+                  decoded.adaptive_range == prep.adaptive_range &&
                   decoded.sharp_window == prep.sharp_window &&
                   decoded.sync_tracks == prep.sync_tracks &&
                   decoded.max_frames == prep.max_frames &&
@@ -264,10 +274,14 @@ int main() {
                   got_input.focal_factor == want_input.focal_factor &&
                   got_input.rig == want_input.rig &&
                   got_input.video_tracks == want_input.video_tracks &&
-                  got_input.eac360.track_w == want_input.eac360.track_w &&
-                  got_input.eac360.track_h == want_input.eac360.track_h &&
-                  got_input.eac360.face == want_input.eac360.face &&
-                  got_input.eac360.strip == want_input.eac360.strip &&
+                  got_input.pano360.packing == want_input.pano360.packing &&
+                  got_input.pano360.track_w == want_input.pano360.track_w &&
+                  got_input.pano360.track_h == want_input.pano360.track_h &&
+                  got_input.pano360.face == want_input.pano360.face &&
+                  got_input.pano360.strip == want_input.pano360.strip &&
+                  got_input.pano360.margin == want_input.pano360.margin &&
+                  got_input.pano360_unsupported ==
+                      want_input.pano360_unsupported &&
                   got_input.stencil.detect_border ==
                       want_input.stencil.detect_border &&
                   got_input.stencil.shrink == want_input.stencil.shrink &&
@@ -292,17 +306,74 @@ int main() {
                   got_click->source == want_click.source &&
                   got_click->camera == want_click.camera,
               "prep payload roundtrips every execution option");
+        std::string legacy_payload = payload;
+        legacy_payload = replace_once(legacy_payload, "\"pano360\":", "\"eac360\":");
+        legacy_payload = replace_once(legacy_payload, "\"packing\":1,", "");
+        legacy_payload = replace_once(legacy_payload, ",\"margin\":24", "");
+        legacy_payload =
+            replace_once(legacy_payload, ",\"pano360_unsupported\":true", "");
+        const app::PrepJob legacy =
+            app::worker::deserialize_prep_job(legacy_payload);
+        const app::PrepInput& legacy_input = legacy.inputs.front();
+        check(legacy_input.pano360.face == want_input.pano360.face &&
+                  legacy_input.pano360.packing == app::Pano360Packing::Eac &&
+                  legacy_input.pano360.margin == 0 &&
+                  !legacy_input.pano360_unsupported,
+              "prep payload reads old eac360 defaults");
         std::string masking_error;
         check(app::worker::reject_external_masking(decoded, masking_error) &&
                   masking_error.find("external Python") != std::string::npos,
               "scheduled prep rejects external Python masking");
+
+        app::worker::Result published;
+        published.outcome = "partial";
+        published.exit_code = 3;
+        published.outputs = {(root / "quoted output").u8string()};
+        published.registered = 4;
+        published.images = 6;
+        check(app::worker::publish_result(request, published),
+              "publishes a completed result");
+        const auto result = app::worker::parse_result(result_path.u8string());
+        check(result.job_id == job_id && result.attempt_id == attempt_id &&
+                  result.phase == request.phase && result.outcome == "partial" &&
+                  result.exit_code == 3 && result.outputs == published.outputs &&
+                  result.registered == 4 && result.images == 6,
+              "published partial result retains identity and usable output metadata");
+        std::ifstream result_input(result_path, std::ios::binary);
+        const std::string result_json(
+            (std::istreambuf_iterator<char>(result_input)), {});
+        result_input.close();
+        auto rejects_result = [&](const std::string& text) {
+            write_text(result_path, text);
+            try {
+                app::worker::parse_result(result_path.u8string());
+                return false;
+            } catch (const std::exception&) {
+                return true;
+            }
+        };
+        check(rejects_result(replace_once(result_json, "\"partial\"", "\"unknown\"")),
+              "rejects an unknown result outcome");
+        check(rejects_result(replace_once(result_json, "\"schema_version\": 2",
+                                                       "\"schema_version\": 3")),
+              "rejects an unsupported result schema");
+        check(rejects_result(replace_once(result_json, "\"registered\": 4",
+                                                       "\"registered\": 4.5")),
+              "rejects fractional reconstruction counts");
+        check(rejects_result(result_json.substr(0, result_json.size() / 2)),
+              "rejects a truncated result instead of accepting partial publication");
+        app::worker::Request unavailable = request;
+        unavailable.result_path = (root / "missing" / "result.json").u8string();
+        check(!app::worker::publish_result(unavailable, published) &&
+                  !fs::exists(fs::u8path(unavailable.result_path)),
+              "publication failure does not create a successful result");
     } catch (const std::exception& e) {
         std::printf("FAIL worker request test setup: %s\n", e.what());
         ++failures;
     }
 
     std::error_code ec;
-    fs::remove_all(root, ec);
+    if (!failures) fs::remove_all(root, ec);
     if (failures) {
         std::printf("FAILED with %d error(s)\n", failures);
         return 1;

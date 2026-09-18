@@ -1,14 +1,14 @@
 // SfmRunner.cpp -- see SfmRunner.h.
 
 #include "app/gui/SfmRunner.h"
+#include "app/TextFile.h"
 
 #include "app/gui/SfmInProcess.h"
 
 #include "sfm/core/Resume.h"
 
-#include <fstream>
 
-#include "app/gui/ReconStamp.h"
+#include "app/ReconStamp.h"
 
 #include "i18n/Locale.h"
 #include "i18n/catalog/Log.h"
@@ -65,6 +65,9 @@ app::DatasetPrepSinks make_prep_sinks(RunProgress& progress, RunFilms films) {
     sinks.count = [&progress](app::Stage stage, int64_t done, int64_t total) {
         progress.count(static_cast<Stage>(stage), done, total);
     };
+    sinks.fraction = [&progress](app::Stage stage, float value) {
+        progress.fraction(static_cast<Stage>(stage), value);
+    };
     sinks.detail = [&progress](app::Stage stage, const std::string& text) {
         progress.detail(static_cast<Stage>(stage), text);
     };
@@ -77,6 +80,24 @@ app::DatasetPrepSinks make_prep_sinks(RunProgress& progress, RunFilms films) {
         f.mask_path = frame.mask_path;
         reel->add(f, reel->wants() ? frame.rgb : nullptr, frame.width,
                   frame.height, frame.mask);
+    };
+    sinks.scan_reset = [&progress](std::vector<app::PrepScanRow> source) {
+        std::vector<ScanRow> rows;
+        rows.reserve(source.size());
+        for (app::PrepScanRow& item : source)
+            rows.push_back({std::move(item.name), item.video, item.frames});
+        progress.scan_reset(std::move(rows));
+    };
+    sinks.scan_open = [&progress](size_t row) { progress.scan_open(row); };
+    sinks.scan_step = [&progress](size_t row, int64_t at, int64_t of,
+                                  float cost) {
+        progress.scan_step(row, at, of, cost);
+    };
+    sinks.scan_kept = [&progress](size_t row,
+                                  const std::vector<int64_t>& plan,
+                                  int64_t frames) {
+        progress.scan_kept(row, scan_plan_bars(plan, frames),
+                           (int64_t)plan.size());
     };
     return sinks;
 }
@@ -458,7 +479,9 @@ void SfmRunner::apply_status(const RunStatus& st) {
 sfm::Manifest SfmRunner::build_manifest(const SfmJob& job, const PrepResult& prep) {
     sfm::Manifest man;
     man.image_dir = prep.image_dir;
-    if (!prep.mask_dir.empty()) {
+    // Named here only when the reconstruction is to read them: the manifest is
+    // the other way masks reach it, so leaving it in would undo --no-masks.
+    if (!prep.mask_dir.empty() && job.mask_features) {
         man.mask_dir = prep.mask_dir;
         man.has_mask_flipped = true;
         man.mask_flipped = prep.mask_dir_flipped;
@@ -681,7 +704,7 @@ std::vector<std::string> SfmRunner::recon_args(const SfmJob& job,
         argv.push_back("--point-color");
         argv.push_back("image");
     }
-    if (!prep.mask_dir.empty()) {
+    if (!prep.mask_dir.empty() && job.mask_features) {
         argv.push_back("--masks");
         argv.push_back(prep.mask_dir);
         // Only masks the run handed on untouched are still the other way
@@ -750,6 +773,15 @@ void SfmRunner::run(SfmJob job) {
             _sfm_mask_dir = prep.mask_dir;
             _mask_flipped = prep.mask_dir_flipped;
         }
+        // Frames this run replaced: features/ and matches.bin describe the old
+        // ones, and the resume signature is made of settings and cannot see it.
+        if (prep.frames_rebuilt) {
+            job.redo_model = true;
+            remove_tree(ws / "features");
+            remove_tree(ws / sfm::resume::kDir);
+            std::error_code fec;
+            fs::remove(ws / "matches.bin", fec);
+        }
         if (prep.per_folder_cameras && job.camera_mode == 0) {
             log(lmsg::one_camera_per_folder.get());
             job.camera_mode = 1;
@@ -760,21 +792,22 @@ void SfmRunner::run(SfmJob job) {
         // The model, as the flags that make it. A copy stays in the workspace
         // beside it (ReconStamp.h) so that a later run can tell whether the
         // one already there still answers what the panel is asking for.
-        ReconStamp now;
+        app::ReconStamp now;
         now.present = true;
         now.engine = "builtin";
         now.args = recon_args(job, prep, true);
         const std::string changed =
-            recon_stamp_change(read_recon_stamp(ws.string()), now);
+            app::recon_stamp_change(app::read_recon_stamp(ws.string()), now);
 
         // A model already there is reused whoever made it, which is how a
-        // finished dataset gets masks and geometry. Not one this panel would now
-        // build differently; one with no stamp says nothing and is reused still.
-        const bool reuse_model = prior.model && !job.redo_model && changed.empty();
+        // finished dataset gets masks and geometry. The one exception is a
+        // model this panel built and has since been asked to build differently.
+        const bool reuse_model = prior.model && !job.redo_model &&
+                                 (!job.settings_built_model || changed.empty());
         if (reuse_model) {
             log(fmt(lmsg::sfm_reusing_model, {ws.string()}), /*detail=*/false);
         } else {
-            if (prior.model && !changed.empty())
+            if (prior.model && job.settings_built_model && !changed.empty())
                 log(fmt(lmsg::sfm_settings_changed, {changed}), /*detail=*/false);
             set_stage(Stage::Features, lmsg::stage_reconstructing_features.get());
             // What features/ and matches.bin are still worth is the run's own
@@ -801,7 +834,10 @@ void SfmRunner::run(SfmJob job) {
                 // Dotted and prefixed, like .spirula_mask.py: the workspace
                 // is the user's, and a plain manifest.yaml there could be theirs.
                 const fs::path mf = ws / ".spirula_manifest.yaml";
-                std::ofstream(mf, std::ios::binary | std::ios::trunc) << now.args[++k];
+                if (const std::string error =
+                        app::write_text_file(mf, now.args[++k]);
+                    !error.empty())
+                    throw std::runtime_error("cannot write SfM manifest " + error);
                 settings.push_back(mf.string());
             }
             // Keep the execution identity out of ReconStamp while making it
@@ -881,7 +917,7 @@ void SfmRunner::run(SfmJob job) {
         // transforms.json or a Metashape export, which has no sparse/ at all.
         if (!reuse_model && !has_model(ws / "sparse"))
             return fail(lmsg::err_no_reconstruction.get());
-        if (!reuse_model) write_recon_stamp(ws.string(), now);
+        if (!reuse_model) app::write_recon_stamp(ws.string(), now);
 
         // ---- 3. depth and normals -------------------------------------------
         take_geometry(job);
@@ -893,11 +929,11 @@ void SfmRunner::run(SfmJob job) {
         }
 
         // ---- 4. tidy up ----------------------------------------------------
-        // Swept by sweep_intermediates(), not here: the screen goes on
-        // reading the snapshots and matches.bin after the run ends.
+        // Swept by sweep_intermediates(), not here: the screen reads them
+        // after the run ends. Only ones this run produced.
         {
             std::lock_guard<std::mutex> lk(_mu);
-            _sweep_dir = job.keep_intermediate ? "" : ws.string();
+            _sweep_dir = job.keep_intermediate || reuse_model ? "" : ws.string();
         }
 
         if (reads_photos_in_place(job.prep.inputs, job.prep.photo_import))

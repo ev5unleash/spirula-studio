@@ -2,6 +2,8 @@
 
 #include "app/gui/PrepProgress.h"
 
+#include <algorithm>
+
 namespace gui {
 
 void RunProgress::reset() {
@@ -9,6 +11,75 @@ void RunProgress::reset() {
     for (StageProgress& s : _st) s = StageProgress{};
     _cur = Stage::Frames;
     _pending.clear();
+    _scan.clear();
+}
+
+std::vector<float> scan_plan_bars(const std::vector<int64_t>& plan,
+                                  int64_t frames) {
+    if (plan.size() < 2 || frames <= 0) return {};
+    std::vector<float> bars((size_t)kScanSlices, 0.0f);
+    size_t k = 0;
+    for (int b = 0; b < kScanSlices; b++) {
+        const int64_t at =
+            (int64_t)(((double)b + 0.5) * frames / kScanSlices);
+        while (k + 2 < plan.size() && plan[k + 1] < at) k++;
+        bars[(size_t)b] =
+            1.0f / (float)std::max<int64_t>(1, plan[k + 1] - plan[k]);
+    }
+    const float top = *std::max_element(bars.begin(), bars.end());
+    if (top > 0.0f)
+        for (float& v : bars) v /= top;
+    return bars;
+}
+
+void RunProgress::scan_reset(std::vector<ScanRow> rows) {
+    std::lock_guard<std::mutex> lk(_mu);
+    for (ScanRow& r : rows) {
+        r.speed.assign(kScanSlices, 0.0f);
+        r.hits.assign(kScanSlices, 0);
+    }
+    _scan = std::move(rows);
+}
+
+void RunProgress::scan_open(size_t row) {
+    std::lock_guard<std::mutex> lk(_mu);
+    if (row < _scan.size()) _scan[row].started = true;
+}
+
+void RunProgress::scan_step(size_t row, int64_t at, int64_t of, float cost) {
+    std::lock_guard<std::mutex> lk(_mu);
+    if (row >= _scan.size()) return;
+    ScanRow& r = _scan[row];
+    if (r.frames <= 0) r.frames = of;
+    if (r.frames <= 0 || r.speed.empty()) return;
+    r.started = true;
+    const int64_t slice = std::max<int64_t>(0, at) * kScanSlices / r.frames;
+    const size_t i = (size_t)std::min<int64_t>(kScanSlices - 1, slice);
+    // A running mean rather than a sum: the slices a stride lands in unevenly
+    // would otherwise read as motion the capture does not have.
+    r.speed[i] += (std::max(0.0f, cost) - r.speed[i]) / (float)(++r.hits[i]);
+    r.done = (float)std::min(1.0, (double)at / (double)r.frames);
+}
+
+void RunProgress::scan_kept(size_t row, std::vector<float> bars, int64_t kept) {
+    std::lock_guard<std::mutex> lk(_mu);
+    if (row >= _scan.size()) return;
+    _scan[row].kept = std::move(bars);
+    _scan[row].kept_n = kept;
+    _scan[row].started = true;
+    _scan[row].done = 1.0f;
+}
+
+std::vector<ScanRow> RunProgress::scan() const {
+    std::lock_guard<std::mutex> lk(_mu);
+    return _scan;
+}
+
+bool RunProgress::scanning() const {
+    std::lock_guard<std::mutex> lk(_mu);
+    for (const ScanRow& r : _scan)
+        if (r.started && r.done < 1.0f) return true;
+    return false;
 }
 
 void RunProgress::enter(Stage s, const std::string& detail) {

@@ -357,7 +357,7 @@ EngineStepConfig build_step_config(const TrainConfig& c, const RunState& st, int
     cfg.loss.loss_map_power = c.densify_loss_map_power;
     cfg.loss.loss_map_accum_mode = densify_accum_mode_int(c.densify_accum_mode);
     cfg.loss.saturation_threshold = c.loss_saturation_threshold;
-    cfg.loss.normalize_by_luminance = c.normalize_loss_by_luminance;
+    cfg.loss.luminance_normalization = c.loss_luminance_normalization;
     cfg.loss.overexposure_reg_weight = c.overexposure_reg;
     if (st.bilagrid_rgb_init || st.ppisp_init) {
         cfg.loss.color_shift_reg_weight = c.color_shift_reg_weight;
@@ -480,10 +480,12 @@ EngineStepConfig build_step_config(const TrainConfig& c, const RunState& st, int
     cfg.ppisp.run_before_color_space = c.apply_ppisp_before_color_space;
 
     // ---- background ----------------------------------------------------
-    if (c.background_mode == "noise" || c.background_mode == "pseudorandom") {
+    if (c.background_mode == "noise" || c.background_mode == "pseudorandom" ||
+        c.background_mode == "random") {
         float rw = std::min((float)step / std::max(c.background_noise_warmup, 1), 1.0f);
         cfg.background.randomize_weight =
             1.0f - (1.0f - c.background_noise_pre_warmup) * (1.0f - rw);
+        cfg.background.match_luminance = c.background_match_luminance;
     } else if (c.background_mode == "sh") {
         cfg.background.lr_dc = scheduled_lr(step, max_steps_lr, c.background_dc_lr);
         cfg.background.lr_sh = scheduled_lr(step, max_steps_lr, c.background_sh_lr);
@@ -710,34 +712,39 @@ static void check_cuda_runtime() {
 }
 #endif  // SS_BACKEND_VULKAN
 
-// PPISP exposure seeds: mean-relative EXIF EV x 0.5 per POST-split slot; empty
-// when no image has the tags. The 0.5: PPISP multiplies the sRGB-encoded
+// PPISP exposure seeds: 0.5 x EXIF EV per POST-split slot, centred like the
+// exposure-mean regularizer; empty without tags. 0.5: PPISP scales the sRGB
 // render, where a bracketed +1 EV measures x2^0.49 (0.34-0.76 by tone curve).
-static std::vector<float> exif_exposure_evs(const ParsedDataset& ds,
-                                            const PostSplitCameras& post,
-                                            int& n_found) {
+std::vector<float> trainer_exif_exposure_evs(const ParsedDataset& ds,
+                                             const PostSplitCameras& post,
+                                             bool arithmetic_mean,
+                                             int& n_found) {
     int64_t n = ds.num_cameras;
-    std::vector<double> ev(n, 0.0);
+    std::vector<double> gain(n, 0.0);
     std::vector<char> has(n, 0);
     double sum = 0.0;
     n_found = 0;
     for (int64_t i = 0; i < n; i++) {
         double v;
         if (sfm::exifExposureEv(sfm::readExif(ds.image_filenames[i]), v)) {
-            ev[i] = v;
+            gain[i] = 0.5 * v;
             has[i] = 1;
-            sum += v;
-            // sum += std::exp2(v);
+            sum += gain[i];
             n_found++;
         }
     }
     if (n_found == 0) return {};
-    double mean = sum / n_found;
-    // double mean = std::log2(sum / n_found);
+    double center = sum / n_found;
+    if (arithmetic_mean) {
+        double sum_exp = 0.0;
+        for (int64_t i = 0; i < n; i++)
+            if (has[i]) sum_exp += std::exp2(gain[i] - center);
+        center += std::log2(sum_exp / n_found);
+    }
     std::vector<float> out((size_t)post.n_post, 0.0f);
     for (int64_t i = 0; i < n; i++) {
         if (!has[i]) continue;
-        float v = 0.5f * (float)(ev[i] - mean);
+        float v = (float)(gain[i] - center);
         if (post.K_per_camera.empty()) {
             out[i] = v;
         } else {
@@ -804,6 +811,13 @@ void TrainerSession::setup_engine() {
     else if (cfg.background_mode == "pseudorandom")
         engine_init_background_pseudorandom((int)color.splat_transfer,
                                             color.splat_linear);
+    else if (cfg.background_mode == "random")
+        engine_init_background_random((int)color.splat_transfer,
+                                      color.splat_linear);
+    else if (cfg.background_mode == "color")
+        engine_init_background_color(cfg.background_color.data(),
+                                     (int)color.splat_transfer,
+                                     color.splat_linear);
     else if (cfg.background_mode == "sh")
         engine_init_background_sh(cfg.background_sh_degree,
                                   (int)color.splat_transfer,
@@ -928,13 +942,15 @@ void TrainerSession::setup_engine() {
         std::vector<float> exif_ev;
         if (cfg.ppisp_exposure_from_exif) {
             int n_exif = 0;
-            exif_ev = exif_exposure_evs(ds, post, n_exif);
+            exif_ev = trainer_exif_exposure_evs(
+                ds, post, cfg.ppisp_exposure_arithmetic_mean, n_exif);
             if (n_exif > 0)
                 log(lfmt(lmsg::ppisp_exif_exposure,
                          {(long long)n_exif, (long long)ds.num_cameras}));
         }
         engine_init_ppisp(n_grids, cfg.ppisp_param_type,
-                          cfg.use_adagrad_ppisp_optim, exif_ev);
+                          cfg.use_adagrad_ppisp_optim,
+                          cfg.ppisp_exposure_arithmetic_mean, exif_ev);
         st.ppisp_init = true;
     }
 

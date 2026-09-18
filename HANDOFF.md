@@ -4,7 +4,7 @@
 
 Nonvisual remediation and Vulkan verification are complete. The two known GUI state gaps below are fixed, and desktop validation has resumed with the partial results recorded below. This is **not** a desktop acceptance sign-off or completion of the broader scheduling plan.
 
-Branch: `feature/device-job-scheduling`. Review baseline: `d76f7318` (`fix(gui): restore scheduled dataset previews`), following `f2becb97` (`fix(gui): compact dataset GPU controls`). The broader plan is `docs/notes/device-job-scheduling-plan.md`; the previously cited `docs/notes/device-job-scheduling.md` does not exist.
+Branch: `feature/device-job-scheduling`. Review baseline: `d76f7318` (`fix(gui): restore scheduled dataset previews`), following `f2becb97` (`fix(gui): compact dataset GPU controls`). The broader plan is `docs/notes/device-job-scheduling-plan.md`.
 
 ## Next session
 

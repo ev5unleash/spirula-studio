@@ -45,7 +45,7 @@ enum class JobState {
 // Fixed workflow phase.  `phase` is deliberately a string at this boundary:
 // the worker allowlist is the one place that knows how to dispatch it.
 struct Phase {
-    std::string phase;             // prep -> sfm -> geometry -> publish -> train
+    std::string phase;             // prep -> sfm -> geometry -> train -> publish
     bool optional = false;
     std::string planned_device;
     std::string planned_device_name;

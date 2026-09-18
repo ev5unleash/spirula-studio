@@ -241,6 +241,21 @@ SS_MSG(pick_photo_folder,
     RU("Выбор папки с фотографиями"),
     TR("Fotoğraf klasörü seç"));
 
+SS_MSG(pick_existing_dataset,
+    EN("Select Dataset Folder"),
+    JA("データセットフォルダを選択"),
+    ZH_HANS("选择数据集文件夹"),
+    ZH_HANT("選擇資料集資料夾"),
+    KO("데이터셋 폴더 선택"),
+    DE("Datensatzordner wählen"),
+    FR("Choisir un dossier de jeu de données"),
+    ES("Seleccionar una carpeta de conjunto de datos"),
+    PT("Selecionar uma pasta de conjunto de dados"),
+    IT("Seleziona una cartella di set di dati"),
+    NL("Datasetmap kiezen"),
+    RU("Выбор папки набора данных"),
+    TR("Veri kümesi klasörü seç"));
+
 SS_MSG(pick_videos,
     EN("Select Videos"),
     JA("動画を選択"),
@@ -4036,19 +4051,19 @@ SS_MSG(preset_drop_hint,
        "bu pencereye sürükleyip bırakabilirsiniz."));
 
 SS_MSG(preset_save_title,
-    EN("Save Training Preset"),
-    JA("学習プリセットを保存"),
-    ZH_HANS("保存训练预设"),
-    ZH_HANT("儲存訓練預設"),
-    KO("학습 프리셋 저장"),
-    DE("Trainingsvoreinstellung speichern"),
-    FR("Enregistrer le préréglage d'entraînement"),
-    ES("Guardar el ajuste de entrenamiento"),
-    PT("Salvar a predefinição de treinamento"),
-    IT("Salva la preimpostazione di addestramento"),
-    NL("Trainingsvoorinstelling opslaan"),
-    RU("Сохранение пресета обучения"),
-    TR("Eğitim hazır ayarını kaydet"));
+    EN("Save Preset"),
+    JA("プリセットを保存"),
+    ZH_HANS("保存预设"),
+    ZH_HANT("儲存預設"),
+    KO("프리셋 저장"),
+    DE("Voreinstellung speichern"),
+    FR("Enregistrer le préréglage"),
+    ES("Guardar ajuste"),
+    PT("Salvar predefinição"),
+    IT("Salva preimpostazione"),
+    NL("Voorinstelling opslaan"),
+    RU("Сохранить пресет"),
+    TR("Hazır ayarı kaydet"));
 SS_MSG(preset_name,
     EN("Name"),          JA("名前"),          ZH_HANS("名称"),     ZH_HANT("名稱"),
     KO("이름"),           DE("Name"),         FR("Nom"),          ES("Nombre"),
@@ -4358,149 +4373,164 @@ SS_MSG(preset_delete_failed,
 
 
 // ===========================================================================
-// Batch training
+// Batch processing
 // ===========================================================================
 
 SS_MSG(home_batch,
-    EN("Batch Training"),
-    JA("バッチ学習"),
-    ZH_HANS("批量训练"),
-    ZH_HANT("批次訓練"),
-    KO("일괄 학습"),
-    DE("Stapeltraining"),
-    FR("Entraînement par lots"),
-    ES("Entrenamiento por lotes"),
-    PT("Treinamento em lote"),
-    IT("Addestramento in batch"),
-    NL("Batchtraining"),
-    RU("Пакетное обучение"),
-    TR("Toplu eğitim"));
+    EN("Batch Processing"),
+    JA("バッチ処理"),
+    ZH_HANS("批量处理"),
+    ZH_HANT("批次處理"),
+    KO("일괄 처리"),
+    DE("Stapelverarbeitung"),
+    FR("Traitement par lots"),
+    ES("Procesamiento por lotes"),
+    PT("Processamento em lote"),
+    IT("Elaborazione in batch"),
+    NL("Batchverwerking"),
+    RU("Пакетная обработка"),
+    TR("Toplu işleme"));
 SS_MSG(home_batch_help,
-    EN("Queue several datasets, each with its own preset, and train them one "
+    EN("Queue datasets to build, train and mesh, and work through them one "
        "after another without supervision."),
-    JA("複数のデータセットをそれぞれのプリセットとともに並べて、順番に学習させ"
-       "ます。付きっきりでいる必要はありません。"),
-    ZH_HANS("把多个数据集排成队列，各自配一个预设，然后一个接一个训练下去，中途"
-            "不用盯着。"),
-    ZH_HANT("把多個資料集排成佇列，各自配一個預設，然後一個接一個訓練下去，中途"
-            "不用盯著。"),
-    KO("여러 데이터셋을 각자의 프리셋과 함께 줄 세워 두면, 지켜보지 않아도 차례로 "
-       "학습합니다."),
-    DE("Mehrere Datensätze mit je eigener Voreinstellung in eine Warteschlange "
-       "stellen und unbeaufsichtigt nacheinander trainieren."),
-    FR("Mettre en file plusieurs jeux de données, chacun avec son préréglage, "
-       "et les entraîner l'un après l'autre sans surveillance."),
-    ES("Poner en cola varios conjuntos de datos, cada uno con su ajuste, y "
-       "entrenarlos uno tras otro sin vigilarlos."),
-    PT("Enfileirar vários conjuntos de dados, cada um com sua predefinição, e "
-       "treiná-los um após o outro sem supervisão."),
-    IT("Mettere in coda più set di dati, ciascuno con la sua preimpostazione, e "
-       "addestrarli uno dopo l'altro senza sorvegliarli."),
-    NL("Meerdere datasets in de wachtrij zetten, elk met een eigen "
-       "voorinstelling, en ze zonder toezicht na elkaar trainen."),
-    RU("Поставить в очередь несколько наборов данных, каждый со своим пресетом, "
-       "и обучать их один за другим без присмотра."),
-    TR("Her biri kendi hazır ayarıyla birkaç veri kümesini sıraya koyup, başında "
-       "durmadan arka arkaya eğitir."));
+    JA("データセットの作成・学習・メッシュ化を並べておき、付きっきりでなくても順番に片づけます。"),
+    ZH_HANS("把建数据集、训练和生成网格排成队列，不用盯着也能一个接一个做完。"),
+    ZH_HANT("把建資料集、訓練與產生網格排成佇列，不用盯著也能一個接一個做完。"),
+    KO("데이터셋 생성, 학습, 메시 생성을 줄 세워 두면 지켜보지 않아도 차례로 처리합니다."),
+    DE("Datensätze zum Bauen, Trainieren und Meshen in eine Warteschlange "
+       "stellen und unbeaufsichtigt nacheinander abarbeiten."),
+    FR("Mettre en file la construction de jeux de données, l'entraînement et "
+       "le maillage, et les enchaîner sans surveillance."),
+    ES("Poner en cola la construcción de conjuntos de datos, el entrenamiento "
+       "y el mallado, y encadenarlos sin vigilarlos."),
+    PT("Enfileirar a construção de conjuntos de dados, o treinamento e a "
+       "geração de malha, e encadeá-los sem supervisão."),
+    IT("Mettere in coda la costruzione dei set di dati, l'addestramento e la "
+       "mesh, e portarli avanti uno dopo l'altro senza sorvegliarli."),
+    NL("Datasets bouwen, trainen en meshen in de wachtrij zetten en zonder "
+       "toezicht na elkaar afwerken."),
+    RU("Поставить в очередь сборку наборов данных, обучение и построение "
+       "полигонов и выполнить всё подряд без присмотра."),
+    TR("Veri kümesi kurma, eğitme ve ağ oluşturmayı sıraya koyup, başında "
+       "durmadan arka arkaya bitirir."));
 SS_MSG(menu_batch,
-    EN("Batch Training..."),
-    JA("バッチ学習…"),
-    ZH_HANS("批量训练…"),
-    ZH_HANT("批次訓練…"),
-    KO("일괄 학습…"),
-    DE("Stapeltraining …"),
-    FR("Entraînement par lots…"),
-    ES("Entrenamiento por lotes…"),
-    PT("Treinamento em lote…"),
-    IT("Addestramento in batch…"),
-    NL("Batchtraining…"),
-    RU("Пакетное обучение…"),
-    TR("Toplu eğitim…"));
+    EN("Batch Processing..."),
+    JA("バッチ処理…"),
+    ZH_HANS("批量处理…"),
+    ZH_HANT("批次處理…"),
+    KO("일괄 처리…"),
+    DE("Stapelverarbeitung …"),
+    FR("Traitement par lots…"),
+    ES("Procesamiento por lotes…"),
+    PT("Processamento em lote…"),
+    IT("Elaborazione in batch…"),
+    NL("Batchverwerking…"),
+    RU("Пакетная обработка…"),
+    TR("Toplu işleme…"));
 SS_MSG(batch_title,
-    EN("Batch Training"),
-    JA("バッチ学習"),
-    ZH_HANS("批量训练"),
-    ZH_HANT("批次訓練"),
-    KO("일괄 학습"),
-    DE("Stapeltraining"),
-    FR("Entraînement par lots"),
-    ES("Entrenamiento por lotes"),
-    PT("Treinamento em lote"),
-    IT("Addestramento in batch"),
-    NL("Batchtraining"),
-    RU("Пакетное обучение"),
-    TR("Toplu eğitim"));
+    EN("Batch Processing"),
+    JA("バッチ処理"),
+    ZH_HANS("批量处理"),
+    ZH_HANT("批次處理"),
+    KO("일괄 처리"),
+    DE("Stapelverarbeitung"),
+    FR("Traitement par lots"),
+    ES("Procesamiento por lotes"),
+    PT("Processamento em lote"),
+    IT("Elaborazione in batch"),
+    NL("Batchverwerking"),
+    RU("Пакетная обработка"),
+    TR("Toplu işleme"));
 SS_MSG(batch_intro,
-    EN("Each row trains one dataset with one preset, top to bottom. A row that "
-       "fails is recorded and the next one starts anyway."),
-    JA("1 行につきデータセット 1 つをプリセット 1 つで、上から順に学習します。"
-       "失敗した行は記録され、次の行はそのまま始まります。"),
-    ZH_HANS("每一行用一个预设训练一个数据集，从上往下依次进行。失败的行会记录"
-            "下来，下一行照常开始。"),
-    ZH_HANT("每一行用一個預設訓練一個資料集，從上往下依序進行。失敗的行會記錄"
-            "下來，下一行照常開始。"),
-    KO("한 행이 데이터셋 하나를 프리셋 하나로 학습하며, 위에서 아래로 진행합니다. "
-       "실패한 행은 기록해 두고 다음 행을 그대로 시작합니다."),
-    DE("Jede Zeile trainiert einen Datensatz mit einer Voreinstellung, von oben "
-       "nach unten. Eine gescheiterte Zeile wird vermerkt, die nächste startet "
-       "trotzdem."),
-    FR("Chaque ligne entraîne un jeu de données avec un préréglage, de haut en "
-       "bas. Une ligne en échec est notée et la suivante démarre quand même."),
-    ES("Cada fila entrena un conjunto de datos con un ajuste, de arriba abajo. "
-       "Una fila que falla queda anotada y la siguiente arranca igualmente."),
-    PT("Cada linha treina um conjunto de dados com uma predefinição, de cima "
-       "para baixo. Uma linha que falha fica registrada e a seguinte começa "
-       "assim mesmo."),
-    IT("Ogni riga addestra un set di dati con una preimpostazione, dall'alto in "
-       "basso. Una riga fallita viene annotata e la successiva parte comunque."),
-    NL("Elke rij traint één dataset met één voorinstelling, van boven naar "
-       "beneden. Een rij die mislukt wordt genoteerd en de volgende start toch."),
-    RU("Каждая строка обучает один набор данных с одним пресетом, сверху вниз. "
-       "Сорвавшаяся строка записывается, а следующая всё равно запускается."),
-    TR("Her satır bir veri kümesini bir hazır ayarla, yukarıdan aşağıya eğitir. "
-       "Başarısız olan satır kaydedilir ve sıradaki yine de başlar."));
+    EN("Each row can build a dataset, train it any number of times, and mesh "
+       "what came out. None of that has to exist yet. A task that fails is "
+       "recorded and the next one starts anyway."),
+    JA("各行はデータセットの作成、その学習 "
+       "(何回でも)、できたモデルのメッシュ化を行えます。どれもまだ存在していなくて構いません。失敗した作業は記録され、次の作業はそのまま始まります。"),
+    ZH_HANS("每一行都可以建数据集、把它训练任意多次，再为训练结果生成网格。这些东西现在都还不必存在。失败的作业会被记录下来，下一个照常开始。"),
+    ZH_HANT("每一列都可以建資料集、把它訓練任意多次，再為訓練結果產生網格。這些東西現在都還不必存在。失敗的作業會被記錄下來，下一個照常開始。"),
+    KO("각 행은 데이터셋을 만들고, 원하는 횟수만큼 학습하고, 그 결과로 메시를 만들 수 있습니다. 어느 것도 아직 존재할 필요가 "
+       "없습니다. 실패한 작업은 기록해 두고 다음 작업을 그대로 시작합니다."),
+    DE("Jede Zeile kann einen Datensatz bauen, ihn beliebig oft trainieren und "
+       "das Ergebnis meshen. Nichts davon muss schon vorhanden sein. Eine "
+       "gescheiterte Aufgabe wird vermerkt, die nächste startet trotzdem."),
+    FR("Chaque ligne peut construire un jeu de données, l'entraîner autant de "
+       "fois qu'on veut et mailler le résultat. Rien de tout cela n'a besoin "
+       "d'exister encore. Une tâche en échec est notée et la suivante démarre "
+       "quand même."),
+    ES("Cada fila puede construir un conjunto de datos, entrenarlo cuantas "
+       "veces haga falta y mallar el resultado. Nada de eso tiene que existir "
+       "todavía. Una tarea que falla queda anotada y la siguiente arranca "
+       "igualmente."),
+    PT("Cada linha pode construir um conjunto de dados, treiná-lo quantas "
+       "vezes quiser e gerar a malha do resultado. Nada disso precisa existir "
+       "ainda. Uma tarefa que falha fica registrada e a seguinte começa assim "
+       "mesmo."),
+    IT("Ogni riga può costruire un set di dati, addestrarlo quante volte si "
+       "vuole e generare la mesh del risultato. Niente di tutto ciò deve già "
+       "esistere. Un'attività fallita viene annotata e la successiva parte "
+       "comunque."),
+    NL("Elke rij kan een dataset bouwen, die zo vaak trainen als je wilt en "
+       "het resultaat meshen. Niets daarvan hoeft al te bestaan. Een taak die "
+       "mislukt wordt genoteerd en de volgende start toch."),
+    RU("Каждая строка может собрать набор данных, обучить его сколько угодно "
+       "раз и построить полигоны по результату. Ничего из этого ещё не обязано "
+       "существовать. Сорвавшаяся задача записывается, а следующая всё равно "
+       "запускается."),
+    TR("Her satır bir veri kümesi kurabilir, onu istediğiniz kadar eğitebilir "
+       "ve çıkan modelden ağ oluşturabilir. Bunların hiçbirinin şimdiden var "
+       "olması gerekmez. Başarısız olan iş kaydedilir ve sıradaki yine de "
+       "başlar."));
 SS_MSG(batch_drop_hint,
-    EN("Drop dataset folders here to add them."),
-    JA("データセットのフォルダーをここにドロップすると追加されます。"),
-    ZH_HANS("把数据集文件夹拖到这里即可添加。"),
-    ZH_HANT("把資料集資料夾拖到這裡即可新增。"),
-    KO("데이터셋 폴더를 여기에 끌어다 놓으면 추가됩니다."),
-    DE("Datensatzordner hierher ziehen, um sie hinzuzufügen."),
-    FR("Déposez ici des dossiers de jeux de données pour les ajouter."),
-    ES("Arrastra aquí carpetas de conjuntos de datos para añadirlas."),
-    PT("Arraste pastas de conjuntos de dados até aqui para adicioná-las."),
-    IT("Trascina qui le cartelle dei set di dati per aggiungerle."),
-    NL("Sleep datasetmappen hierheen om ze toe te voegen."),
-    RU("Перетащите сюда папки наборов данных, чтобы добавить их."),
-    TR("Veri kümesi klasörlerini eklemek için buraya bırakın."));
+    EN("Drop videos, photo folders, datasets or models here to add rows."),
+    JA("動画・写真フォルダー・データセット・モデルをここにドロップすると行が増えます。"),
+    ZH_HANS("把视频、照片文件夹、数据集或模型拖到这里就能添加行。"),
+    ZH_HANT("把影片、照片資料夾、資料集或模型拖到這裡就能新增列。"),
+    KO("동영상, 사진 폴더, 데이터셋, 모델을 여기에 끌어다 놓으면 행이 추가됩니다."),
+    DE("Videos, Fotoordner, Datensätze oder Modelle hierher ziehen, um Zeilen "
+       "hinzuzufügen."),
+    FR("Déposez ici des vidéos, des dossiers de photos, des jeux de données ou "
+       "des modèles pour ajouter des lignes."),
+    ES("Arrastra aquí vídeos, carpetas de fotos, conjuntos de datos o modelos "
+       "para añadir filas."),
+    PT("Arraste vídeos, pastas de fotos, conjuntos de dados ou modelos até "
+       "aqui para adicionar linhas."),
+    IT("Trascina qui video, cartelle di foto, set di dati o modelli per "
+       "aggiungere righe."),
+    NL("Sleep video's, fotomappen, datasets of modellen hierheen om rijen toe "
+       "te voegen."),
+    RU("Перетащите сюда видео, папки с фотографиями, наборы данных или модели, "
+       "чтобы добавить строки."),
+    TR("Satır eklemek için videoları, fotoğraf klasörlerini, veri kümelerini "
+       "ya da modelleri buraya bırakın."));
 SS_MSG(batch_empty,
-    EN("The list is empty. Add a dataset to get started."),
-    JA("一覧が空です。まずデータセットを追加してください。"),
-    ZH_HANS("列表是空的。先添加一个数据集吧。"),
-    ZH_HANT("清單是空的。先新增一個資料集吧。"),
-    KO("목록이 비어 있습니다. 데이터셋을 하나 추가해 보세요."),
-    DE("Die Liste ist leer. Fügen Sie zum Start einen Datensatz hinzu."),
-    FR("La liste est vide. Ajoutez un jeu de données pour commencer."),
-    ES("La lista está vacía. Añade un conjunto de datos para empezar."),
-    PT("A lista está vazia. Adicione um conjunto de dados para começar."),
-    IT("L'elenco è vuoto. Aggiungi un set di dati per iniziare."),
-    NL("De lijst is leeg. Voeg een dataset toe om te beginnen."),
-    RU("Список пуст. Добавьте набор данных, чтобы начать."),
-    TR("Liste boş. Başlamak için bir veri kümesi ekleyin."));
+    EN("The list is empty. Add a row to get started."),
+    JA("一覧が空です。まず行を追加してください。"),
+    ZH_HANS("列表是空的。先添加一行吧。"),
+    ZH_HANT("清單是空的。先新增一列吧。"),
+    KO("목록이 비어 있습니다. 행을 하나 추가해 보세요."),
+    DE("Die Liste ist leer. Fügen Sie zum Start eine Zeile hinzu."),
+    FR("La liste est vide. Ajoutez une ligne pour commencer."),
+    ES("La lista está vacía. Añade una fila para empezar."),
+    PT("A lista está vazia. Adicione uma linha para começar."),
+    IT("L'elenco è vuoto. Aggiungi una riga per iniziare."),
+    NL("De lijst is leeg. Voeg een rij toe om te beginnen."),
+    RU("Список пуст. Добавьте строку, чтобы начать."),
+    TR("Liste boş. Başlamak için bir satır ekleyin."));
 SS_MSG(batch_add_row,
-    EN("Add dataset..."),
-    JA("データセットを追加…"),
-    ZH_HANS("添加数据集…"),
-    ZH_HANT("新增資料集…"),
-    KO("데이터셋 추가…"),
-    DE("Datensatz hinzufügen …"),
-    FR("Ajouter un jeu de données…"),
-    ES("Añadir un conjunto de datos…"),
-    PT("Adicionar conjunto de dados…"),
-    IT("Aggiungi set di dati…"),
-    NL("Dataset toevoegen…"),
-    RU("Добавить набор данных…"),
-    TR("Veri kümesi ekle…"));
+    EN("Add a dataset to train..."),
+    JA("学習するデータセットを追加…"),
+    ZH_HANS("添加要训练的数据集…"),
+    ZH_HANT("新增要訓練的資料集…"),
+    KO("학습할 데이터셋 추가…"),
+    DE("Datensatz zum Trainieren hinzufügen …"),
+    FR("Ajouter un jeu de données à entraîner…"),
+    ES("Añadir un conjunto de datos para entrenar…"),
+    PT("Adicionar um conjunto de dados para treinar…"),
+    IT("Aggiungi un set di dati da addestrare…"),
+    NL("Dataset toevoegen om te trainen…"),
+    RU("Добавить набор данных для обучения…"),
+    TR("Eğitilecek veri kümesi ekle…"));
 SS_MSG(batch_add_recent,
     EN("Add a recent one"),
     JA("最近使ったものから追加"),
@@ -4664,16 +4694,6 @@ SS_MSG(batch_no_runnable,
     NL("Er valt niets uit te voeren."),
     RU("Запускать нечего."),
     TR("Çalıştırılacak bir şey yok."));
-SS_MSG(batch_col_dataset,
-    EN("Dataset"),       JA("データセット"),   ZH_HANS("数据集"),   ZH_HANT("資料集"),
-    KO("데이터셋"),        DE("Datensatz"),    FR("Jeu de données"),
-    ES("Conjunto de datos"), PT("Conjunto de dados"), IT("Set di dati"),
-    NL("Dataset"),       RU("Набор данных"), TR("Veri kümesi"));
-SS_MSG(batch_col_preset,
-    EN("Preset"),        JA("プリセット"),     ZH_HANS("预设"),     ZH_HANT("預設"),
-    KO("프리셋"),         DE("Voreinstellung"), FR("Préréglage"),  ES("Ajuste"),
-    PT("Predefinição"),  IT("Preimpostazione"), NL("Voorinstelling"),
-    RU("Пресет"),        TR("Hazır ayar"));
 // A column heading, so every language is kept to about the width of the
 // English one -- the row under it is a number, and a heading that has to be
 // truncated says less than a short one.
@@ -4724,11 +4744,6 @@ SS_MSG(batch_col_output,
     NL("Uitvoermap"),
     RU("Папка вывода"),
     TR("Çıktı klasörü"));
-SS_MSG(batch_col_status,
-    EN("Status"),        JA("状態"),          ZH_HANS("状态"),     ZH_HANT("狀態"),
-    KO("상태"),           DE("Status"),       FR("État"),         ES("Estado"),
-    PT("Estado"),        IT("Stato"),        NL("Status"),       RU("Состояние"),
-    TR("Durum"));
 SS_MSG(batch_dataset_hint,
     EN("path to a reconstructed dataset"),
     JA("再構成済みデータセットのパス"),
@@ -4751,30 +4766,29 @@ SS_MSG(batch_override_hint,
     PT("predefinição"),  IT("preimpostazione"), NL("voorinstelling"),
     RU("пресет"),        TR("hazır ayar"));
 SS_MSG(batch_override_help,
-    EN("Overrides what the preset says, for this row alone. Leave it empty to "
+    EN("Overrides what the preset says, for this run alone. Leave it empty to "
        "train with the preset's own value."),
-    JA("この行だけ、プリセットの値を上書きします。空にしておくとプリセットの値の"
-       "まま学習します。"),
-    ZH_HANS("只对这一行覆盖预设里的值。留空就按预设本身的值来训练。"),
-    ZH_HANT("只對這一行覆寫預設裡的值。留空就按預設本身的值來訓練。"),
-    KO("이 행에 한해 프리셋 값을 덮어씁니다. 비워 두면 프리셋의 값 그대로 "
-       "학습합니다."),
-    DE("Überschreibt nur für diese Zeile, was die Voreinstellung sagt. Leer "
-       "lassen, um mit deren eigenem Wert zu trainieren."),
-    FR("Remplace ce que dit le préréglage, pour cette ligne seulement. Laisser "
-       "vide pour entraîner avec la valeur du préréglage."),
-    ES("Sustituye lo que dice el ajuste, solo en esta fila. Déjalo vacío para "
-       "entrenar con el valor del propio ajuste."),
-    PT("Substitui o que a predefinição diz, só nesta linha. Deixe vazio para "
-       "treinar com o valor da própria predefinição."),
-    IT("Sovrascrive quanto dice la preimpostazione, solo per questa riga. "
-       "Lascialo vuoto per addestrare con il valore della preimpostazione."),
-    NL("Overschrijft wat de voorinstelling zegt, alleen voor deze rij. Laat het "
+    JA("この実行だけ、プリセットの値を上書きします。空にしておくとプリセットの値のまま学習します。"),
+    ZH_HANS("只对这次运行覆盖预设的值。留空就按预设的值训练。"),
+    ZH_HANT("只對這次執行覆蓋預設的值。留空就照預設的值訓練。"),
+    KO("이 실행에만 프리셋 값을 덮어씁니다. 비워 두면 프리셋 값으로 학습합니다."),
+    DE("Überschreibt den Wert der Voreinstellung, nur für diesen Lauf. Leer "
+       "lassen, um mit dem Wert der Voreinstellung zu trainieren."),
+    FR("Remplace ce que dit le préréglage, pour cette exécution seulement. "
+       "Laissez vide pour entraîner avec la valeur du préréglage."),
+    ES("Sustituye lo que dice el ajuste, solo para esta ejecución. Déjelo "
+       "vacío para entrenar con el valor del ajuste."),
+    PT("Substitui o que a predefinição diz, só para esta execução. Deixe vazio "
+       "para treinar com o valor da predefinição."),
+    IT("Sostituisce ciò che dice la preimpostazione, solo per questa "
+       "esecuzione. Lascialo vuoto per addestrare con il valore della "
+       "preimpostazione."),
+    NL("Overschrijft wat de voorinstelling zegt, alleen voor deze run. Laat "
        "leeg om met de waarde van de voorinstelling te trainen."),
-    RU("Переопределяет значение из пресета только для этой строки. Оставьте "
-       "пустым, чтобы обучать со значением самого пресета."),
-    TR("Yalnızca bu satır için hazır ayardaki değerin yerine geçer. Hazır ayarın "
-       "kendi değeriyle eğitmek için boş bırakın."));
+    RU("Переопределяет значение пресета, только для этого прогона. Оставьте "
+       "пустым, чтобы обучать со значением пресета."),
+    TR("Hazır ayarın değerini yalnızca bu çalıştırma için geçersiz kılar. "
+       "Hazır ayarın değeriyle eğitmek için boş bırakın."));
 SS_MSG(batch_output_hint,
     EN("default: <dataset>/outputs"),
     JA("既定: <データセット>/outputs"),
@@ -4874,10 +4888,19 @@ SS_MSG(batch_status_pending,
     PT("Aguardando"),    IT("In attesa"),    NL("Wacht"),        RU("Ожидает"),
     TR("Bekliyor"));
 SS_MSG(batch_status_running,
-    EN("Training"),      JA("学習中"),        ZH_HANS("训练中"),   ZH_HANT("訓練中"),
-    KO("학습 중"),         DE("Training läuft"), FR("Entraînement"),
-    ES("Entrenando"),    PT("Treinando"),    IT("In addestramento"),
-    NL("Bezig met trainen"), RU("Обучается"), TR("Eğitiliyor"));
+    EN("Running"),
+    JA("実行中"),
+    ZH_HANS("运行中"),
+    ZH_HANT("執行中"),
+    KO("실행 중"),
+    DE("Läuft"),
+    FR("En cours"),
+    ES("En curso"),
+    PT("Em execução"),
+    IT("In corso"),
+    NL("Bezig"),
+    RU("Выполняется"),
+    TR("Çalışıyor"));
 SS_MSG(batch_status_done,
     EN("Done"),          JA("完了"),          ZH_HANS("完成"),     ZH_HANT("完成"),
     KO("완료"),           DE("Fertig"),       FR("Terminé"),      ES("Listo"),
@@ -4900,19 +4923,33 @@ SS_MSG(batch_status_stopped,
     TR("Durduruldu"));
 
 SS_MSG(batch_issue_row,
-    EN("Job {0}: {1}"),
-    JA("ジョブ {0}: {1}"),
-    ZH_HANS("任务 {0}：{1}"),
-    ZH_HANT("工作 {0}：{1}"),
-    KO("작업 {0}: {1}"),
-    DE("Auftrag {0}: {1}"),
-    FR("Tâche {0} : {1}"),
-    ES("Trabajo {0}: {1}"),
-    PT("Trabalho {0}: {1}"),
-    IT("Lavoro {0}: {1}"),
-    NL("Taak {0}: {1}"),
-    RU("Задание {0}: {1}"),
-    TR("İş {0}: {1}"));
+    EN("Row {0}: {1}"),
+    JA("{0} 行目: {1}"),
+    ZH_HANS("第 {0} 行: {1}"),
+    ZH_HANT("第 {0} 列: {1}"),
+    KO("{0}번 행: {1}"),
+    DE("Zeile {0}: {1}"),
+    FR("Ligne {0} : {1}"),
+    ES("Fila {0}: {1}"),
+    PT("Linha {0}: {1}"),
+    IT("Riga {0}: {1}"),
+    NL("Rij {0}: {1}"),
+    RU("Строка {0}: {1}"),
+    TR("Satır {0}: {1}"));
+SS_MSG(batch_running_banner,
+    EN("Batch task {0} of {1}"),
+    JA("バッチ作業 {0} / {1}"),
+    ZH_HANS("批处理作业 {0} / {1}"),
+    ZH_HANT("批次作業 {0} / {1}"),
+    KO("일괄 작업 {0} / {1}"),
+    DE("Stapelaufgabe {0} von {1}"),
+    FR("Tâche de lot {0} sur {1}"),
+    ES("Tarea del lote {0} de {1}"),
+    PT("Tarefa do lote {0} de {1}"),
+    IT("Attività del batch {0} di {1}"),
+    NL("Batchtaak {0} van {1}"),
+    RU("Задача пакета {0} из {1}"),
+    TR("Toplu iş {0} / {1}"));
 SS_MSG(confirm_batch,
     EN("Stop training and start the batch?"),
     JA("学習を停止してバッチを開始しますか？"),
@@ -4941,20 +4978,122 @@ SS_MSG(batch_show_list,
     NL("Batchlijst"),
     RU("Список пакета"),
     TR("Toplu iş listesi"));
+SS_MSG(batch_show_training,
+    EN("Show the run"),
+    JA("実行中の画面へ"),
+    ZH_HANS("查看正在跑的作业"),
+    ZH_HANT("查看正在跑的作業"),
+    KO("실행 중인 화면 보기"),
+    DE("Den Lauf anzeigen"),
+    FR("Afficher l'exécution"),
+    ES("Ver la ejecución"),
+    PT("Ver a execução"),
+    IT("Mostra l'esecuzione"),
+    NL("De run tonen"),
+    RU("Показать выполнение"),
+    TR("Çalışmayı göster"));
+SS_MSG(batch_stop_after,
+    EN("Stop after this task"),
+    JA("この作業のあとで停止"),
+    ZH_HANS("做完这个作业后停止"),
+    ZH_HANT("做完這個作業後停止"),
+    KO("이 작업 후 중지"),
+    DE("Nach dieser Aufgabe stoppen"),
+    FR("Arrêter après cette tâche"),
+    ES("Parar después de esta tarea"),
+    PT("Parar depois desta tarefa"),
+    IT("Fermati dopo questa attività"),
+    NL("Stoppen na deze taak"),
+    RU("Остановить после этой задачи"),
+    TR("Bu işten sonra dur"));
+SS_MSG(batch_stop_after_help,
+    EN("Let the task that is running finish, then stop instead of starting the "
+       "next one."),
+    JA("実行中の作業は最後までやらせて、次を始めずに停止します。"),
+    ZH_HANS("让正在跑的作业做完，然后不再开始下一个。"),
+    ZH_HANT("讓正在跑的作業做完，然後不再開始下一個。"),
+    KO("실행 중인 작업은 끝까지 두고, 다음 작업은 시작하지 않고 멈춥니다."),
+    DE("Die laufende Aufgabe zu Ende bringen und dann stoppen, statt die "
+       "nächste zu beginnen."),
+    FR("Laisser la tâche en cours se terminer, puis s'arrêter au lieu de "
+       "démarrer la suivante."),
+    ES("Dejar que termine la tarea en curso y luego parar en vez de empezar la "
+       "siguiente."),
+    PT("Deixar a tarefa em andamento terminar e então parar em vez de começar "
+       "a seguinte."),
+    IT("Lascia finire l'attività in corso e poi fermati invece di iniziare la "
+       "successiva."),
+    NL("De lopende taak laten afmaken en dan stoppen in plaats van de volgende "
+       "te starten."),
+    RU("Дать текущей задаче доработать, а затем остановиться, не начиная "
+       "следующую."),
+    TR("Çalışan işin bitmesine izin ver, sonra sıradakini başlatmak yerine "
+       "dur."));
+SS_MSG(batch_stop_now,
+    EN("Stop now"),
+    JA("いますぐ停止"),
+    ZH_HANS("立即停止"),
+    ZH_HANT("立即停止"),
+    KO("지금 중지"),
+    DE("Jetzt anhalten"),
+    FR("Arrêter maintenant"),
+    ES("Parar ahora"),
+    PT("Parar agora"),
+    IT("Ferma adesso"),
+    NL("Nu stoppen"),
+    RU("Остановить сейчас"),
+    TR("Şimdi durdur"));
+SS_MSG(batch_stop_now_help,
+    EN("Cut the running task short -- a training run still saves a checkpoint "
+       "-- and stop the batch."),
+    JA("実行中の作業を途中で打ち切り、バッチを停止します。学習中ならチェックポイントは保存されます。"),
+    ZH_HANS("把正在跑的作业中途切断并停止批处理；如果是训练，仍会保存检查点。"),
+    ZH_HANT("把正在跑的作業中途切斷並停止批次處理；如果是訓練，仍會儲存檢查點。"),
+    KO("실행 중인 작업을 중간에 끊고 일괄 처리를 멈춥니다. 학습 중이면 체크포인트는 저장됩니다."),
+    DE("Die laufende Aufgabe abbrechen -- ein Trainingslauf speichert trotzdem "
+       "einen Checkpoint -- und den Stapel stoppen."),
+    FR("Interrompre la tâche en cours -- un entraînement enregistre quand même "
+       "un point de contrôle -- et arrêter le lot."),
+    ES("Cortar la tarea en curso -- un entrenamiento guarda igualmente un "
+       "punto de control -- y parar el lote."),
+    PT("Cortar a tarefa em andamento -- um treinamento ainda salva um "
+       "checkpoint -- e parar o lote."),
+    IT("Interrompere l'attività in corso -- un addestramento salva comunque un "
+       "checkpoint -- e fermare il batch."),
+    NL("De lopende taak afbreken -- een trainingsrun bewaart nog wel een "
+       "checkpoint -- en de batch stoppen."),
+    RU("Прервать текущую задачу -- обучение всё же сохранит контрольную точку "
+       "-- и остановить пакет."),
+    TR("Çalışan işi yarıda kes -- bir eğitim yine de kontrol noktası kaydeder "
+       "-- ve toplu işi durdur."));
+SS_MSG(batch_stopping,
+    EN("Stopping after this task."),
+    JA("この作業のあとで停止します。"),
+    ZH_HANS("将在这个作业之后停止。"),
+    ZH_HANT("將在這個作業之後停止。"),
+    KO("이 작업 후 중지합니다."),
+    DE("Stoppt nach dieser Aufgabe."),
+    FR("Arrêt après cette tâche."),
+    ES("Se parará después de esta tarea."),
+    PT("Vai parar depois desta tarefa."),
+    IT("Si fermerà dopo questa attività."),
+    NL("Stopt na deze taak."),
+    RU("Остановится после этой задачи."),
+    TR("Bu işten sonra duracak."));
 
 SS_MSG(batch_log_started,
-    EN("Batch started. Jobs: {0}"),
-    JA("バッチを開始しました。ジョブ数: {0}"),
-    ZH_HANS("批量训练已开始。任务数：{0}"),
-    ZH_HANT("批次訓練已開始。工作數：{0}"),
-    KO("일괄 실행을 시작했습니다. 작업 수: {0}"),
-    DE("Stapel gestartet. Aufträge: {0}"),
+    EN("Batch started. Tasks: {0}"),
+    JA("バッチを開始しました。作業数: {0}"),
+    ZH_HANS("批处理已开始。作业数: {0}"),
+    ZH_HANT("批次處理已開始。作業數: {0}"),
+    KO("일괄 처리를 시작했습니다. 작업 수: {0}"),
+    DE("Stapel gestartet. Aufgaben: {0}"),
     FR("Lot démarré. Tâches : {0}"),
-    ES("Lote iniciado. Trabajos: {0}"),
-    PT("Lote iniciado. Trabalhos: {0}"),
-    IT("Batch avviato. Lavori: {0}"),
+    ES("Lote iniciado. Tareas: {0}"),
+    PT("Lote iniciado. Tarefas: {0}"),
+    IT("Batch avviato. Attività: {0}"),
     NL("Batch gestart. Taken: {0}"),
-    RU("Пакет запущен. Заданий: {0}"),
+    RU("Пакет запущен. Задач: {0}"),
     TR("Toplu iş başladı. İş sayısı: {0}"));
 SS_MSG(batch_log_job_start,
     EN("Batch job {0}: training {1}"),
@@ -4971,46 +5110,46 @@ SS_MSG(batch_log_job_start,
     RU("Задание пакета {0}: обучается {1}"),
     TR("Toplu iş {0}: {1} eğitiliyor"));
 SS_MSG(batch_log_job_done,
-    EN("Batch job {0} finished, written to {1}"),
-    JA("バッチのジョブ {0} が完了し、{1} に書き出しました"),
-    ZH_HANS("批量任务 {0} 已完成，写入 {1}"),
-    ZH_HANT("批次工作 {0} 已完成，寫入 {1}"),
-    KO("일괄 작업 {0}을(를) 마치고 {1}에 썼습니다"),
-    DE("Stapelauftrag {0} beendet, geschrieben nach {1}"),
-    FR("Tâche du lot {0} terminée, écrite dans {1}"),
-    ES("Trabajo del lote {0} terminado, escrito en {1}"),
-    PT("Trabalho do lote {0} concluído, escrito em {1}"),
-    IT("Lavoro del batch {0} terminato, scritto in {1}"),
-    NL("Batchtaak {0} klaar, weggeschreven naar {1}"),
-    RU("Задание пакета {0} завершено, записано в {1}"),
+    EN("Batch task {0} finished, written to {1}"),
+    JA("バッチ作業 {0} が完了しました。出力先: {1}"),
+    ZH_HANS("批处理作业 {0} 已完成，写入 {1}"),
+    ZH_HANT("批次作業 {0} 已完成，寫入 {1}"),
+    KO("일괄 작업 {0} 이(가) 끝났습니다. 저장 위치: {1}"),
+    DE("Stapelaufgabe {0} fertig, geschrieben nach {1}"),
+    FR("Tâche de lot {0} terminée, écrite dans {1}"),
+    ES("Tarea del lote {0} terminada, escrita en {1}"),
+    PT("Tarefa do lote {0} concluída, escrita em {1}"),
+    IT("Attività del batch {0} terminata, scritta in {1}"),
+    NL("Batchtaak {0} klaar, geschreven naar {1}"),
+    RU("Задача пакета {0} завершена, записано в {1}"),
     TR("Toplu iş {0} bitti, {1} konumuna yazıldı"));
 SS_MSG(batch_log_job_failed,
-    EN("Batch job {0} failed: {1}"),
-    JA("バッチのジョブ {0} が失敗しました: {1}"),
-    ZH_HANS("批量任务 {0} 失败：{1}"),
-    ZH_HANT("批次工作 {0} 失敗：{1}"),
-    KO("일괄 작업 {0}이(가) 실패했습니다: {1}"),
-    DE("Stapelauftrag {0} fehlgeschlagen: {1}"),
-    FR("Échec de la tâche du lot {0} : {1}"),
-    ES("El trabajo del lote {0} ha fallado: {1}"),
-    PT("O trabalho do lote {0} falhou: {1}"),
-    IT("Il lavoro del batch {0} non è riuscito: {1}"),
-    NL("Batchtaak {0} is mislukt: {1}"),
-    RU("Задание пакета {0} завершилось сбоем: {1}"),
+    EN("Batch task {0} failed: {1}"),
+    JA("バッチ作業 {0} が失敗しました: {1}"),
+    ZH_HANS("批处理作业 {0} 失败: {1}"),
+    ZH_HANT("批次作業 {0} 失敗: {1}"),
+    KO("일괄 작업 {0} 이(가) 실패했습니다: {1}"),
+    DE("Stapelaufgabe {0} gescheitert: {1}"),
+    FR("Tâche de lot {0} en échec : {1}"),
+    ES("La tarea del lote {0} ha fallado: {1}"),
+    PT("A tarefa do lote {0} falhou: {1}"),
+    IT("L'attività del batch {0} non è riuscita: {1}"),
+    NL("Batchtaak {0} mislukt: {1}"),
+    RU("Задача пакета {0} не выполнена: {1}"),
     TR("Toplu iş {0} başarısız oldu: {1}"));
 SS_MSG(batch_log_job_stopped,
-    EN("Batch job {0} was stopped."),
-    JA("バッチのジョブ {0} は停止されました。"),
-    ZH_HANS("批量任务 {0} 已被停止。"),
-    ZH_HANT("批次工作 {0} 已被停止。"),
-    KO("일괄 작업 {0}이(가) 중지되었습니다."),
-    DE("Stapelauftrag {0} wurde angehalten."),
-    FR("La tâche du lot {0} a été arrêtée."),
-    ES("El trabajo del lote {0} se ha detenido."),
-    PT("O trabalho do lote {0} foi interrompido."),
-    IT("Il lavoro del batch {0} è stato interrotto."),
+    EN("Batch task {0} was stopped."),
+    JA("バッチ作業 {0} を停止しました。"),
+    ZH_HANS("批处理作业 {0} 已停止。"),
+    ZH_HANT("批次作業 {0} 已停止。"),
+    KO("일괄 작업 {0} 을(를) 중지했습니다."),
+    DE("Stapelaufgabe {0} wurde gestoppt."),
+    FR("Tâche de lot {0} arrêtée."),
+    ES("La tarea del lote {0} se ha detenido."),
+    PT("A tarefa do lote {0} foi interrompida."),
+    IT("L'attività del batch {0} è stata interrotta."),
     NL("Batchtaak {0} is gestopt."),
-    RU("Задание пакета {0} остановлено."),
+    RU("Задача пакета {0} остановлена."),
     TR("Toplu iş {0} durduruldu."));
 // "Not finished" rather than "not run": a row stopped part-way is in there
 // too, and it did run -- it just has no result to report.
@@ -5028,6 +5167,221 @@ SS_MSG(batch_log_summary,
     NL("Batch klaar. Klaar: {0}   Mislukt: {1}   Niet afgemaakt: {2}"),
     RU("Пакет завершён. Готово: {0}   Сбоев: {1}   Не завершено: {2}"),
     TR("Toplu iş bitti. Biten: {0}   Başarısız: {1}   Tamamlanmayan: {2}"));
+
+// ---- the command a finished queue runs ----
+// The message these hand over goes through gui::safe_arg(), so an apostrophe
+// or a quote in a translation cannot reach the command as syntax.
+SS_MSG(batch_cmd_title,
+    EN("When the queue finishes"),
+    JA("バッチが終わったら"),
+    ZH_HANS("批处理结束后"),
+    ZH_HANT("批次結束後"),
+    KO("일괄 실행이 끝나면"),
+    DE("Wenn der Stapel fertig ist"),
+    FR("Quand le lot est terminé"),
+    ES("Cuando el lote termina"),
+    PT("Quando o lote termina"),
+    IT("Quando il batch è finito"),
+    NL("Als de batch klaar is"),
+    RU("Когда пакет завершится"),
+    TR("Toplu iş bittiğinde"));
+SS_MSG(batch_cmd_help,
+    EN("Runs when the last task is over, however it ended. {message} is "
+       "replaced by a one-line summary, and always arrives as a single "
+       "argument whether it is quoted or not. The command is run directly, "
+       "not through a shell."),
+    JA("最後の作業が終わったときに、どのような終わり方であっても実行します。"
+       "{message} は結果を1行にまとめた文に置き換わり、引用符の有無にかかわ"
+       "らず必ず1つの引数として渡されます。コマンドはシェルを通さずそのまま"
+       "実行します。"),
+    ZH_HANS("最后一个作业结束时运行，无论以何种方式结束。{message} 会替换为"
+            "一行结果摘要，无论是否加引号，都作为单个参数传入。命令直接运行，"
+            "不经过 shell。"),
+    ZH_HANT("最後一個作業結束時執行，無論以何種方式結束。{message} 會替換為"
+            "一行結果摘要，無論有沒有加引號，都會當成單一引數傳入。命令會直接"
+            "執行，不經過 shell。"),
+    KO("마지막 작업이 어떻게 끝나든, 끝나면 실행합니다. {message} 는 결과를 "
+       "한 줄로 요약한 문장으로 바뀌며, 따옴표가 있든 없든 항상 인수 하나로 "
+       "전달됩니다. 명령은 셸을 거치지 않고 바로 실행합니다."),
+    DE("Läuft, wenn die letzte Aufgabe vorbei ist, wie sie auch endete. "
+       "{message} wird durch eine einzeilige Zusammenfassung ersetzt und "
+       "kommt immer als ein einziges Argument an, in Anführungszeichen oder "
+       "nicht. Der Befehl läuft direkt, nicht über eine Shell."),
+    FR("S’exécute quand la dernière tâche est finie, quelle qu’en soit "
+       "l’issue. {message} est remplacé par un résumé d’une ligne et arrive "
+       "toujours comme un seul argument, entre guillemets ou non. La "
+       "commande est lancée directement, sans passer par un shell."),
+    ES("Se ejecuta cuando la última tarea termina, sea como sea. {message} "
+       "se sustituye por un resumen de una línea y siempre llega como un "
+       "solo argumento, esté entrecomillado o no. El comando se ejecuta "
+       "directamente, sin pasar por un shell."),
+    PT("É executado quando a última tarefa termina, seja como for. {message} "
+       "é substituído por um resumo de uma linha e chega sempre como um "
+       "único argumento, entre aspas ou não. O comando é executado "
+       "diretamente, sem passar por um shell."),
+    IT("Parte quando l’ultima attività è finita, comunque sia finita. "
+       "{message} viene sostituito da un riassunto di una riga e arriva "
+       "sempre come un solo argomento, tra virgolette o no. Il comando viene "
+       "eseguito direttamente, senza passare da una shell."),
+    NL("Draait als de laatste taak voorbij is, hoe die ook afliep. {message} "
+       "wordt vervangen door een samenvatting van één regel en komt altijd "
+       "als één argument aan, met of zonder aanhalingstekens. De opdracht "
+       "draait rechtstreeks, niet via een shell."),
+    RU("Запускается, когда последняя задача закончилась, чем бы она ни "
+       "кончилась. {message} заменяется однострочной сводкой и всегда "
+       "приходит одним аргументом, в кавычках или без. Команда запускается "
+       "напрямую, без оболочки."),
+    TR("Son iş nasıl biterse bitsin, bittiğinde çalışır. {message} tek "
+       "satırlık bir özetle değiştirilir ve tırnak içinde olsun olmasın her "
+       "zaman tek bir argüman olarak gelir. Komut kabuk üzerinden değil, "
+       "doğrudan çalıştırılır."));
+SS_MSG(batch_cmd_test,
+    EN("Test"),
+    JA("テスト"),
+    ZH_HANS("测试"),
+    ZH_HANT("測試"),
+    KO("테스트"),
+    DE("Testen"),
+    FR("Tester"),
+    ES("Probar"),
+    PT("Testar"),
+    IT("Prova"),
+    NL("Testen"),
+    RU("Проверить"),
+    TR("Dene"));
+SS_MSG(batch_cmd_test_help,
+    EN("Runs the command now, with a test message in place of the summary."),
+    JA("結果のまとめの代わりにテスト用の文を入れて、コマンドをいま実行します。"),
+    ZH_HANS("现在就运行这条命令，用一条测试消息代替结果摘要。"),
+    ZH_HANT("現在就執行這條命令，用一則測試訊息代替結果摘要。"),
+    KO("요약 대신 테스트 문구를 넣어 명령을 지금 실행합니다."),
+    DE("Führt den Befehl jetzt aus, mit einer Testnachricht statt der "
+       "Zusammenfassung."),
+    FR("Lance la commande maintenant, avec un message de test à la place du "
+       "résumé."),
+    ES("Ejecuta el comando ahora, con un mensaje de prueba en lugar del "
+       "resumen."),
+    PT("Executa o comando agora, com uma mensagem de teste no lugar do "
+       "resumo."),
+    IT("Esegue il comando adesso, con un messaggio di prova al posto del "
+       "riassunto."),
+    NL("Voert de opdracht nu uit, met een testbericht in plaats van de "
+       "samenvatting."),
+    RU("Запускает команду сейчас, подставив пробное сообщение вместо сводки."),
+    TR("Komutu şimdi çalıştırır, özet yerine bir deneme iletisi koyarak."));
+// The product name is the localized one where there is one (brand::product):
+// this is in-text copy, not the wordmark, and it is written out per language
+// rather than assembled, exactly as brand::window_title is.
+SS_MSG(batch_cmd_test_message,
+    EN("Spirula Studio: this is a test message."),
+    JA("スピルラ・スタジオ: これはテスト用のメッセージです。"),
+    ZH_HANS("旋影工坊：这是一条测试消息。"),
+    ZH_HANT("旋影工坊：這是一則測試訊息。"),
+    KO("스피룰라 스튜디오: 테스트 메시지입니다."),
+    DE("Spirula Studio: Das ist eine Testnachricht."),
+    FR("Spirula Studio : ceci est un message de test."),
+    ES("Spirula Studio: este es un mensaje de prueba."),
+    PT("Spirula Studio: esta é uma mensagem de teste."),
+    IT("Spirula Studio: questo è un messaggio di prova."),
+    NL("Spirula Studio: dit is een testbericht."),
+    RU("Spirula Studio: это пробное сообщение."),
+    TR("Spirula Studio: bu bir deneme iletisidir."));
+SS_MSG(batch_cmd_message,
+    EN("Spirula Studio: batch processing finished. Done: {0}, failed: {1}, "
+       "not finished: {2}."),
+    JA("スピルラ・スタジオ: バッチ処理が終了しました。完了: {0}、失敗: {1}、"
+       "未完了: {2}。"),
+    ZH_HANS("旋影工坊：批处理结束。完成：{0}，失败：{1}，未完成：{2}。"),
+    ZH_HANT("旋影工坊：批次處理結束。完成：{0}，失敗：{1}，未完成：{2}。"),
+    KO("스피룰라 스튜디오: 일괄 처리가 끝났습니다. 완료: {0}, 실패: {1}, "
+       "미완료: {2}."),
+    DE("Spirula Studio: Die Stapelverarbeitung ist fertig. Fertig: {0}, "
+       "fehlgeschlagen: {1}, unfertig: {2}."),
+    FR("Spirula Studio : le traitement par lots est terminé. Terminées : "
+       "{0}, en échec : {1}, inachevées : {2}."),
+    ES("Spirula Studio: el procesamiento por lotes ha terminado. Listos: "
+       "{0}, con error: {1}, sin terminar: {2}."),
+    PT("Spirula Studio: o processamento em lote terminou. Concluídos: {0}, "
+       "com falha: {1}, não concluídos: {2}."),
+    IT("Spirula Studio: l’elaborazione batch è finita. Fatti: {0}, non "
+       "riusciti: {1}, non finiti: {2}."),
+    NL("Spirula Studio: de batchverwerking is klaar. Klaar: {0}, mislukt: "
+       "{1}, niet afgemaakt: {2}."),
+    RU("Spirula Studio: пакетная обработка завершена. Готово: {0}, сбоев: "
+       "{1}, не завершено: {2}."),
+    TR("Spirula Studio: toplu işlem bitti. Biten: {0}, başarısız: {1}, "
+       "tamamlanmayan: {2}."));
+SS_MSG(batch_cmd_running,
+    EN("Running the finish command: {0}"),
+    JA("終了時のコマンドを実行します: {0}"),
+    ZH_HANS("正在运行结束命令：{0}"),
+    ZH_HANT("正在執行結束命令：{0}"),
+    KO("종료 명령을 실행합니다: {0}"),
+    DE("Abschlussbefehl wird ausgeführt: {0}"),
+    FR("Exécution de la commande de fin : {0}"),
+    ES("Ejecutando el comando de fin: {0}"),
+    PT("Executando o comando de fim: {0}"),
+    IT("Esecuzione del comando di fine: {0}"),
+    NL("De afsluitopdracht draait: {0}"),
+    RU("Запускается команда завершения: {0}"),
+    TR("Bitiş komutu çalıştırılıyor: {0}"));
+SS_MSG(batch_cmd_missing,
+    EN("Could not run the finish command: {0} was not found."),
+    JA("終了時のコマンドを実行できませんでした: {0} が見つかりません。"),
+    ZH_HANS("无法运行结束命令：找不到 {0}。"),
+    ZH_HANT("無法執行結束命令：找不到 {0}。"),
+    KO("종료 명령을 실행할 수 없습니다: {0} 을(를) 찾을 수 없습니다."),
+    DE("Der Abschlussbefehl ließ sich nicht ausführen: {0} wurde nicht "
+       "gefunden."),
+    FR("Impossible de lancer la commande de fin : {0} est introuvable."),
+    ES("No se ha podido ejecutar el comando de fin: no se encuentra {0}."),
+    PT("Não foi possível executar o comando de fim: {0} não foi encontrado."),
+    IT("Non è stato possibile eseguire il comando di fine: {0} non si trova."),
+    NL("De afsluitopdracht kon niet draaien: {0} is niet gevonden."),
+    RU("Не удалось выполнить команду завершения: {0} не найден."),
+    TR("Bitiş komutu çalıştırılamadı: {0} bulunamadı."));
+SS_MSG(batch_cmd_exit,
+    EN("The finish command exited with code {0}."),
+    JA("終了時のコマンドが終了コード {0} で終わりました。"),
+    ZH_HANS("结束命令退出，返回码 {0}。"),
+    ZH_HANT("結束命令結束，回傳碼 {0}。"),
+    KO("종료 명령이 코드 {0}(으)로 끝났습니다."),
+    DE("Der Abschlussbefehl endete mit Code {0}."),
+    FR("La commande de fin s’est terminée avec le code {0}."),
+    ES("El comando de fin ha terminado con el código {0}."),
+    PT("O comando de fim terminou com o código {0}."),
+    IT("Il comando di fine è terminato con codice {0}."),
+    NL("De afsluitopdracht eindigde met code {0}."),
+    RU("Команда завершения закончилась с кодом {0}."),
+    TR("Bitiş komutu {0} koduyla sona erdi."));
+SS_MSG(batch_cmd_ok,
+    EN("The finish command finished."),
+    JA("終了時のコマンドが完了しました。"),
+    ZH_HANS("结束命令已完成。"),
+    ZH_HANT("結束命令已完成。"),
+    KO("종료 명령이 끝났습니다."),
+    DE("Der Abschlussbefehl ist durch."),
+    FR("La commande de fin est terminée."),
+    ES("El comando de fin ha terminado."),
+    PT("O comando de fim terminou."),
+    IT("Il comando di fine è finito."),
+    NL("De afsluitopdracht is klaar."),
+    RU("Команда завершения выполнена."),
+    TR("Bitiş komutu tamamlandı."));
+SS_MSG(batch_cmd_busy,
+    EN("The finish command is already running; this one was not started."),
+    JA("終了時のコマンドはすでに実行中です。今回は実行しませんでした。"),
+    ZH_HANS("结束命令已经在运行，这一次没有再启动。"),
+    ZH_HANT("結束命令已經在執行，這一次沒有再啟動。"),
+    KO("종료 명령이 이미 실행 중이어서 이번에는 실행하지 않았습니다."),
+    DE("Der Abschlussbefehl läuft schon; dieser wurde nicht gestartet."),
+    FR("La commande de fin est déjà en cours ; celle-ci n’a pas été lancée."),
+    ES("El comando de fin ya se está ejecutando; este no se ha iniciado."),
+    PT("O comando de fim já está em execução; este não foi iniciado."),
+    IT("Il comando di fine è già in esecuzione; questo non è stato avviato."),
+    NL("De afsluitopdracht draait al; deze is niet gestart."),
+    RU("Команда завершения уже выполняется; эта не запущена."),
+    TR("Bitiş komutu zaten çalışıyor; bu çalıştırılmadı."));
 
 // ---- what a pre-flight can find ----
 SS_MSG(chk_dataset_empty,
@@ -7692,6 +8046,1231 @@ SS_MSG(scheduler_external_interactive,
     NL("Externe COLMAP en Python-maskering blijven interactief en worden niet gepland."),
     RU("Внешние COLMAP и маскирование Python остаются интерактивными и не планируются."),
     TR("Harici COLMAP ve Python maskeleme etkileşimli kalır ve zamanlanmaz."));
+
+
+// ===========================================================================
+// Batch processing and the two new kinds of preset
+// ===========================================================================
+
+SS_MSG(batch_stage_dataset,
+    EN("Create dataset"),
+    JA("データセットを作成"),
+    ZH_HANS("创建数据集"),
+    ZH_HANT("建立資料集"),
+    KO("데이터셋 생성"),
+    DE("Datensatz erstellen"),
+    FR("Créer un jeu de données"),
+    ES("Crear conjunto de datos"),
+    PT("Criar conjunto de dados"),
+    IT("Crea set di dati"),
+    NL("Dataset maken"),
+    RU("Создать набор данных"),
+    TR("Veri kümesi oluştur"));
+SS_MSG(batch_stage_train,
+    EN("Train"),
+    JA("学習"),
+    ZH_HANS("训练"),
+    ZH_HANT("訓練"),
+    KO("학습"),
+    DE("Trainieren"),
+    FR("Entraîner"),
+    ES("Entrenar"),
+    PT("Treinar"),
+    IT("Addestra"),
+    NL("Trainen"),
+    RU("Обучить"),
+    TR("Eğit"));
+SS_MSG(batch_stage_mesh,
+    EN("Mesh"),
+    JA("メッシュ化"),
+    ZH_HANS("生成网格"),
+    ZH_HANT("產生網格"),
+    KO("메시 생성"),
+    DE("Mesh erzeugen"),
+    FR("Mailler"),
+    ES("Generar malla"),
+    PT("Gerar malha"),
+    IT("Genera mesh"),
+    NL("Mesh maken"),
+    RU("Построить полигоны"),
+    TR("Ağ oluştur"));
+SS_MSG(batch_add_create,
+    EN("Add videos..."),
+    JA("動画を追加…"),
+    ZH_HANS("添加视频…"),
+    ZH_HANT("新增影片…"),
+    KO("동영상 추가…"),
+    DE("Videos hinzufügen …"),
+    FR("Ajouter des vidéos…"),
+    ES("Añadir vídeos…"),
+    PT("Adicionar vídeos…"),
+    IT("Aggiungi video…"),
+    NL("Video's toevoegen…"),
+    RU("Добавить видео…"),
+    TR("Video ekle…"));
+SS_MSG(batch_add_create_help,
+    EN("Adds a row that builds a dataset from these files and then trains it. "
+       "Either step can be switched off in the row."),
+    JA("これらのファイルからデータセットを作り、続けて学習する行を追加します。どちらの工程も行の中で外せます。"),
+    ZH_HANS("添加一行：先用这些文件建数据集，再接着训练。两步都可以在行里关掉。"),
+    ZH_HANT("新增一列：先用這些檔案建資料集，再接著訓練。兩個步驟都可以在列裡關掉。"),
+    KO("이 파일들로 데이터셋을 만들고 이어서 학습하는 행을 추가합니다. 두 단계 모두 행 안에서 끌 수 있습니다."),
+    DE("Fügt eine Zeile hinzu, die aus diesen Dateien einen Datensatz baut und "
+       "ihn dann trainiert. Beide Schritte lassen sich in der Zeile "
+       "abschalten."),
+    FR("Ajoute une ligne qui construit un jeu de données à partir de ces "
+       "fichiers puis l'entraîne. Chaque étape peut être désactivée dans la "
+       "ligne."),
+    ES("Añade una fila que construye un conjunto de datos con estos archivos y "
+       "luego lo entrena. Cada paso puede desactivarse en la fila."),
+    PT("Adiciona uma linha que constrói um conjunto de dados com estes "
+       "arquivos e depois o treina. Cada etapa pode ser desligada na linha."),
+    IT("Aggiunge una riga che costruisce un set di dati da questi file e poi "
+       "lo addestra. Ogni passo può essere disattivato nella riga."),
+    NL("Voegt een rij toe die van deze bestanden een dataset bouwt en die "
+       "daarna traint. Beide stappen kunnen in de rij worden uitgezet."),
+    RU("Добавляет строку, которая соберёт из этих файлов набор данных и затем "
+       "обучит его. Любой из шагов можно отключить в самой строке."),
+    TR("Bu dosyalardan bir veri kümesi kuran ve ardından onu eğiten bir satır "
+       "ekler. Her iki adım da satır içinde kapatılabilir."));
+SS_MSG(batch_add_photos,
+    EN("Add a photo folder..."),
+    JA("写真フォルダーを追加…"),
+    ZH_HANS("添加照片文件夹…"),
+    ZH_HANT("新增照片資料夾…"),
+    KO("사진 폴더 추가…"),
+    DE("Fotoordner hinzufügen …"),
+    FR("Ajouter un dossier de photos…"),
+    ES("Añadir una carpeta de fotos…"),
+    PT("Adicionar uma pasta de fotos…"),
+    IT("Aggiungi una cartella di foto…"),
+    NL("Fotomap toevoegen…"),
+    RU("Добавить папку с фотографиями…"),
+    TR("Fotoğraf klasörü ekle…"));
+SS_MSG(batch_add_mesh,
+    EN("Add a model to mesh..."),
+    JA("メッシュ化するモデルを追加…"),
+    ZH_HANS("添加要生成网格的模型…"),
+    ZH_HANT("新增要產生網格的模型…"),
+    KO("메시를 만들 모델 추가…"),
+    DE("Modell zum Meshen hinzufügen …"),
+    FR("Ajouter un modèle à mailler…"),
+    ES("Añadir un modelo para mallar…"),
+    PT("Adicionar um modelo para malhar…"),
+    IT("Aggiungi un modello da trasformare in mesh…"),
+    NL("Model toevoegen om te meshen…"),
+    RU("Добавить модель для полигонов…"),
+    TR("Ağ oluşturulacak model ekle…"));
+SS_MSG(batch_pick_source,
+    EN("Choose videos"),
+    JA("動画を選ぶ"),
+    ZH_HANS("选择视频"),
+    ZH_HANT("選擇影片"),
+    KO("동영상 선택"),
+    DE("Videos wählen"),
+    FR("Choisir des vidéos"),
+    ES("Elegir vídeos"),
+    PT("Escolher vídeos"),
+    IT("Scegli i video"),
+    NL("Video's kiezen"),
+    RU("Выберите видео"),
+    TR("Video seçin"));
+SS_MSG(batch_pick_photos,
+    EN("Choose a photo folder"),
+    JA("写真フォルダーを選ぶ"),
+    ZH_HANS("选择照片文件夹"),
+    ZH_HANT("選擇照片資料夾"),
+    KO("사진 폴더 선택"),
+    DE("Fotoordner wählen"),
+    FR("Choisir un dossier de photos"),
+    ES("Elegir una carpeta de fotos"),
+    PT("Escolher uma pasta de fotos"),
+    IT("Scegli una cartella di foto"),
+    NL("Fotomap kiezen"),
+    RU("Выберите папку с фотографиями"),
+    TR("Fotoğraf klasörü seçin"));
+SS_MSG(batch_pick_model,
+    EN("Choose a model"),
+    JA("モデルを選ぶ"),
+    ZH_HANS("选择模型"),
+    ZH_HANT("選擇模型"),
+    KO("모델 선택"),
+    DE("Modell wählen"),
+    FR("Choisir un modèle"),
+    ES("Elegir un modelo"),
+    PT("Escolher um modelo"),
+    IT("Scegli un modello"),
+    NL("Model kiezen"),
+    RU("Выберите модель"),
+    TR("Model seçin"));
+SS_MSG(batch_row_expand_help,
+    EN("Show this row's settings."),
+    JA("この行の設定を開きます。"),
+    ZH_HANS("展开这一行的设置。"),
+    ZH_HANT("展開這一列的設定。"),
+    KO("이 행의 설정을 펼칩니다."),
+    DE("Die Einstellungen dieser Zeile anzeigen."),
+    FR("Afficher les réglages de cette ligne."),
+    ES("Mostrar los ajustes de esta fila."),
+    PT("Mostrar as configurações desta linha."),
+    IT("Mostra le impostazioni di questa riga."),
+    NL("De instellingen van deze rij tonen."),
+    RU("Показать настройки этой строки."),
+    TR("Bu satırın ayarlarını gösterir."));
+SS_MSG(batch_row_enabled_help,
+    EN("Run this row. Unticked, it stays on the list and is passed over."),
+    JA("この行を実行します。外しておくと一覧には残り、飛ばされます。"),
+    ZH_HANS("运行这一行。取消勾选后它仍留在列表里，只是被跳过。"),
+    ZH_HANT("執行這一列。取消勾選後它仍留在清單裡，只是被跳過。"),
+    KO("이 행을 실행합니다. 체크를 풀면 목록에는 남고 건너뜁니다."),
+    DE("Diese Zeile ausführen. Ohne Haken bleibt sie in der Liste und wird "
+       "übersprungen."),
+    FR("Exécuter cette ligne. Décochée, elle reste dans la liste et est "
+       "ignorée."),
+    ES("Ejecutar esta fila. Sin marcar, permanece en la lista y se omite."),
+    PT("Executar esta linha. Sem marcar, ela fica na lista e é ignorada."),
+    IT("Esegui questa riga. Senza spunta resta nell'elenco e viene saltata."),
+    NL("Deze rij uitvoeren. Zonder vinkje blijft hij in de lijst en wordt "
+       "overgeslagen."),
+    RU("Выполнить эту строку. Без галочки она остаётся в списке и "
+       "пропускается."),
+    TR("Bu satırı çalıştırır. İşaret kaldırılırsa listede kalır ve atlanır."));
+SS_MSG(batch_runs_count,
+    EN("Runs: {0}"),
+    JA("実行回数: {0}"),
+    ZH_HANS("运行次数: {0}"),
+    ZH_HANT("執行次數: {0}"),
+    KO("실행 횟수: {0}"),
+    DE("Läufe: {0}"),
+    FR("Exécutions : {0}"),
+    ES("Ejecuciones: {0}"),
+    PT("Execuções: {0}"),
+    IT("Esecuzioni: {0}"),
+    NL("Runs: {0}"),
+    RU("Запусков: {0}"),
+    TR("Çalıştırma: {0}"));
+SS_MSG(batch_move_up,
+    EN("Move up"),
+    JA("上へ"),
+    ZH_HANS("上移"),
+    ZH_HANT("上移"),
+    KO("위로"),
+    DE("Nach oben"),
+    FR("Monter"),
+    ES("Subir"),
+    PT("Mover para cima"),
+    IT("Sposta su"),
+    NL("Omhoog"),
+    RU("Вверх"),
+    TR("Yukarı taşı"));
+SS_MSG(batch_move_down,
+    EN("Move down"),
+    JA("下へ"),
+    ZH_HANS("下移"),
+    ZH_HANT("下移"),
+    KO("아래로"),
+    DE("Nach unten"),
+    FR("Descendre"),
+    ES("Bajar"),
+    PT("Mover para baixo"),
+    IT("Sposta giù"),
+    NL("Omlaag"),
+    RU("Вниз"),
+    TR("Aşağı taşı"));
+SS_MSG(batch_row_inputs,
+    EN("Inputs"),
+    JA("入力"),
+    ZH_HANS("输入"),
+    ZH_HANT("輸入"),
+    KO("입력"),
+    DE("Eingaben"),
+    FR("Entrées"),
+    ES("Entradas"),
+    PT("Entradas"),
+    IT("Ingressi"),
+    NL("Invoer"),
+    RU("Исходные файлы"),
+    TR("Girdiler"));
+SS_MSG(batch_add_video,
+    EN("Add a video..."),
+    JA("動画を追加…"),
+    ZH_HANS("添加视频…"),
+    ZH_HANT("新增影片…"),
+    KO("동영상 추가…"),
+    DE("Video hinzufügen …"),
+    FR("Ajouter une vidéo…"),
+    ES("Añadir un vídeo…"),
+    PT("Adicionar um vídeo…"),
+    IT("Aggiungi un video…"),
+    NL("Video toevoegen…"),
+    RU("Добавить видео…"),
+    TR("Video ekle…"));
+SS_MSG(batch_preset_dataset,
+    EN("Dataset preset"),
+    JA("データセットのプリセット"),
+    ZH_HANS("数据集预设"),
+    ZH_HANT("資料集預設"),
+    KO("데이터셋 프리셋"),
+    DE("Datensatz-Voreinstellung"),
+    FR("Préréglage de jeu de données"),
+    ES("Ajuste del conjunto de datos"),
+    PT("Predefinição do conjunto de dados"),
+    IT("Preimpostazione del set di dati"),
+    NL("Datasetvoorinstelling"),
+    RU("Пресет набора данных"),
+    TR("Veri kümesi hazır ayarı"));
+SS_MSG(batch_preset_mesh,
+    EN("Meshing preset"),
+    JA("メッシュ化のプリセット"),
+    ZH_HANS("网格预设"),
+    ZH_HANT("網格預設"),
+    KO("메시 프리셋"),
+    DE("Mesh-Voreinstellung"),
+    FR("Préréglage de maillage"),
+    ES("Ajuste de mallado"),
+    PT("Predefinição de malha"),
+    IT("Preimpostazione della mesh"),
+    NL("Meshvoorinstelling"),
+    RU("Пресет полигонов"),
+    TR("Ağ hazır ayarı"));
+SS_MSG(batch_preset_stock,
+    EN("Default settings"),
+    JA("既定の設定"),
+    ZH_HANS("默认设置"),
+    ZH_HANT("預設設定"),
+    KO("기본 설정"),
+    DE("Standardeinstellungen"),
+    FR("Réglages par défaut"),
+    ES("Ajustes predeterminados"),
+    PT("Configurações padrão"),
+    IT("Impostazioni predefinite"),
+    NL("Standaardinstellingen"),
+    RU("Настройки по умолчанию"),
+    TR("Varsayılan ayarlar"));
+SS_MSG(batch_dataset_label,
+    EN("Dataset folder"),
+    JA("データセットのフォルダー"),
+    ZH_HANS("数据集文件夹"),
+    ZH_HANT("資料集資料夾"),
+    KO("데이터셋 폴더"),
+    DE("Datensatzordner"),
+    FR("Dossier du jeu de données"),
+    ES("Carpeta del conjunto de datos"),
+    PT("Pasta do conjunto de dados"),
+    IT("Cartella del set di dati"),
+    NL("Datasetmap"),
+    RU("Папка набора данных"),
+    TR("Veri kümesi klasörü"));
+SS_MSG(batch_dataset_auto_hint,
+    EN("created from the inputs above"),
+    JA("上の入力から作られます"),
+    ZH_HANS("由上面的输入创建"),
+    ZH_HANT("由上面的輸入建立"),
+    KO("위 입력으로 만들어집니다"),
+    DE("wird aus den Eingaben oben erstellt"),
+    FR("créé à partir des entrées ci-dessus"),
+    ES("se crea con las entradas de arriba"),
+    PT("criado a partir das entradas acima"),
+    IT("creata dagli ingressi qui sopra"),
+    NL("wordt uit de invoer hierboven gemaakt"),
+    RU("будет создана из файлов выше"),
+    TR("yukarıdaki girdilerden oluşturulur"));
+SS_MSG(batch_runs,
+    EN("Training runs"),
+    JA("学習の実行"),
+    ZH_HANS("训练运行"),
+    ZH_HANT("訓練執行"),
+    KO("학습 실행"),
+    DE("Trainingsläufe"),
+    FR("Exécutions d'entraînement"),
+    ES("Ejecuciones de entrenamiento"),
+    PT("Execuções de treinamento"),
+    IT("Esecuzioni di addestramento"),
+    NL("Trainingsruns"),
+    RU("Запуски обучения"),
+    TR("Eğitim çalıştırmaları"));
+SS_MSG(batch_runs_default,
+    EN("No preset chosen: one run on the default settings."),
+    JA("プリセット未選択: 既定の設定で 1 回だけ実行します。"),
+    ZH_HANS("未选预设：按默认设置运行一次。"),
+    ZH_HANT("未選預設：以預設設定執行一次。"),
+    KO("프리셋을 고르지 않았습니다: 기본 설정으로 한 번 실행합니다."),
+    DE("Keine Voreinstellung gewählt: ein Lauf mit den Standardeinstellungen."),
+    FR("Aucun préréglage choisi : une exécution avec les réglages par défaut."),
+    ES("Sin ajuste elegido: una ejecución con los valores predeterminados."),
+    PT("Nenhuma predefinição escolhida: uma execução com as configurações "
+       "padrão."),
+    IT("Nessuna preimpostazione scelta: una esecuzione con le impostazioni "
+       "predefinite."),
+    NL("Geen voorinstelling gekozen: één run met de standaardinstellingen."),
+    RU("Пресет не выбран: один запуск с настройками по умолчанию."),
+    TR("Hazır ayar seçilmedi: varsayılan ayarlarla tek çalıştırma."));
+SS_MSG(batch_add_run,
+    EN("Add a run"),
+    JA("実行を追加"),
+    ZH_HANS("添加一次运行"),
+    ZH_HANT("新增一次執行"),
+    KO("실행 추가"),
+    DE("Lauf hinzufügen"),
+    FR("Ajouter une exécution"),
+    ES("Añadir una ejecución"),
+    PT("Adicionar uma execução"),
+    IT("Aggiungi un'esecuzione"),
+    NL("Run toevoegen"),
+    RU("Добавить запуск"),
+    TR("Çalıştırma ekle"));
+SS_MSG(batch_add_run_help,
+    EN("One more training run over the same dataset, with a preset of its own."),
+    JA("同じデータセットをもう一度、別のプリセットで学習します。"),
+    ZH_HANS("在同一个数据集上再训练一次，用另一个预设。"),
+    ZH_HANT("在同一個資料集上再訓練一次，用另一個預設。"),
+    KO("같은 데이터셋을 프리셋만 바꿔 한 번 더 학습합니다."),
+    DE("Noch ein Trainingslauf über denselben Datensatz, mit eigener "
+       "Voreinstellung."),
+    FR("Une exécution d'entraînement de plus sur le même jeu de données, avec "
+       "son propre préréglage."),
+    ES("Otra ejecución de entrenamiento sobre el mismo conjunto de datos, con "
+       "su propio ajuste."),
+    PT("Mais uma execução de treinamento sobre o mesmo conjunto de dados, com "
+       "sua própria predefinição."),
+    IT("Un'altra esecuzione di addestramento sullo stesso set di dati, con una "
+       "sua preimpostazione."),
+    NL("Nog een trainingsrun over dezelfde dataset, met een eigen "
+       "voorinstelling."),
+    RU("Ещё один запуск обучения по тому же набору данных, со своим пресетом."),
+    TR("Aynı veri kümesi üzerinde, kendi hazır ayarıyla bir eğitim "
+       "çalıştırması daha."));
+SS_MSG(batch_mesh_model_label,
+    EN("Model"),
+    JA("モデル"),
+    ZH_HANS("模型"),
+    ZH_HANT("模型"),
+    KO("모델"),
+    DE("Modell"),
+    FR("Modèle"),
+    ES("Modelo"),
+    PT("Modelo"),
+    IT("Modello"),
+    NL("Model"),
+    RU("Модель"),
+    TR("Model"));
+SS_MSG(batch_mesh_model_hint,
+    EN("what this row trains"),
+    JA("この行が学習したもの"),
+    ZH_HANS("这一行训练出来的东西"),
+    ZH_HANT("這一列訓練出來的東西"),
+    KO("이 행이 학습한 결과"),
+    DE("was diese Zeile trainiert"),
+    FR("ce que cette ligne entraîne"),
+    ES("lo que entrena esta fila"),
+    PT("o que esta linha treina"),
+    IT("ciò che questa riga addestra"),
+    NL("wat deze rij traint"),
+    RU("то, что обучит эта строка"),
+    TR("bu satırın eğittiği model"));
+SS_MSG(batch_mesh_model_pick,
+    EN("a run folder or a splat .ply"),
+    JA("実行フォルダーまたは splat の .ply"),
+    ZH_HANS("运行文件夹或 splat 的 .ply"),
+    ZH_HANT("執行資料夾或 splat 的 .ply"),
+    KO("실행 폴더 또는 splat .ply"),
+    DE("ein Laufordner oder eine Splat-.ply"),
+    FR("un dossier d'exécution ou un .ply de splats"),
+    ES("una carpeta de ejecución o un .ply de splats"),
+    PT("uma pasta de execução ou um .ply de splats"),
+    IT("una cartella di esecuzione o un .ply di splat"),
+    NL("een runmap of een splat-.ply"),
+    RU("папка запуска или .ply со сплатами"),
+    TR("bir çalıştırma klasörü ya da splat .ply dosyası"));
+SS_MSG(batch_plan_title,
+    EN("What will run"),
+    JA("実行される内容"),
+    ZH_HANS("将要执行的内容"),
+    ZH_HANT("將要執行的內容"),
+    KO("실행될 작업"),
+    DE("Was ausgeführt wird"),
+    FR("Ce qui va être exécuté"),
+    ES("Lo que se va a ejecutar"),
+    PT("O que será executado"),
+    IT("Cosa verrà eseguito"),
+    NL("Wat er gaat draaien"),
+    RU("Что будет выполнено"),
+    TR("Ne çalışacak"));
+SS_MSG(batch_plan_empty,
+    EN("Nothing on the list is switched on."),
+    JA("一覧の中に有効な行がありません。"),
+    ZH_HANS("列表里没有启用的行。"),
+    ZH_HANT("清單裡沒有啟用的列。"),
+    KO("목록에 켜진 행이 없습니다."),
+    DE("In der Liste ist nichts eingeschaltet."),
+    FR("Rien n'est activé dans la liste."),
+    ES("No hay nada activado en la lista."),
+    PT("Nada na lista está ativado."),
+    IT("Nell'elenco non c'è nulla di attivo."),
+    NL("Er staat niets aan in de lijst."),
+    RU("В списке ничего не включено."),
+    TR("Listede açık olan bir şey yok."));
+SS_MSG(batch_plan_dataset,
+    EN("{0}. Build the dataset in {1}"),
+    JA("{0}. {1} にデータセットを作る"),
+    ZH_HANS("{0}. 在 {1} 建数据集"),
+    ZH_HANT("{0}. 在 {1} 建資料集"),
+    KO("{0}. {1} 에 데이터셋 만들기"),
+    DE("{0}. Den Datensatz in {1} bauen"),
+    FR("{0}. Construire le jeu de données dans {1}"),
+    ES("{0}. Construir el conjunto de datos en {1}"),
+    PT("{0}. Construir o conjunto de dados em {1}"),
+    IT("{0}. Costruire il set di dati in {1}"),
+    NL("{0}. De dataset bouwen in {1}"),
+    RU("{0}. Собрать набор данных в {1}"),
+    TR("{0}. Veri kümesini {1} içinde kur"));
+SS_MSG(batch_plan_train,
+    EN("{0}. Train {1} with the preset {2}"),
+    JA("{0}. {1} をプリセット {2} で学習する"),
+    ZH_HANS("{0}. 用预设 {2} 训练 {1}"),
+    ZH_HANT("{0}. 用預設 {2} 訓練 {1}"),
+    KO("{0}. {1} 을(를) 프리셋 {2} 로 학습"),
+    DE("{0}. {1} mit der Voreinstellung {2} trainieren"),
+    FR("{0}. Entraîner {1} avec le préréglage {2}"),
+    ES("{0}. Entrenar {1} con el ajuste {2}"),
+    PT("{0}. Treinar {1} com a predefinição {2}"),
+    IT("{0}. Addestrare {1} con la preimpostazione {2}"),
+    NL("{0}. {1} trainen met de voorinstelling {2}"),
+    RU("{0}. Обучить {1} с пресетом {2}"),
+    TR("{0}. {1} kümesini {2} hazır ayarıyla eğit"));
+SS_MSG(batch_plan_train_new,
+    EN("{0}. Train the dataset this row builds, with the preset {1}"),
+    JA("{0}. この行が作るデータセットをプリセット {1} で学習する"),
+    ZH_HANS("{0}. 用预设 {1} 训练这一行建出来的数据集"),
+    ZH_HANT("{0}. 用預設 {1} 訓練這一列建出來的資料集"),
+    KO("{0}. 이 행이 만드는 데이터셋을 프리셋 {1} 로 학습"),
+    DE("{0}. Den Datensatz dieser Zeile mit der Voreinstellung {1} trainieren"),
+    FR("{0}. Entraîner le jeu de données construit par cette ligne, avec le "
+       "préréglage {1}"),
+    ES("{0}. Entrenar el conjunto de datos que construye esta fila, con el "
+       "ajuste {1}"),
+    PT("{0}. Treinar o conjunto de dados que esta linha constrói, com a "
+       "predefinição {1}"),
+    IT("{0}. Addestrare il set di dati costruito da questa riga, con la "
+       "preimpostazione {1}"),
+    NL("{0}. De dataset die deze rij bouwt trainen met de voorinstelling {1}"),
+    RU("{0}. Обучить набор данных, который соберёт эта строка, с пресетом {1}"),
+    TR("{0}. Bu satırın kuracağı veri kümesini {1} hazır ayarıyla eğit"));
+SS_MSG(batch_plan_mesh,
+    EN("{0}. Mesh {1}"),
+    JA("{0}. {1} をメッシュ化する"),
+    ZH_HANS("{0}. 为 {1} 生成网格"),
+    ZH_HANT("{0}. 為 {1} 產生網格"),
+    KO("{0}. {1} 의 메시 생성"),
+    DE("{0}. {1} meshen"),
+    FR("{0}. Mailler {1}"),
+    ES("{0}. Mallar {1}"),
+    PT("{0}. Gerar a malha de {1}"),
+    IT("{0}. Generare la mesh di {1}"),
+    NL("{0}. {1} meshen"),
+    RU("{0}. Построить полигоны для {1}"),
+    TR("{0}. {1} için ağ oluştur"));
+SS_MSG(batch_plan_mesh_new,
+    EN("{0}. Mesh what this row trained"),
+    JA("{0}. この行が学習したものをメッシュ化する"),
+    ZH_HANS("{0}. 为这一行训练出的结果生成网格"),
+    ZH_HANT("{0}. 為這一列訓練出的結果產生網格"),
+    KO("{0}. 이 행이 학습한 결과의 메시 생성"),
+    DE("{0}. Meshen, was diese Zeile trainiert hat"),
+    FR("{0}. Mailler ce que cette ligne a entraîné"),
+    ES("{0}. Mallar lo que ha entrenado esta fila"),
+    PT("{0}. Gerar a malha do que esta linha treinou"),
+    IT("{0}. Generare la mesh di ciò che questa riga ha addestrato"),
+    NL("{0}. Meshen wat deze rij heeft getraind"),
+    RU("{0}. Построить полигоны по тому, что обучила эта строка"),
+    TR("{0}. Bu satırın eğittiği modelden ağ oluştur"));
+SS_MSG(batch_log_build,
+    EN("Batch task {0}: building the dataset in {1}"),
+    JA("バッチ作業 {0}: {1} にデータセットを作成中"),
+    ZH_HANS("批处理任务 {0}: 正在 {1} 建数据集"),
+    ZH_HANT("批次作業 {0}: 正在 {1} 建資料集"),
+    KO("일괄 작업 {0}: {1} 에 데이터셋 생성 중"),
+    DE("Stapelaufgabe {0}: Datensatz wird in {1} gebaut"),
+    FR("Tâche de lot {0} : construction du jeu de données dans {1}"),
+    ES("Tarea del lote {0}: construyendo el conjunto de datos en {1}"),
+    PT("Tarefa do lote {0}: construindo o conjunto de dados em {1}"),
+    IT("Attività del batch {0}: costruzione del set di dati in {1}"),
+    NL("Batchtaak {0}: de dataset wordt gebouwd in {1}"),
+    RU("Задача пакета {0}: сборка набора данных в {1}"),
+    TR("Toplu iş {0}: veri kümesi {1} içinde kuruluyor"));
+SS_MSG(batch_log_train,
+    EN("Batch task {0}: training {1}"),
+    JA("バッチ作業 {0}: {1} を学習中"),
+    ZH_HANS("批处理任务 {0}: 正在训练 {1}"),
+    ZH_HANT("批次作業 {0}: 正在訓練 {1}"),
+    KO("일괄 작업 {0}: {1} 학습 중"),
+    DE("Stapelaufgabe {0}: {1} wird trainiert"),
+    FR("Tâche de lot {0} : entraînement de {1}"),
+    ES("Tarea del lote {0}: entrenando {1}"),
+    PT("Tarefa do lote {0}: treinando {1}"),
+    IT("Attività del batch {0}: addestramento di {1}"),
+    NL("Batchtaak {0}: {1} wordt getraind"),
+    RU("Задача пакета {0}: обучение {1}"),
+    TR("Toplu iş {0}: {1} eğitiliyor"));
+SS_MSG(batch_log_mesh,
+    EN("Batch task {0}: meshing {1}"),
+    JA("バッチ作業 {0}: {1} をメッシュ化中"),
+    ZH_HANS("批处理任务 {0}: 正在为 {1} 生成网格"),
+    ZH_HANT("批次作業 {0}: 正在為 {1} 產生網格"),
+    KO("일괄 작업 {0}: {1} 메시 생성 중"),
+    DE("Stapelaufgabe {0}: {1} wird gemesht"),
+    FR("Tâche de lot {0} : maillage de {1}"),
+    ES("Tarea del lote {0}: mallando {1}"),
+    PT("Tarefa do lote {0}: gerando a malha de {1}"),
+    IT("Attività del batch {0}: generazione della mesh di {1}"),
+    NL("Batchtaak {0}: {1} wordt gemesht"),
+    RU("Задача пакета {0}: построение полигонов для {1}"),
+    TR("Toplu iş {0}: {1} için ağ oluşturuluyor"));
+SS_MSG(batch_log_task_skipped,
+    EN("Batch task {0} was passed over: what it needed was never produced."),
+    JA("バッチ作業 {0} を飛ばしました: 必要なものが作られませんでした。"),
+    ZH_HANS("跳过批处理任务 {0}: 它需要的东西没有被产出。"),
+    ZH_HANT("跳過批次作業 {0}: 它需要的東西沒有被產出。"),
+    KO("일괄 작업 {0} 을(를) 건너뛰었습니다: 필요한 것이 만들어지지 않았습니다."),
+    DE("Stapelaufgabe {0} übersprungen: was sie brauchte, ist nie entstanden."),
+    FR("Tâche de lot {0} ignorée : ce dont elle avait besoin n'a jamais été "
+       "produit."),
+    ES("Tarea del lote {0} omitida: lo que necesitaba nunca se produjo."),
+    PT("Tarefa do lote {0} ignorada: o que ela precisava nunca foi produzido."),
+    IT("Attività del batch {0} saltata: ciò che le serviva non è mai stato "
+       "prodotto."),
+    NL("Batchtaak {0} overgeslagen: wat hij nodig had is nooit gemaakt."),
+    RU("Задача пакета {0} пропущена: то, что ей было нужно, не было создано."),
+    TR("Toplu iş {0} atlandı: ihtiyaç duyduğu şey hiç üretilmedi."));
+SS_MSG(preset_drop_hint_plain,
+    EN("Tip: a preset file can be dropped onto this window."),
+    JA("ヒント: プリセットのファイルはこのウィンドウにドロップできます。"),
+    ZH_HANS("提示：预设文件可以直接拖到这个窗口里。"),
+    ZH_HANT("提示：預設檔案可以直接拖到這個視窗裡。"),
+    KO("팁: 프리셋 파일은 이 창에 끌어다 놓을 수 있습니다."),
+    DE("Tipp: Eine Voreinstellungsdatei lässt sich auf dieses Fenster ziehen."),
+    FR("Astuce : un fichier de préréglage peut être déposé sur cette fenêtre."),
+    ES("Consejo: un archivo de ajustes se puede soltar sobre esta ventana."),
+    PT("Dica: um arquivo de predefinição pode ser solto nesta janela."),
+    IT("Suggerimento: un file di preimpostazione può essere trascinato su "
+       "questa finestra."),
+    NL("Tip: een voorinstellingsbestand kun je op dit venster slepen."),
+    RU("Подсказка: файл пресета можно перетащить в это окно."),
+    TR("İpucu: bir hazır ayar dosyası bu pencereye bırakılabilir."));
+SS_MSG(preset_load_help_plain,
+    EN("Read a preset saved earlier. What it is applied TO -- the files, the "
+       "output folder -- is left alone."),
+    JA("前に保存したプリセットを読み込みます。適用先 (ファイルと出力先フォルダー) はそのままです。"),
+    ZH_HANS("读取之前保存的预设。它作用的对象——文件和输出文件夹——保持不变。"),
+    ZH_HANT("讀取之前儲存的預設。它作用的對象——檔案與輸出資料夾——保持不變。"),
+    KO("이전에 저장한 프리셋을 읽어 옵니다. 적용 대상인 파일과 출력 폴더는 그대로 둡니다."),
+    DE("Eine zuvor gespeicherte Voreinstellung lesen. Worauf sie angewendet "
+       "wird -- die Dateien, der Ausgabeordner -- bleibt unberührt."),
+    FR("Lire un préréglage enregistré plus tôt. Ce à quoi il s'applique -- les "
+       "fichiers, le dossier de sortie -- n'est pas touché."),
+    ES("Leer un ajuste guardado antes. Aquello a lo que se aplica -- los "
+       "archivos, la carpeta de salida -- se deja como está."),
+    PT("Ler uma predefinição salva antes. Aquilo a que ela se aplica -- os "
+       "arquivos, a pasta de saída -- fica como está."),
+    IT("Legge una preimpostazione salvata in precedenza. Ciò a cui viene "
+       "applicata -- i file, la cartella di uscita -- resta com'è."),
+    NL("Een eerder opgeslagen voorinstelling lezen. Waarop hij wordt toegepast "
+       "-- de bestanden, de uitvoermap -- blijft ongemoeid."),
+    RU("Прочитать сохранённый ранее пресет. То, к чему он применяется -- файлы "
+       "и папка вывода -- остаётся прежним."),
+    TR("Daha önce kaydedilmiş bir hazır ayarı okur. Uygulandığı şeyler -- "
+       "dosyalar ve çıktı klasörü -- olduğu gibi kalır."));
+SS_MSG(chk_nothing_to_do,
+    EN("This row has nothing switched on."),
+    JA("この行は何も有効になっていません。"),
+    ZH_HANS("这一行什么都没启用。"),
+    ZH_HANT("這一列什麼都沒啟用。"),
+    KO("이 행은 아무것도 켜져 있지 않습니다."),
+    DE("In dieser Zeile ist nichts eingeschaltet."),
+    FR("Rien n'est activé dans cette ligne."),
+    ES("En esta fila no hay nada activado."),
+    PT("Nesta linha não há nada ativado."),
+    IT("In questa riga non è attivo nulla."),
+    NL("In deze rij staat niets aan."),
+    RU("В этой строке ничего не включено."),
+    TR("Bu satırda hiçbir şey açık değil."));
+SS_MSG(chk_sources_empty,
+    EN("This row builds a dataset but has nothing to build it from."),
+    JA("この行はデータセットを作りますが、材料が指定されていません。"),
+    ZH_HANS("这一行要建数据集，却没有可用的素材。"),
+    ZH_HANT("這一列要建資料集，卻沒有可用的素材。"),
+    KO("이 행은 데이터셋을 만들지만 재료가 없습니다."),
+    DE("Diese Zeile baut einen Datensatz, hat aber nichts, woraus."),
+    FR("Cette ligne construit un jeu de données mais n'a rien à partir de "
+       "quoi."),
+    ES("Esta fila construye un conjunto de datos pero no tiene con qué."),
+    PT("Esta linha constrói um conjunto de dados mas não tem com o quê."),
+    IT("Questa riga costruisce un set di dati ma non ha da cosa."),
+    NL("Deze rij bouwt een dataset maar heeft niets om die van te bouwen."),
+    RU("Эта строка собирает набор данных, но собирать его не из чего."),
+    TR("Bu satır bir veri kümesi kuruyor ama kuracak bir şeyi yok."));
+SS_MSG(chk_source_missing,
+    EN("This input does not exist: {0}"),
+    JA("この入力は存在しません: {0}"),
+    ZH_HANS("这个输入不存在: {0}"),
+    ZH_HANT("這個輸入不存在: {0}"),
+    KO("이 입력은 없습니다: {0}"),
+    DE("Diese Eingabe gibt es nicht: {0}"),
+    FR("Cette entrée n'existe pas : {0}"),
+    ES("Esta entrada no existe: {0}"),
+    PT("Esta entrada não existe: {0}"),
+    IT("Questo ingresso non esiste: {0}"),
+    NL("Deze invoer bestaat niet: {0}"),
+    RU("Этого файла нет: {0}"),
+    TR("Bu girdi yok: {0}"));
+SS_MSG(chk_source_no_images,
+    EN("This folder holds no images: {0}"),
+    JA("このフォルダーに画像がありません: {0}"),
+    ZH_HANS("这个文件夹里没有图像: {0}"),
+    ZH_HANT("這個資料夾裡沒有影像: {0}"),
+    KO("이 폴더에는 이미지가 없습니다: {0}"),
+    DE("Dieser Ordner enthält keine Bilder: {0}"),
+    FR("Ce dossier ne contient aucune image : {0}"),
+    ES("Esta carpeta no contiene imágenes: {0}"),
+    PT("Esta pasta não contém imagens: {0}"),
+    IT("Questa cartella non contiene immagini: {0}"),
+    NL("Deze map bevat geen afbeeldingen: {0}"),
+    RU("В этой папке нет изображений: {0}"),
+    TR("Bu klasörde görüntü yok: {0}"));
+SS_MSG(chk_source_unsupported,
+    EN("This file is not a video this program can read: {0}"),
+    JA("このファイルはこのプログラムが読める動画ではありません: {0}"),
+    ZH_HANS("这个文件不是本程序能读的视频: {0}"),
+    ZH_HANT("這個檔案不是本程式能讀的影片: {0}"),
+    KO("이 파일은 이 프로그램이 읽을 수 있는 동영상이 아닙니다: {0}"),
+    DE("Diese Datei ist kein Video, das dieses Programm lesen kann: {0}"),
+    FR("Ce fichier n'est pas une vidéo que ce programme sait lire : {0}"),
+    ES("Este archivo no es un vídeo que este programa pueda leer: {0}"),
+    PT("Este arquivo não é um vídeo que este programa consiga ler: {0}"),
+    IT("Questo file non è un video che questo programma sappia leggere: {0}"),
+    NL("Dit bestand is geen video die dit programma kan lezen: {0}"),
+    RU("Этот файл не является видео, которое программа умеет читать: {0}"),
+    TR("Bu dosya bu programın okuyabileceği bir video değil: {0}"));
+SS_MSG(chk_engine_unavailable,
+    EN("The reconstruction this row asks for is not available in this build."),
+    JA("この行が求める再構成は、このビルドでは使えません。"),
+    ZH_HANS("这一行要用的重建方式在本版本里不可用。"),
+    ZH_HANT("這一列要用的重建方式在本版本裡不可用。"),
+    KO("이 행이 요구하는 재구성은 이 빌드에서 쓸 수 없습니다."),
+    DE("Die Rekonstruktion, die diese Zeile verlangt, gibt es in diesem Build "
+       "nicht."),
+    FR("La reconstruction demandée par cette ligne n'est pas disponible dans "
+       "cette version."),
+    ES("La reconstrucción que pide esta fila no está disponible en esta "
+       "compilación."),
+    PT("A reconstrução que esta linha pede não está disponível nesta "
+       "compilação."),
+    IT("La ricostruzione richiesta da questa riga non è disponibile in questa "
+       "build."),
+    NL("De reconstructie die deze rij vraagt, is niet beschikbaar in deze "
+       "build."),
+    RU("Реконструкция, которую требует эта строка, недоступна в этой сборке."),
+    TR("Bu satırın istediği yeniden oluşturma bu derlemede yok."));
+SS_MSG(chk_masking_unavailable,
+    EN("This build cannot mask: segmentation was not compiled in."),
+    JA("このビルドはマスクを作れません。セグメンテーションが組み込まれていません。"),
+    ZH_HANS("本版本无法做遮罩：没有编入分割功能。"),
+    ZH_HANT("本版本無法做遮罩：沒有編入分割功能。"),
+    KO("이 빌드는 마스크를 만들 수 없습니다: 분할 기능이 포함되지 않았습니다."),
+    DE("Dieser Build kann nicht maskieren: Die Segmentierung ist nicht "
+       "einkompiliert."),
+    FR("Cette version ne sait pas masquer : la segmentation n'a pas été "
+       "compilée."),
+    ES("Esta compilación no puede enmascarar: la segmentación no está "
+       "incluida."),
+    PT("Esta compilação não consegue mascarar: a segmentação não foi incluída."),
+    IT("Questa build non sa mascherare: la segmentazione non è stata "
+       "compilata."),
+    NL("Deze build kan niet maskeren: segmentatie is niet meegecompileerd."),
+    RU("Эта сборка не умеет делать маски: сегментация не включена при "
+       "компиляции."),
+    TR("Bu derleme maskeleme yapamaz: bölütleme derlemeye dahil edilmedi."));
+SS_MSG(chk_mask_no_prompt,
+    EN("Masking is on but the preset carries no prompt, and a batch cannot be "
+       "prompted with clicks."),
+    JA("マスクが有効ですが、プリセットにプロンプトがありません。バッチではクリックで指示できません。"),
+    ZH_HANS("遮罩已开启，但预设里没有提示词；批处理里也无法用点击来指定。"),
+    ZH_HANT("遮罩已開啟，但預設裡沒有提示詞；批次處理裡也無法用點擊來指定。"),
+    KO("마스크가 켜져 있지만 프리셋에 프롬프트가 없습니다. 일괄 처리에서는 클릭으로 지정할 수 없습니다."),
+    DE("Maskierung ist an, aber die Voreinstellung trägt keinen Prompt, und "
+       "ein Stapel lässt sich nicht per Klick anweisen."),
+    FR("Le masquage est activé mais le préréglage ne porte aucune invite, et "
+       "un lot ne peut pas être guidé par des clics."),
+    ES("El enmascarado está activado pero el ajuste no lleva ninguna "
+       "indicación, y un lote no se puede guiar con clics."),
+    PT("O mascaramento está ligado mas a predefinição não traz nenhum texto, e "
+       "um lote não pode ser guiado por cliques."),
+    IT("Il mascheramento è attivo ma la preimpostazione non porta alcun "
+       "prompt, e un batch non si può guidare con i clic."),
+    NL("Maskeren staat aan maar de voorinstelling bevat geen prompt, en een "
+       "batch kan niet met klikken worden aangestuurd."),
+    RU("Маскирование включено, но в пресете нет запроса, а кликами пакет "
+       "указать нельзя."),
+    TR("Maskeleme açık ama hazır ayarda bir istem yok ve toplu işte tıklamayla "
+       "yön verilemez."));
+SS_MSG(chk_mask_model_missing,
+    EN("The segmentation checkpoint has not been downloaded: {0}"),
+    JA("セグメンテーションのチェックポイントが未ダウンロードです: {0}"),
+    ZH_HANS("分割模型的权重还没有下载: {0}"),
+    ZH_HANT("分割模型的權重還沒有下載: {0}"),
+    KO("분할 체크포인트를 아직 내려받지 않았습니다: {0}"),
+    DE("Der Segmentierungs-Checkpoint wurde nicht heruntergeladen: {0}"),
+    FR("Le point de contrôle de segmentation n'a pas été téléchargé : {0}"),
+    ES("El punto de control de segmentación no se ha descargado: {0}"),
+    PT("O checkpoint de segmentação não foi baixado: {0}"),
+    IT("Il checkpoint di segmentazione non è stato scaricato: {0}"),
+    NL("Het segmentatie-checkpoint is niet gedownload: {0}"),
+    RU("Контрольная точка сегментации не загружена: {0}"),
+    TR("Bölütleme kontrol noktası indirilmedi: {0}"));
+SS_MSG(chk_geometry_unavailable,
+    EN("This build cannot estimate depth and normals."),
+    JA("このビルドは深度と法線を推定できません。"),
+    ZH_HANS("本版本无法估计深度和法线。"),
+    ZH_HANT("本版本無法估計深度與法線。"),
+    KO("이 빌드는 깊이와 법선을 추정할 수 없습니다."),
+    DE("Dieser Build kann keine Tiefe und Normalen schätzen."),
+    FR("Cette version ne sait pas estimer la profondeur et les normales."),
+    ES("Esta compilación no puede estimar profundidad ni normales."),
+    PT("Esta compilação não consegue estimar profundidade e normais."),
+    IT("Questa build non sa stimare profondità e normali."),
+    NL("Deze build kan geen diepte en normalen schatten."),
+    RU("Эта сборка не умеет оценивать глубину и нормали."),
+    TR("Bu derleme derinlik ve normalleri kestiremez."));
+SS_MSG(chk_geometry_model_missing,
+    EN("The geometry checkpoint has not been downloaded: {0}"),
+    JA("ジオメトリのチェックポイントが未ダウンロードです: {0}"),
+    ZH_HANS("几何模型的权重还没有下载: {0}"),
+    ZH_HANT("幾何模型的權重還沒有下載: {0}"),
+    KO("지오메트리 체크포인트를 아직 내려받지 않았습니다: {0}"),
+    DE("Der Geometrie-Checkpoint wurde nicht heruntergeladen: {0}"),
+    FR("Le point de contrôle de géométrie n'a pas été téléchargé : {0}"),
+    ES("El punto de control de geometría no se ha descargado: {0}"),
+    PT("O checkpoint de geometria não foi baixado: {0}"),
+    IT("Il checkpoint di geometria non è stato scaricato: {0}"),
+    NL("Het geometrie-checkpoint is niet gedownload: {0}"),
+    RU("Контрольная точка геометрии не загружена: {0}"),
+    TR("Geometri kontrol noktası indirilmedi: {0}"));
+SS_MSG(chk_dataset_has_model,
+    EN("This folder already holds a reconstruction, so the run adds to it "
+       "rather than building one: {0}"),
+    JA("このフォルダーには既に再構成があります。実行はそれを作り直さず、付け足します: {0}"),
+    ZH_HANS("这个文件夹里已经有重建结果，运行会在其基础上补充，而不是重建: {0}"),
+    ZH_HANT("這個資料夾裡已經有重建結果，執行會在其基礎上補充，而不是重建: {0}"),
+    KO("이 폴더에는 이미 재구성 결과가 있어, 실행은 새로 만들지 않고 덧붙입니다: {0}"),
+    DE("Dieser Ordner enthält bereits eine Rekonstruktion; der Lauf ergänzt "
+       "sie, statt eine zu bauen: {0}"),
+    FR("Ce dossier contient déjà une reconstruction : l'exécution la complète "
+       "au lieu d'en construire une : {0}"),
+    ES("Esta carpeta ya contiene una reconstrucción: la ejecución la completa "
+       "en lugar de construir una: {0}"),
+    PT("Esta pasta já contém uma reconstrução: a execução a complementa em vez "
+       "de construir uma: {0}"),
+    IT("Questa cartella contiene già una ricostruzione: l'esecuzione la "
+       "completa invece di costruirne una: {0}"),
+    NL("Deze map bevat al een reconstructie: de run vult die aan in plaats van "
+       "er een te bouwen: {0}"),
+    RU("В этой папке уже есть реконструкция: запуск дополнит её, а не построит "
+       "заново: {0}"),
+    TR("Bu klasörde zaten bir yeniden oluşturma var: çalıştırma yenisini "
+       "kurmak yerine ona ekleme yapar: {0}"));
+SS_MSG(chk_capture_is_photos,
+    EN("The preset was made for video, but this row's inputs are photographs."),
+    JA("このプリセットは動画向けですが、この行の入力は写真です。"),
+    ZH_HANS("这个预设是给视频用的，但这一行的输入是照片。"),
+    ZH_HANT("這個預設是給影片用的，但這一列的輸入是照片。"),
+    KO("이 프리셋은 동영상용인데, 이 행의 입력은 사진입니다."),
+    DE("Die Voreinstellung ist für Video gemacht, die Eingaben dieser Zeile "
+       "sind aber Fotos."),
+    FR("Le préréglage est fait pour la vidéo, mais les entrées de cette ligne "
+       "sont des photos."),
+    ES("El ajuste está hecho para vídeo, pero las entradas de esta fila son "
+       "fotos."),
+    PT("A predefinição foi feita para vídeo, mas as entradas desta linha são "
+       "fotos."),
+    IT("La preimpostazione è fatta per il video, ma gli ingressi di questa "
+       "riga sono foto."),
+    NL("De voorinstelling is voor video gemaakt, maar de invoer van deze rij "
+       "is foto's."),
+    RU("Пресет сделан для видео, но на входе этой строки фотографии."),
+    TR("Hazır ayar video için yapılmış ama bu satırın girdileri fotoğraf."));
+SS_MSG(chk_capture_is_video,
+    EN("The preset was made for photographs, but this row's inputs are video."),
+    JA("このプリセットは写真向けですが、この行の入力は動画です。"),
+    ZH_HANS("这个预设是给照片用的，但这一行的输入是视频。"),
+    ZH_HANT("這個預設是給照片用的，但這一列的輸入是影片。"),
+    KO("이 프리셋은 사진용인데, 이 행의 입력은 동영상입니다."),
+    DE("Die Voreinstellung ist für Fotos gemacht, die Eingaben dieser Zeile "
+       "sind aber Video."),
+    FR("Le préréglage est fait pour des photos, mais les entrées de cette "
+       "ligne sont de la vidéo."),
+    ES("El ajuste está hecho para fotos, pero las entradas de esta fila son "
+       "vídeo."),
+    PT("A predefinição foi feita para fotos, mas as entradas desta linha são "
+       "vídeo."),
+    IT("La preimpostazione è fatta per le foto, ma gli ingressi di questa riga "
+       "sono video."),
+    NL("De voorinstelling is voor foto's gemaakt, maar de invoer van deze rij "
+       "is video."),
+    RU("Пресет сделан для фотографий, но на входе этой строки видео."),
+    TR("Hazır ayar fotoğraf için yapılmış ama bu satırın girdileri video."));
+SS_MSG(chk_workspace_empty,
+    EN("There is nowhere to put the dataset this row builds."),
+    JA("この行が作るデータセットの置き場所がありません。"),
+    ZH_HANS("这一行建出来的数据集没有地方放。"),
+    ZH_HANT("這一列建出來的資料集沒有地方放。"),
+    KO("이 행이 만드는 데이터셋을 둘 곳이 없습니다."),
+    DE("Für den Datensatz dieser Zeile gibt es keinen Ort."),
+    FR("Il n'y a nulle part où mettre le jeu de données construit par cette "
+       "ligne."),
+    ES("No hay dónde poner el conjunto de datos que construye esta fila."),
+    PT("Não há onde colocar o conjunto de dados que esta linha constrói."),
+    IT("Non c'è dove mettere il set di dati costruito da questa riga."),
+    NL("Er is geen plek voor de dataset die deze rij bouwt."),
+    RU("Некуда положить набор данных, который соберёт эта строка."),
+    TR("Bu satırın kuracağı veri kümesini koyacak bir yer yok."));
+SS_MSG(chk_dataset_collision,
+    EN("Another row builds a dataset into this same folder: {0}"),
+    JA("別の行が同じフォルダーにデータセットを作ります: {0}"),
+    ZH_HANS("另一行会往同一个文件夹里建数据集: {0}"),
+    ZH_HANT("另一列會往同一個資料夾裡建資料集: {0}"),
+    KO("다른 행이 같은 폴더에 데이터셋을 만듭니다: {0}"),
+    DE("Eine andere Zeile baut einen Datensatz in denselben Ordner: {0}"),
+    FR("Une autre ligne construit un jeu de données dans ce même dossier : {0}"),
+    ES("Otra fila construye un conjunto de datos en esta misma carpeta: {0}"),
+    PT("Outra linha constrói um conjunto de dados nesta mesma pasta: {0}"),
+    IT("Un'altra riga costruisce un set di dati in questa stessa cartella: {0}"),
+    NL("Een andere rij bouwt een dataset in dezelfde map: {0}"),
+    RU("Другая строка собирает набор данных в ту же папку: {0}"),
+    TR("Başka bir satır aynı klasöre veri kümesi kuruyor: {0}"));
+SS_MSG(chk_dataset_made_later,
+    EN("A later row builds this dataset, so it will not be there yet: {0}"),
+    JA("このデータセットは後の行が作るため、この時点ではまだありません: {0}"),
+    ZH_HANS("这个数据集由后面的行来建，所以那时它还不存在: {0}"),
+    ZH_HANT("這個資料集由後面的列來建，所以那時它還不存在: {0}"),
+    KO("이 데이터셋은 뒤쪽 행이 만들므로, 그때는 아직 없습니다: {0}"),
+    DE("Eine spätere Zeile baut diesen Datensatz, er ist dann noch nicht da: "
+       "{0}"),
+    FR("Une ligne ultérieure construit ce jeu de données : il ne sera pas "
+       "encore là : {0}"),
+    ES("Una fila posterior construye este conjunto de datos, así que todavía "
+       "no estará: {0}"),
+    PT("Uma linha posterior constrói este conjunto de dados, então ele ainda "
+       "não estará lá: {0}"),
+    IT("Una riga successiva costruisce questo set di dati, quindi non ci sarà "
+       "ancora: {0}"),
+    NL("Een latere rij bouwt deze dataset, dus die is er dan nog niet: {0}"),
+    RU("Этот набор данных собирает более поздняя строка, значит его ещё не "
+       "будет: {0}"),
+    TR("Bu veri kümesini daha sonraki bir satır kuruyor, o sırada henüz "
+       "olmayacak: {0}"));
+SS_MSG(chk_linked_train_count,
+    EN("A row that builds a dataset can schedule only one training run."),
+    JA("データセットを作成する行で予約できる学習は 1 回だけです。"),
+    ZH_HANS("创建数据集的行只能安排一次训练。"),
+    ZH_HANT("建立資料集的列只能排程一次訓練。"),
+    KO("데이터셋을 만드는 행에는 학습 실행을 하나만 예약할 수 있습니다."),
+    DE("Eine Zeile, die einen Datensatz erstellt, kann nur einen Trainingslauf planen."),
+    FR("Une ligne qui crée un jeu de données ne peut planifier qu’un entraînement."),
+    ES("Una fila que crea un conjunto de datos solo puede programar un entrenamiento."),
+    PT("Uma linha que cria um conjunto de dados só pode agendar um treino."),
+    IT("Una riga che crea un set di dati può pianificare un solo addestramento."),
+    NL("Een rij die een dataset maakt, kan maar één trainingsrun plannen."),
+    RU("Строка, создающая набор данных, может запланировать только один запуск обучения."),
+    TR("Veri kümesi oluşturan bir satır yalnızca bir eğitim çalışması planlayabilir."));
+SS_MSG(chk_mesh_interactive,
+    EN("Batch meshing stays interactive and is not scheduled."),
+    JA("バッチのメッシュ化は対話式のままで、スケジュールされません。"),
+    ZH_HANS("批量网格生成保持交互式，不会进入计划队列。"),
+    ZH_HANT("批次網格生成維持互動式，不會進入排程佇列。"),
+    KO("일괄 메시 생성은 대화형으로 유지되며 예약하지 않습니다."),
+    DE("Batch-Meshing bleibt interaktiv und wird nicht geplant."),
+    FR("Le maillage par lots reste interactif et n’est pas planifié."),
+    ES("El mallado por lotes sigue siendo interactivo y no se programa."),
+    PT("A criação de malhas em lote permanece interativa e não é agendada."),
+    IT("La generazione di mesh in batch resta interattiva e non viene pianificata."),
+    NL("Batch-meshing blijft interactief en wordt niet gepland."),
+    RU("Пакетное построение полигонов остаётся интерактивным и не планируется."),
+    TR("Toplu ağ oluşturma etkileşimli kalır ve zamanlanmaz."));
+SS_MSG(chk_mesh_no_model,
+    EN("There is nothing to mesh: the row neither names a model nor trains "
+       "one."),
+    JA("メッシュ化する対象がありません。この行はモデルを指定も学習もしていません。"),
+    ZH_HANS("没有可生成网格的对象：这一行既没指定模型，也不训练模型。"),
+    ZH_HANT("沒有可產生網格的對象：這一列既沒指定模型，也不訓練模型。"),
+    KO("메시를 만들 대상이 없습니다: 이 행은 모델을 지정하지도, 학습하지도 않습니다."),
+    DE("Es gibt nichts zu meshen: Die Zeile nennt kein Modell und trainiert "
+       "auch keines."),
+    FR("Il n'y a rien à mailler : la ligne ne nomme aucun modèle et n'en "
+       "entraîne aucun."),
+    ES("No hay nada que mallar: la fila ni nombra un modelo ni entrena uno."),
+    PT("Não há nada para malhar: a linha não nomeia um modelo nem treina um."),
+    IT("Non c'è nulla da trasformare in mesh: la riga non nomina né addestra "
+       "un modello."),
+    NL("Er is niets om te meshen: de rij noemt geen model en traint er ook "
+       "geen."),
+    RU("Нечего превращать в полигоны: строка не называет модель и не обучает "
+       "её."),
+    TR("Ağ oluşturulacak bir şey yok: satır ne bir model belirtiyor ne de "
+       "eğitiyor."));
+SS_MSG(chk_mesh_model_missing,
+    EN("The model to mesh does not exist: {0}"),
+    JA("メッシュ化するモデルが存在しません: {0}"),
+    ZH_HANS("要生成网格的模型不存在: {0}"),
+    ZH_HANT("要產生網格的模型不存在: {0}"),
+    KO("메시를 만들 모델이 없습니다: {0}"),
+    DE("Das zu meshende Modell gibt es nicht: {0}"),
+    FR("Le modèle à mailler n'existe pas : {0}"),
+    ES("El modelo que mallar no existe: {0}"),
+    PT("O modelo a malhar não existe: {0}"),
+    IT("Il modello da trasformare in mesh non esiste: {0}"),
+    NL("Het te meshen model bestaat niet: {0}"),
+    RU("Модели для построения полигонов нет: {0}"),
+    TR("Ağ oluşturulacak model yok: {0}"));
+SS_MSG(chk_mesh_no_dataset,
+    EN("Meshing has no photographs to work from, so the surface will be the "
+       "rougher, density-only kind."),
+    JA("メッシュ化に使える写真がないため、密度だけから作る粗い面になります。"),
+    ZH_HANS("生成网格时没有照片可用，得到的将是只靠密度的、比较粗糙的表面。"),
+    ZH_HANT("產生網格時沒有照片可用，得到的將是只靠密度的、比較粗糙的表面。"),
+    KO("메시를 만들 사진이 없어, 밀도만으로 만든 거친 표면이 됩니다."),
+    DE("Dem Meshen fehlen die Fotos, also wird die Oberfläche die gröbere, nur "
+       "aus der Dichte gewonnene."),
+    FR("Le maillage n'a pas de photos à exploiter : la surface sera la version "
+       "plus grossière, tirée de la seule densité."),
+    ES("El mallado no tiene fotos con las que trabajar: la superficie será la "
+       "más tosca, hecha solo con la densidad."),
+    PT("A geração de malha não tem fotos com que trabalhar: a superfície será "
+       "a mais grosseira, feita só com a densidade."),
+    IT("La mesh non ha foto su cui lavorare: la superficie sarà quella più "
+       "grezza, ricavata dalla sola densità."),
+    NL("Het meshen heeft geen foto's om mee te werken, dus het oppervlak wordt "
+       "de ruwere soort, alleen uit de dichtheid."),
+    RU("Для построения полигонов нет фотографий, поэтому поверхность будет "
+       "более грубой, только по плотности."),
+    TR("Ağ oluşturmanın çalışacağı fotoğraf yok, bu yüzden yüzey yalnızca "
+       "yoğunluktan çıkan daha kaba türden olacak."));
+
+SS_MSG(batch_busy_elsewhere,
+    EN("Something else is running. Wait for it, or stop it, then start the "
+       "batch."),
+    JA("ほかの処理が動いています。終わるか停止するまで待ってから、バッチを開始してください。"),
+    ZH_HANS("有别的任务在跑。等它结束或先停掉，再开始批处理。"),
+    ZH_HANT("有別的工作在跑。等它結束或先停掉，再開始批次處理。"),
+    KO("다른 작업이 실행 중입니다. 끝나거나 멈춘 뒤에 일괄 처리를 시작하세요."),
+    DE("Es läuft schon etwas anderes. Abwarten oder stoppen, dann den Stapel "
+       "starten."),
+    FR("Autre chose est en cours. Attendez la fin ou arrêtez-la, puis lancez "
+       "le lot."),
+    ES("Hay otra cosa en marcha. Espera a que acabe o párala, y luego inicia "
+       "el lote."),
+    PT("Outra coisa está em execução. Espere ou pare, e então inicie o lote."),
+    IT("È in corso qualcos'altro. Attendi o fermalo, poi avvia il batch."),
+    NL("Er draait al iets anders. Wacht af of stop het, en start dan de batch."),
+    RU("Уже выполняется что-то другое. Дождитесь окончания или остановите, а "
+       "затем запустите пакет."),
+    TR("Başka bir şey çalışıyor. Bitmesini bekleyin ya da durdurun, sonra "
+       "toplu işi başlatın."));
+
+SS_MSG(batch_run_mesh_help,
+    EN("Mesh what this run produces. A run trained for its appearance can be "
+       "far too large to mesh; tick the cheaper one trained beside it instead."),
+    JA("この実行の結果をメッシュ化します。見た目のために学習した実行はメッシュ化には大きすぎることがあります。その場合は隣で学習した軽いほうにチェックを入れてください。"),
+    ZH_HANS("对这次运行的结果做网格。为外观训练的运行往往太大，做不出网格；这时改勾旁边那个更省资源的运行。"),
+    ZH_HANT("對這次執行的結果做網格。為外觀訓練的執行往往太大，做不出網格；這時改勾旁邊那個較省資源的執行。"),
+    KO("이 실행의 결과로 메시를 만듭니다. 외형을 위해 학습한 실행은 메시로 만들기에 너무 클 수 있으니, 그럴 때는 옆에서 함께 "
+       "학습한 가벼운 쪽을 선택하세요."),
+    DE("Aus dem Ergebnis dieses Laufs ein Netz erzeugen. Ein auf Aussehen "
+       "trainierter Lauf kann dafür viel zu groß sein; haken Sie dann den "
+       "daneben trainierten günstigeren an."),
+    FR("Mailler ce que produit cette exécution. Une exécution entraînée pour "
+       "son apparence peut être bien trop lourde à mailler ; cochez plutôt "
+       "celle, moins coûteuse, entraînée à côté."),
+    ES("Generar la malla de lo que produce esta ejecución. Una ejecución "
+       "entrenada por su apariencia puede ser demasiado grande para mallar; "
+       "marque entonces la más económica entrenada junto a ella."),
+    PT("Gerar a malha do que esta execução produz. Uma execução treinada pela "
+       "aparência pode ser grande demais para malhar; marque então a mais "
+       "barata treinada ao lado."),
+    IT("Crea la mesh da ciò che produce questa esecuzione. Un'esecuzione "
+       "addestrata per l'aspetto può essere troppo grande da convertire; "
+       "spunta invece quella più leggera addestrata accanto."),
+    NL("Maak een mesh van wat deze run oplevert. Een run die op uiterlijk is "
+       "getraind kan veel te groot zijn om te meshen; vink dan de goedkopere "
+       "run ernaast aan."),
+    RU("Строить меш по результату этого прогона. Прогон, обученный ради "
+       "внешнего вида, может быть слишком велик для меша; тогда отметьте более "
+       "дешёвый, обученный рядом."),
+    TR("Bu çalıştırmanın sonucundan ağ oluştur. Görünüm için eğitilen bir "
+       "çalıştırma ağ oluşturmak için fazla büyük olabilir; o zaman yanında "
+       "eğitilen ucuz olanı işaretleyin."));
+
+SS_MSG(batch_mesh_override_help,
+    EN("What this row writes, whatever its preset says. Tick nothing to leave "
+       "the preset alone."),
+    JA("プリセットの指定にかかわらず、この行が書き出すものです。何もチェックしなければプリセットのままになります。"),
+    ZH_HANS("不管预设怎么说，这一行要写出的东西。什么都不勾就按预设来。"),
+    ZH_HANT("不管預設怎麼說，這一列要寫出的東西。什麼都不勾就照預設。"),
+    KO("프리셋이 무엇이라 하든 이 행이 써 내보낼 것. 아무것도 선택하지 않으면 프리셋 그대로입니다."),
+    DE("Was diese Zeile schreibt, unabhängig von ihrer Voreinstellung. Nichts "
+       "anhaken lässt die Voreinstellung unberührt."),
+    FR("Ce que cette ligne écrit, quoi que dise son préréglage. Ne rien cocher "
+       "laisse le préréglage tel quel."),
+    ES("Lo que escribe esta fila, diga lo que diga su ajuste. No marcar nada "
+       "deja el ajuste como está."),
+    PT("O que esta linha escreve, diga o que disser a sua predefinição. Não "
+       "marcar nada deixa a predefinição como está."),
+    IT("Ciò che questa riga scrive, qualunque cosa dica la sua "
+       "preimpostazione. Non spuntare nulla la lascia intatta."),
+    NL("Wat deze rij schrijft, wat de voorinstelling ook zegt. Niets aanvinken "
+       "laat de voorinstelling met rust."),
+    RU("Что записывает эта строка, что бы ни говорил её пресет. Если ничего не "
+       "отмечено, пресет остаётся как есть."),
+    TR("Hazır ayarı ne derse desin, bu satırın yazacağı şey. Hiçbirini "
+       "işaretlemezseniz hazır ayar olduğu gibi kalır."));
+
+SS_MSG(batch_eta_total,
+    EN("Estimated time left: {0}"),
+    JA("残り時間の見込み: {0}"),
+    ZH_HANS("预计剩余时间：{0}"),
+    ZH_HANT("預計剩餘時間：{0}"),
+    KO("남은 시간 예상: {0}"),
+    DE("Geschätzte Restzeit: {0}"),
+    FR("Temps restant estimé : {0}"),
+    ES("Tiempo restante estimado: {0}"),
+    PT("Tempo restante estimado: {0}"),
+    IT("Tempo residuo stimato: {0}"),
+    NL("Geschatte resterende tijd: {0}"),
+    RU("Осталось примерно: {0}"),
+    TR("Tahmini kalan süre: {0}"));
+
+SS_MSG(batch_eta_task,
+    EN("This step: {0} so far, about {1} left"),
+    JA("この工程: これまで {0}、残りおよそ {1}"),
+    ZH_HANS("本步骤：已用 {0}，约剩 {1}"),
+    ZH_HANT("本步驟：已用 {0}，約剩 {1}"),
+    KO("이 단계: 지금까지 {0}, 남은 시간 약 {1}"),
+    DE("Dieser Schritt: bisher {0}, noch etwa {1}"),
+    FR("Cette étape : {0} écoulées, environ {1} restantes"),
+    ES("Este paso: {0} hasta ahora, unos {1} restantes"),
+    PT("Esta etapa: {0} até agora, cerca de {1} restantes"),
+    IT("Questo passaggio: {0} finora, circa {1} rimanenti"),
+    NL("Deze stap: {0} tot nu toe, nog ongeveer {1}"),
+    RU("Этот шаг: прошло {0}, осталось около {1}"),
+    TR("Bu adım: şu ana kadar {0}, yaklaşık {1} kaldı"));
+
+SS_MSG(mesh_color_help,
+    EN("Tick more than one to get the same surface several ways. It is "
+       "extracted once either way; only the color is redone."),
+    JA("複数にチェックすると、同じ面をいくつもの形で書き出せます。面の抽出は一度きりで、やり直すのは色だけです。"),
+    ZH_HANS("可以勾多项，把同一个面以多种方式写出。面只提取一次，重做的只有颜色。"),
+    ZH_HANT("可以勾多項，把同一個面以多種方式寫出。面只擷取一次，重做的只有顏色。"),
+    KO("여러 개를 선택하면 같은 표면을 여러 방식으로 얻습니다. 표면은 한 번만 추출하고, 다시 하는 것은 색뿐입니다."),
+    DE("Mehrere anhaken, um dieselbe Oberfläche mehrfach zu erhalten. Sie wird "
+       "ohnehin nur einmal extrahiert; wiederholt wird nur die Farbe."),
+    FR("Cochez-en plusieurs pour obtenir la même surface de plusieurs façons. "
+       "Elle n'est extraite qu'une fois ; seule la couleur est refaite."),
+    ES("Marque varias para obtener la misma superficie de varias formas. Se "
+       "extrae una sola vez; solo se rehace el color."),
+    PT("Marque várias para obter a mesma superfície de várias formas. Ela é "
+       "extraída uma só vez; apenas a cor é refeita."),
+    IT("Spuntane più di una per ottenere la stessa superficie in più modi. "
+       "Viene estratta una volta sola; si rifà solo il colore."),
+    NL("Vink er meerdere aan om hetzelfde oppervlak op meerdere manieren te "
+       "krijgen. Het wordt maar één keer geëxtraheerd; alleen de kleur wordt "
+       "opnieuw gedaan."),
+    RU("Отметьте несколько, чтобы получить одну и ту же поверхность в разных "
+       "видах. Извлекается она всё равно один раз; заново делается только "
+       "цвет."),
+    TR("Aynı yüzeyi birkaç biçimde almak için birden fazlasını işaretleyin. "
+       "Yüzey yine bir kez çıkarılır; yalnızca renk yeniden yapılır."));
+
+SS_MSG(mesh_no_output_warn,
+    EN("Nothing would be written: no ticked format can carry a ticked color."),
+    JA("何も書き出せません。チェックした形式のどれも、チェックした色を持てません。"),
+    ZH_HANS("什么都写不出：勾选的格式都装不下勾选的颜色。"),
+    ZH_HANT("什麼都寫不出：勾選的格式都裝不下勾選的顏色。"),
+    KO("아무것도 쓰이지 않습니다. 선택한 형식 중 선택한 색을 담을 수 있는 것이 없습니다."),
+    DE("Es würde nichts geschrieben: kein angehaktes Format kann eine "
+       "angehakte Farbe tragen."),
+    FR("Rien ne serait écrit : aucun format coché ne peut porter une couleur "
+       "cochée."),
+    ES("No se escribiría nada: ningún formato marcado puede llevar un color "
+       "marcado."),
+    PT("Nada seria escrito: nenhum formato marcado consegue levar uma cor "
+       "marcada."),
+    IT("Non verrebbe scritto nulla: nessun formato spuntato può portare un "
+       "colore spuntato."),
+    NL("Er zou niets worden geschreven: geen aangevinkt formaat kan een "
+       "aangevinkte kleur dragen."),
+    RU("Ничего не будет записано: ни один отмеченный формат не несёт "
+       "отмеченный цвет."),
+    TR("Hiçbir şey yazılmaz: işaretli biçimlerin hiçbiri işaretli bir rengi "
+       "taşıyamaz."));
+
+SS_MSG(chk_mesh_no_runs,
+    EN("Meshing is on, but no training run is ticked for it."),
+    JA("メッシュ化が有効ですが、対象の学習実行が一つも選ばれていません。"),
+    ZH_HANS("开了网格生成，但没有勾选任何训练运行。"),
+    ZH_HANT("開了網格生成，但沒有勾選任何訓練執行。"),
+    KO("메시 생성이 켜져 있지만, 대상으로 선택된 학습 실행이 없습니다."),
+    DE("Netzerzeugung ist an, aber kein Trainingslauf ist dafür angehakt."),
+    FR("Le maillage est activé, mais aucune exécution d'entraînement n'est "
+       "cochée pour lui."),
+    ES("El mallado está activado, pero no hay ninguna ejecución de "
+       "entrenamiento marcada."),
+    PT("A malha está ativada, mas nenhuma execução de treino está marcada para "
+       "ela."),
+    IT("La mesh è attiva, ma nessuna esecuzione di addestramento è spuntata "
+       "per essa."),
+    NL("Meshen staat aan, maar er is geen trainingsrun voor aangevinkt."),
+    RU("Построение меша включено, но ни один прогон обучения для него не "
+       "отмечен."),
+    TR("Ağ oluşturma açık, ama bunun için hiçbir eğitim çalıştırması "
+       "işaretlenmedi."));
+
+SS_MSG(chk_mesh_no_output,
+    EN("The colors and formats ticked for meshing have no combination between "
+       "them."),
+    JA("メッシュ化で選んだ色と形式に、組み合わせられるものがありません。"),
+    ZH_HANS("为网格生成勾选的颜色和格式之间没有可用的组合。"),
+    ZH_HANT("為網格生成勾選的顏色與格式之間沒有可用的組合。"),
+    KO("메시 생성에 선택한 색과 형식 사이에 가능한 조합이 없습니다."),
+    DE("Die für die Netzerzeugung angehakten Farben und Formate haben keine "
+       "gemeinsame Kombination."),
+    FR("Les couleurs et les formats cochés pour le maillage n'ont aucune "
+       "combinaison possible."),
+    ES("Los colores y formatos marcados para el mallado no tienen ninguna "
+       "combinación posible."),
+    PT("As cores e os formatos marcados para a malha não têm nenhuma "
+       "combinação possível."),
+    IT("I colori e i formati spuntati per la mesh non hanno alcuna "
+       "combinazione possibile."),
+    NL("De voor het meshen aangevinkte kleuren en formaten hebben geen enkele "
+       "combinatie."),
+    RU("У отмеченных для меша цветов и форматов нет ни одной допустимой "
+       "комбинации."),
+    TR("Ağ oluşturma için işaretlenen renkler ve biçimler arasında hiçbir "
+       "birleşim yok."));
+
+SS_MSG(batch_plan_mesh_run,
+    EN("{0}. Mesh the run trained with {1}"),
+    JA("{0}. {1} で学習した実行をメッシュ化する"),
+    ZH_HANS("{0}. 为用 {1} 训练的那次运行生成网格"),
+    ZH_HANT("{0}. 為用 {1} 訓練的那次執行產生網格"),
+    KO("{0}. {1} 로 학습한 실행으로 메시 만들기"),
+    DE("{0}. Den mit {1} trainierten Lauf vernetzen"),
+    FR("{0}. Mailler l'exécution entraînée avec {1}"),
+    ES("{0}. Mallar la ejecución entrenada con {1}"),
+    PT("{0}. Malhar a execução treinada com {1}"),
+    IT("{0}. Crea la mesh dell'esecuzione addestrata con {1}"),
+    NL("{0}. Mesh maken van de run getraind met {1}"),
+    RU("{0}. Построить меш по прогону, обученному с {1}"),
+    TR("{0}. {1} ile eğitilen çalıştırmadan ağ oluştur"));
 
 }  // namespace gui
 }  // namespace msg

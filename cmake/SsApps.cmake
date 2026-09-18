@@ -47,6 +47,9 @@ function(ss_configure_app target)
     endif()
 endfunction()
 
+add_executable(cli_training_smoke ${SS_SRC}/app/tests/cli_training_smoke.cpp)
+ss_configure_app(cli_training_smoke)
+
 # ---------------------------------------------------------------------------
 # Which tools this build has
 #
@@ -65,6 +68,7 @@ set(SS_TOOL_LIBS "")
 list(APPEND SS_TOOL_SOURCES
      ${SS_SRC}/app/FrameMask.cpp
      ${SS_SRC}/app/FrameLook.cpp
+     ${SS_SRC}/app/FrameMotion.cpp
      ${SS_SRC}/app/Pano360.cpp
      ${SS_SRC}/app/AppPaths.cpp
      ${SS_SRC}/app/CrashLog.cpp)
@@ -86,7 +90,8 @@ endif()
 # `spirula` must expose the same headless path when SS_BUILD_GUI=OFF.
 list(APPEND SS_TOOL_SOURCES
      ${SS_SRC}/app/DatasetPrep.cpp
-     ${SS_SRC}/app/FrameSelect.cpp)
+     ${SS_SRC}/app/FrameSelect.cpp
+     ${SS_SRC}/app/ReconStamp.cpp)
 
 # Embed reference/scripts/mask.py once for the non-GUI application build too.
 ss_embed_file(
@@ -318,7 +323,8 @@ if(SS_SEPARATE_TOOLS)
     endif()
     if(SS_BUILD_SAM)
         set(_sam_src ${SS_SRC}/app/cli/sam_main.cpp ${SS_SRC}/app/FrameMask.cpp
-                     ${SS_SRC}/app/FrameLook.cpp ${SS_SRC}/app/Pano360.cpp)
+                     ${SS_SRC}/app/FrameLook.cpp ${SS_SRC}/app/FrameMotion.cpp
+                     ${SS_SRC}/app/Pano360.cpp)
         set(_sam_lib ss_sam)
         if(SS_ENABLE_PATENTED)
             list(APPEND _sam_src ${SS_SRC}/app/cli/sam_extract.cpp
@@ -340,3 +346,58 @@ foreach(test_src ${SS_CORE_TESTS})
     add_executable(${test_name} ${test_src})
     ss_configure_app(${test_name})
 endforeach()
+
+# The frame plan: no device, no GUI, and a wrong answer is silent.
+add_executable(frame_motion_test
+    ${SS_SRC}/app/tests/frame_motion_test.cpp
+    ${SS_SRC}/app/FrameMotion.cpp
+    ${SS_SRC}/app/Pano360.cpp)
+ss_configure_app(frame_motion_test)
+
+# The shared stamp that decides whether a finished reconstruction is kept or
+# rebuilt, and the GUI preset serializers. Named rather than globbed -- each
+# test names its own sources.
+if(SS_BUILD_GUI)
+    add_executable(recon_stamp_test
+        ${SS_SRC}/app/gui/tests/recon_stamp_test.cpp
+        ${SS_SRC}/app/ReconStamp.cpp)
+    ss_configure_app(recon_stamp_test)
+
+    add_executable(frames_stamp_test
+        ${SS_SRC}/app/gui/tests/frames_stamp_test.cpp
+        ${SS_SRC}/app/ReconStamp.cpp)
+    ss_configure_app(frames_stamp_test)
+
+    add_executable(command_argv_test
+        ${SS_SRC}/app/gui/tests/command_argv_test.cpp
+        ${SS_SRC}/app/gui/Subprocess.cpp)
+    ss_configure_app(command_argv_test)
+
+    add_executable(preset_roundtrip_test
+        ${SS_SRC}/app/gui/tests/preset_roundtrip_test.cpp
+        ${SS_SRC}/app/gui/DatasetPreset.cpp
+        ${SS_SRC}/app/gui/MeshJob.cpp
+        ${SS_SRC}/app/gui/MeshPreset.cpp
+        ${SS_SRC}/app/gui/PresetFile.cpp
+        ${SS_SRC}/app/AppPaths.cpp)
+    ss_configure_app(preset_roundtrip_test)
+
+    add_executable(batch_process_test
+        ${SS_SRC}/app/gui/tests/batch_process_test.cpp
+        ${SS_SRC}/app/gui/BatchProcess.cpp
+        ${SS_SRC}/app/gui/SourceList.cpp
+        ${SS_SRC}/app/gui/TrainPreset.cpp
+        ${SS_SRC}/app/gui/DatasetPreset.cpp
+        ${SS_SRC}/app/gui/MeshJob.cpp
+        ${SS_SRC}/app/gui/MeshPreset.cpp
+        ${SS_SRC}/app/gui/PresetFile.cpp
+        ${SS_SRC}/app/DatasetPrep.cpp
+        ${SS_SRC}/app/FrameSelect.cpp
+        ${SS_SRC}/app/ReconStamp.cpp
+        ${SS_SRC}/app/FrameMask.cpp
+        ${SS_SRC}/app/FrameLook.cpp
+        ${SS_SRC}/app/FrameMotion.cpp
+        ${SS_SRC}/app/Pano360.cpp
+        ${SS_SRC}/app/AppPaths.cpp)
+    ss_configure_app(batch_process_test)
+endif()

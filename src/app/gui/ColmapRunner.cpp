@@ -4,7 +4,7 @@
 
 #include "app/gui/ColmapRunner.h"
 
-#include "app/gui/ReconStamp.h"
+#include "app/ReconStamp.h"
 
 #include "core/Env.h"
 
@@ -44,6 +44,9 @@ app::DatasetPrepSinks make_prep_sinks(RunProgress& progress, RunFilms films) {
     sinks.count = [&progress](app::Stage stage, int64_t done, int64_t total) {
         progress.count(static_cast<Stage>(stage), done, total);
     };
+    sinks.fraction = [&progress](app::Stage stage, float value) {
+        progress.fraction(static_cast<Stage>(stage), value);
+    };
     sinks.detail = [&progress](app::Stage stage, const std::string& text) {
         progress.detail(static_cast<Stage>(stage), text);
     };
@@ -56,6 +59,24 @@ app::DatasetPrepSinks make_prep_sinks(RunProgress& progress, RunFilms films) {
         f.mask_path = frame.mask_path;
         reel->add(f, reel->wants() ? frame.rgb : nullptr, frame.width,
                   frame.height, frame.mask);
+    };
+    sinks.scan_reset = [&progress](std::vector<app::PrepScanRow> source) {
+        std::vector<ScanRow> rows;
+        rows.reserve(source.size());
+        for (app::PrepScanRow& item : source)
+            rows.push_back({std::move(item.name), item.video, item.frames});
+        progress.scan_reset(std::move(rows));
+    };
+    sinks.scan_open = [&progress](size_t row) { progress.scan_open(row); };
+    sinks.scan_step = [&progress](size_t row, int64_t at, int64_t of,
+                                  float cost) {
+        progress.scan_step(row, at, of, cost);
+    };
+    sinks.scan_kept = [&progress](size_t row,
+                                  const std::vector<int64_t>& plan,
+                                  int64_t frames) {
+        progress.scan_kept(row, scan_plan_bars(plan, frames),
+                           (int64_t)plan.size());
     };
     return sinks;
 }
@@ -272,12 +293,16 @@ void ColmapRunner::take_reconstruction(ColmapJob& job) {
     const std::string workspace = job.workspace;
     const bool resume = job.resume;
     const float fps = job.video_fps;
+    const bool adaptive = job.adaptive_fps;
+    const float range = job.adaptive_range;
     const int sharp = job.sharp_window, maxf = job.max_frames;
     job = _live;
     job.inputs = inputs;
     job.workspace = workspace;
     job.resume = resume;
     job.video_fps = fps;
+    job.adaptive_fps = adaptive;
+    job.adaptive_range = range;
     job.sharp_window = sharp;
     job.max_frames = maxf;
 }
@@ -472,7 +497,7 @@ static std::vector<std::string> colmap_recon_args(const ColmapJob& job) {
         "--merge-models", flag(job.merge_models),
         "--final-ba", flag(job.final_bundle_adjust),
         "--vocab-tree", job.vocab_tree_path,
-        "--masks", flag(job.mask_enable),
+        "--masks", flag(job.mask_enable && job.mask_features),
         "--mask-prompt", job.mask_enable ? job.mask_prompt : std::string(),
     };
 }
@@ -493,16 +518,17 @@ void ColmapRunner::run(ColmapJob job) {
         // input's own images are not leftovers (see SfmRunner).
         const WorkspaceState prior = probe_workspace(ws.string(), job.inputs);
         // The model, as the settings that make it, against the ones the model
-        // already there was made with. A model with no stamp came from
-        // somewhere else and is reused whatever the panel says.
-        ReconStamp now;
+        // already there was made with -- which only answers anything for a
+        // stamp these settings wrote (SfmJob::settings_built_model).
+        app::ReconStamp now;
         now.present = true;
         now.engine = "colmap";
         now.args = colmap_recon_args(job);
         const std::string changed =
-            recon_stamp_change(read_recon_stamp(ws.string()), now);
-        const bool reuse_model = prior.model && !job.redo_model && changed.empty();
-        if (prior.model && !job.redo_model && !changed.empty())
+            app::recon_stamp_change(app::read_recon_stamp(ws.string()), now);
+        const bool rebuild_for_settings = job.settings_built_model && !changed.empty();
+        bool reuse_model = prior.model && !job.redo_model && !rebuild_for_settings;
+        if (prior.model && !job.redo_model && rebuild_for_settings)
             log(spirula::i18n::format(lmsg::sfm_settings_changed, {changed}));
         if (prior.resumable() && !job.resume)
             return fail("the workspace already contains an unfinished run "
@@ -533,6 +559,8 @@ void ColmapRunner::run(ColmapJob job) {
             // COLMAP's own device routing is untouched.
             pj.device = job.device;
             pj.video_fps = job.video_fps;
+            pj.adaptive_fps = job.adaptive_fps;
+            pj.adaptive_range = job.adaptive_range;
             pj.sharp_window = job.sharp_window;
             pj.pano = job.pano;
             pj.max_frames = job.max_frames;
@@ -565,6 +593,14 @@ void ColmapRunner::run(ColmapJob job) {
         const bool have_masks = !prep.mask_dir.empty();
         const std::string mask_dir_cfg = prep.mask_dir_cfg;
         _mask_flipped = prep.mask_dir_flipped;
+        // Frames this run replaced: the database indexes the old ones by name
+        // and would match a keypoint table against a picture that has changed.
+        if (prep.frames_rebuilt) {
+            job.redo_model = true;
+            reuse_model = false;
+            std::error_code fec;
+            fs::remove(ws / "database.db", fec);
+        }
         if (prep.per_folder_cameras && job.camera_mode == 0) {
             log(lmsg::one_camera_per_folder.get());
             job.camera_mode = 1;
@@ -663,7 +699,7 @@ void ColmapRunner::run(ColmapJob job) {
                 shared.push_back("--SiftExtraction.estimate_affine_shape");
                 shared.push_back("1");
             }
-            if (have_masks) {
+            if (have_masks && job.mask_features) {
                 shared.push_back("--ImageReader.mask_path");
                 shared.push_back(prep.mask_dir);
             }
@@ -855,7 +891,7 @@ void ColmapRunner::run(ColmapJob job) {
             // one is from a FINISHED run -- reuse it. An interrupted mapper
             // leaves nothing and simply reruns.
             std::vector<std::pair<int64_t, fs::path>> models;
-            if (job.resume && !job.redo_model && changed.empty() &&
+            if (job.resume && !job.redo_model && !rebuild_for_settings &&
                 !(models = enumerate_models()).empty()) {
                 log("Resume: " + std::to_string(models.size()) +
                     " existing model(s) under sparse/; skipping the mapper "
@@ -973,7 +1009,7 @@ void ColmapRunner::run(ColmapJob job) {
 
         write_unregistered_list(ws, images);
 
-        if (!reuse_model) write_recon_stamp(ws.string(), now);
+        if (!reuse_model) app::write_recon_stamp(ws.string(), now);
 
         // ---- depth and normals ---------------------------------------------
         take_geometry(job);

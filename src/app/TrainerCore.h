@@ -131,6 +131,10 @@ void save_config_json(const TrainConfig& c, const std::filesystem::path& out_dir
 // one the splats are trained in (data/SceneTransform.h).
 void save_scene_transform_json(const ParsedDataset& ds, const TrainConfig& c,
                                const std::filesystem::path& out_dir);
+std::vector<float> trainer_exif_exposure_evs(const ParsedDataset& ds,
+                                             const PostSplitCameras& post,
+                                             bool arithmetic_mean,
+                                             int& n_found);
 
 // "" when this config is runnable, else the sentence naming the flag that is
 // not implemented -- exactly what TrainerSession::check_config() throws. A

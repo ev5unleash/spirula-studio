@@ -3,6 +3,7 @@
 
 #include "app/Tools.h"
 #include "app/WorkerRequest.h"
+#include "app/TextFile.h"
 #include "core/Env.h"
 
 #ifdef SS_TOOL_SFM
@@ -152,11 +153,13 @@ int run_sfm(const app::worker::Request& r, app::worker::Result& result) {
         const fs::path path = fs::u8path(*manifest);
         std::error_code ec;
         fs::create_directories(path.parent_path(), ec);
-        std::ofstream out(path, std::ios::binary | std::ios::trunc);
-        out << r.payload;
-        out.flush();
-        if (ec || !out) {
-            result.outcome = "failed"; result.message = "worker: cannot write SfM manifest"; return 2;
+        const std::string write_error =
+            ec ? path.u8string() + ": " + ec.message()
+               : app::write_text_file(path, r.payload);
+        if (!write_error.empty()) {
+            result.outcome = "failed";
+            result.message = "worker: cannot write SfM manifest " + write_error;
+            return 2;
         }
     }
     args.push_back("--device"); args.push_back(r.device);

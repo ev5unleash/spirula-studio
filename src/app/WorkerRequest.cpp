@@ -326,11 +326,17 @@ std::string input_json(const app::PrepInput& in) {
         out += subcamera_json(in.subcameras[i]);
     }
     out += ']';
-    std::string eac = "{";
-    bool ef = true;
-    add_int(eac, "track_w", in.eac360.track_w, ef); add_int(eac, "track_h", in.eac360.track_h, ef);
-    add_int(eac, "face", in.eac360.face, ef); add_int(eac, "strip", in.eac360.strip, ef);
-    eac += '}'; add_json(out, "eac360", eac, first);
+    std::string pano = "{";
+    bool pf = true;
+    add_int(pano, "packing", (int)in.pano360.packing, pf);
+    add_int(pano, "track_w", in.pano360.track_w, pf);
+    add_int(pano, "track_h", in.pano360.track_h, pf);
+    add_int(pano, "face", in.pano360.face, pf);
+    add_int(pano, "strip", in.pano360.strip, pf);
+    add_int(pano, "margin", in.pano360.margin, pf);
+    pano += '}';
+    add_json(out, "pano360", pano, first);
+    add_bool(out, "pano360_unsupported", in.pano360_unsupported, first);
     add_json(out, "stencil", stencil_json(in.stencil), first);
     out += '}';
     return out;
@@ -359,7 +365,10 @@ std::string prep_json(const app::PrepJob& job) {
     add_num(pano, "yaw", job.pano.yaw, pf); add_num(pano, "pitch", job.pano.pitch, pf);
     add_num(pano, "roll", job.pano.roll, pf); pano += '}';
     add_json(out, "pano", pano, first);
-    add_num(out, "video_fps", job.video_fps, first); add_int(out, "sharp_window", job.sharp_window, first);
+    add_num(out, "video_fps", job.video_fps, first);
+    add_bool(out, "adaptive_fps", job.adaptive_fps, first);
+    add_num(out, "adaptive_range", job.adaptive_range, first);
+    add_int(out, "sharp_window", job.sharp_window, first);
     add_bool(out, "sync_tracks", job.sync_tracks, first); add_int(out, "max_frames", job.max_frames, first);
     add_bool(out, "auto_rotate", job.auto_rotate, first);
     add_bool(out, "force_external_decode", job.force_external_decode, first);
@@ -459,11 +468,18 @@ app::PrepInput decode_input(const JsonValue& v) {
     const JsonValue& subs = array_value(v, "subcameras");
     in.subcameras.reserve(subs.arr.size());
     for (const JsonValue& sub : subs.arr) in.subcameras.push_back(decode_subcamera(sub));
-    const JsonValue& e = object_value(v, "eac360");
-    in.eac360.track_w = int_value(e, "track_w", 0, 1 << 20);
-    in.eac360.track_h = int_value(e, "track_h", 0, 1 << 20);
-    in.eac360.face = int_value(e, "face", 0, 1 << 20);
-    in.eac360.strip = int_value(e, "strip", 0, 1 << 20);
+    const JsonValue* pano = optional(v, "pano360");
+    if (!pano) pano = required(v, "eac360");
+    if (pano->type != JsonValue::Type::Object)
+        throw std::runtime_error("payload: panorama layout must be an object");
+    in.pano360.packing = (app::Pano360Packing)
+        optional_int(*pano, "packing", 0, 0, 1);
+    in.pano360.track_w = int_value(*pano, "track_w", 0, 1 << 20);
+    in.pano360.track_h = int_value(*pano, "track_h", 0, 1 << 20);
+    in.pano360.face = int_value(*pano, "face", 0, 1 << 20);
+    in.pano360.strip = int_value(*pano, "strip", 0, 1 << 20);
+    in.pano360.margin = optional_int(*pano, "margin", 0, 0, 1 << 20);
+    in.pano360_unsupported = optional_bool(v, "pano360_unsupported");
     in.stencil = decode_stencil(object_value(v, "stencil"));
     return in;
 }
@@ -487,6 +503,8 @@ app::PrepJob decode_prep(const JsonValue& root) {
     job.pano.pitch = float_value(pano, "pitch", -360.0f, 360.0f);
     job.pano.roll = float_value(pano, "roll", -360.0f, 360.0f);
     job.video_fps = float_value(root, "video_fps", 0.0f, 100000.0f);
+    job.adaptive_fps = bool_value(root, "adaptive_fps");
+    job.adaptive_range = float_value(root, "adaptive_range", 1.0f, 16.0f);
     job.sharp_window = int_value(root, "sharp_window", 1, 100000);
     job.sync_tracks = bool_value(root, "sync_tracks"); job.max_frames = int_value(root, "max_frames", 1, 1000000000);
     job.auto_rotate = bool_value(root, "auto_rotate"); job.force_external_decode = bool_value(root, "force_external_decode");

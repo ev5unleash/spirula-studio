@@ -92,6 +92,12 @@ bool find_request(const fs::path& run_dir, const std::string& phase,
 }  // namespace
 
 int main(int argc, char** argv) {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    if (argc != 2 || !fs::is_regular_file(fs::u8path(argv[1]))) {
+        std::fprintf(stderr, "Usage: scheduler_test <built spirula executable>\n");
+        return 1;
+    }
+    const std::string exe = fs::absolute(fs::u8path(argv[1])).u8string();
     const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
     const fs::path root = fs::temp_directory_path() /
         ("spirula_scheduler_test_" + std::to_string(nonce));
@@ -116,19 +122,6 @@ int main(int argc, char** argv) {
               "output lease becomes available after release");
     }
 
-    // The real binary: `spirula train --help` exits quickly, so jobs reach a
-    // terminal failure without a GPU. The queue and reaping paths stay real.
-#ifdef _WIN32
-    const char* binary_name = "spirula.exe";
-#else
-    const char* binary_name = "spirula";
-#endif
-    fs::path exe_path = argc > 0 ? fs::path(argv[0]).parent_path() / binary_name
-                                 : fs::path(binary_name);
-    if (!fs::exists(exe_path)) exe_path = fs::path("build") / binary_name;
-    const std::string exe = fs::exists(exe_path)
-                                ? fs::absolute(exe_path).u8string()
-                                : binary_name;
     {
         const fs::path migration = root / "migration";
         fs::create_directories(migration);
@@ -151,6 +144,39 @@ int main(int argc, char** argv) {
         text << in.rdbuf();
         check(text.str().find("\"schema_version\": 2") != std::string::npos,
               "migration writes schema 2 only");
+    }
+    {
+        const fs::path migration = root / "publish-order-migration";
+        const fs::path workspace = migration / "workspace";
+        fs::create_directories(workspace);
+        const fs::path state = migration / "job-state.json";
+        const auto phase = [](const char* name) {
+            return std::string("{\"phase\":\"") + name +
+                   "\",\"optional\":false,\"planned_device\":\"gpu-legacy\","
+                   "\"planned_device_name\":\"Legacy GPU\",\"actual_device\":\"\","
+                   "\"actual_device_name\":\"\",\"output\":\"\",\"outputs\":[],"
+                   "\"args\":[],\"payload\":\"\",\"outcome\":\"pending\","
+                   "\"completed\":false,\"exit_code\":-1,\"error\":\"\"}";
+        };
+        std::ofstream(state, std::ios::binary | std::ios::trunc)
+            << R"({"schema_version":2,"jobs":[{"order":0,"job_id":"legacy-order","phase":"publish","device":"gpu-legacy","device_name":"Legacy GPU","work_dir":")"
+            << migration.generic_u8string() << R"(","run_dir":")"
+            << (migration / "run").generic_u8string()
+            << R"(","output_dir":"","workspace":")"
+            << workspace.generic_u8string()
+            << R"(","source_paths":[],"options_payload":"","created_at":"created","state":"Queued","attempt_id":"","error":"","pending_resume":false,"last_exit_code":-1,"completed_prefix":0,"current_phase":0,"args":[],"path_claims":[{"path":")"
+            << workspace.generic_u8string()
+            << R"(","write":true}],"phases":[)"
+            << phase("publish") << ',' << phase("train") << "]}]}";
+        sched::JobScheduler migrated(migration.u8string(), exe);
+        migrated.pause_dispatch(true);
+        migrated.load();
+        const auto rows = migrated.list();
+        check(migrated.state_error().empty() && rows.size() == 1 &&
+                  rows[0].phases.size() == 2 &&
+                  rows[0].phases[0].phase == "train" &&
+                  rows[0].phases[1].phase == "publish",
+              "legacy publish-before-train order migrates");
     }
     {
         const fs::path invalid = root / "invalid-path";
@@ -182,6 +208,65 @@ int main(int argc, char** argv) {
     check(sched::path_claims_conflict({(root / "dataset").u8string(), false},
                                       {(root / "dataset" / "child").u8string(), true}),
           "write descendant conflicts with read ancestor");
+
+    {
+        const fs::path order_root = root / "phase-order";
+        const fs::path workspace = order_root / "workspace";
+        sched::JobScheduler scheduler(order_root.u8string(), exe);
+        scheduler.pause_dispatch(true);
+
+        sched::WorkflowSubmitOpts workflow;
+        workflow.work_dir = order_root.u8string();
+        workflow.workspace = workspace.u8string();
+        for (const char* name : {"prep", "sfm", "geometry", "train"}) {
+            sched::Phase phase;
+            phase.phase = name;
+            phase.planned_device = "gpu-order";
+            if (phase.phase == "train")
+                phase.args = {"--output-dir-prefix",
+                              (workspace / "outputs").u8string()};
+            workflow.phases.push_back(std::move(phase));
+        }
+        const std::string workflow_id = scheduler.submit(workflow);
+        const auto workflow_rows = scheduler.list();
+        check(!workflow_id.empty() && workflow_rows.size() == 1 &&
+                  workflow_rows[0].state == sched::JobState::Queued,
+              "linked training workflow submits without nested claim conflict");
+        check(workflow_rows.size() == 1 && workflow_rows[0].phases.size() == 5 &&
+                  workflow_rows[0].phases[0].phase == "prep" &&
+                  workflow_rows[0].phases[1].phase == "sfm" &&
+                  workflow_rows[0].phases[2].phase == "geometry" &&
+                  workflow_rows[0].phases[3].phase == "train" &&
+                  workflow_rows[0].phases[4].phase == "publish",
+              "scheduler publishes only after linked training");
+
+        const fs::path dataset = order_root / "dataset";
+        const fs::path outputs = order_root / "independent-outputs";
+        fs::create_directories(dataset);
+        sched::SubmitOpts train;
+        train.phase = "train";
+        train.device = "gpu-order";
+        train.work_dir = order_root.u8string();
+        train.args = {"--data", dataset.u8string(),
+                      "--output-dir-prefix", outputs.u8string()};
+        const std::string first = scheduler.submit(train);
+        const std::string second = scheduler.submit(train);
+        const auto all = scheduler.list();
+        const auto find_job = [&](const std::string& id) -> const sched::Job* {
+            for (const sched::Job& job : all)
+                if (job.job_id == id) return &job;
+            return nullptr;
+        };
+        const sched::Job* first_job = find_job(first);
+        const sched::Job* second_job = find_job(second);
+        check(first_job && second_job &&
+                  first_job->state == sched::JobState::Queued &&
+                  second_job->state == sched::JobState::Queued,
+              "independent runs may share an output prefix");
+        check(first_job && second_job &&
+                  first_job->output_dir != second_job->output_dir,
+              "independent runs claim unique job output directories");
+    }
 
     {
         const fs::path failure_root = root / "submit_failure";

@@ -59,15 +59,25 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: |
-            build/slang-*
-            build/Vulkan-Headers-*
+            build_vulkan/slang-*
+            build_vulkan/Vulkan-Headers-*
           key: fetched-linux-${{ hashFiles('cmake/SsSlang.cmake', 'cmake/SsVulkan.cmake') }}
 
       - name: Build
         run: bash build_develop.bash -DSS_BACKEND=vulkan -DSS_ENABLE_PATENTED=ON
 
       - name: Smoke
-        run: ./build/spirula train --help
+        run: ./build_vulkan/spirula train --help
+
+      - name: Headless behavior
+        run: cmake -E chdir build_vulkan ctest -L headless --output-on-failure --no-tests=error
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: headless-linux-failure
+          path: build_vulkan/Testing/
+          retention-days: 7
 
   macos:
     runs-on: macos-15
@@ -94,6 +104,16 @@ jobs:
 
       - name: Smoke
         run: ./build/spirula train --help
+
+      - name: Headless behavior
+        run: cmake -E chdir build ctest -L headless --output-on-failure --no-tests=error
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: headless-macos-failure
+          path: build/Testing/
+          retention-days: 7
 
       - name: Package
         run: cmake --build build --target macos_dmg
@@ -124,4 +144,15 @@ jobs:
 
       - name: Smoke
         shell: cmd
-        run: build\spirula.exe train --help
+        run: build_vulkan\spirula.exe train --help
+
+      - name: Headless behavior
+        shell: cmd
+        run: cmake -E chdir build_vulkan ctest -L headless --output-on-failure --no-tests=error
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: headless-windows-failure
+          path: build_vulkan/Testing/
+          retention-days: 7

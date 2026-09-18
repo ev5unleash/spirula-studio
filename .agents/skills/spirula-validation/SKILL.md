@@ -21,6 +21,14 @@ If the required hardware or toolchain is unavailable, report the result as
 **unverified**. `clangd` or an index-only check is never a substitute for a
 real build.
 
+## Native tooling
+
+`.clangd` selects `build_vulkan` by default. Generate a compilation database by
+adding `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` to the relevant dev build command.
+For CUDA indexing, pass `--compile-commands-dir=build_cuda` to clangd.
+Source-level debugging requires a build with `-DSS_DEBUG_SYMBOLS=ON`; do not
+mistake a debugger attaching to a stripped Release binary for source coverage.
+
 ## Build and choose a gate
 
 Use the dev entrypoints; they run the supported code generation and select the
@@ -87,5 +95,5 @@ splat trajectory, device/driver, build options, warmup, iteration count, and
 output state equivalent before attributing a speed or memory change. Use the
 existing [VRAM note](../../../docs/notes/vram-splat-x-img.md) and [scheduling
 profiling guidance](../../../docs/notes/device-job-scheduling-plan.md) when
-those questions are in scope; do not add a profiler, benchmark script,
-dependency, or blanket full-suite requirement.
+those questions are in scope. Reuse existing measurements before introducing
+another benchmark or profiling dependency.

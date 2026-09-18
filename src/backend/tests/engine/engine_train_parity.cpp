@@ -311,7 +311,7 @@ int main(int argc, char** argv) {
         for (uint8_t v : alpha) g_tight.push_back((float)v);
     }
 
-    // --- loose: splat parameters after all optimizer steps -----------------
+    // --- loose: splat parameters after the parity optimizer steps ----------
     if (engine().cur_num_splats != N) {
         std::fprintf(stderr, "unexpected splat count %lld (densify ran?)\n",
                      (long long)engine().cur_num_splats);
@@ -325,6 +325,55 @@ int main(int argc, char** argv) {
 
     const int64_t nt = (int64_t)g_tight.size(),
                   nl = (int64_t)g_loose.size();
+    // Every supported background must survive the real training consumer.
+
+    {
+        const int C = 1, W = 32, H = 24;
+        std::vector<float> vm = {
+            1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 3.5f, 0, 0, 0, 1};
+        std::vector<float> intr = {28, 28, 16, 12};
+        std::vector<float> dist(kCameraDistortionParams, 0.0f);
+        auto gt_rgb = r.bytes((int64_t)H * W * 3);
+        EngineStepConfig bg_cfg = cfg;
+        bg_cfg.loss.weights[(int)LossWeightIndex::DepthSup] = 0.0f;
+        bg_cfg.loss.weights[(int)LossWeightIndex::NormalSup] = 0.0f;
+        bg_cfg.loss.weights[(int)LossWeightIndex::AlphaSup] = 0.0f;
+        bg_cfg.loss.weights[(int)LossWeightIndex::NormalReg] = 0.0f;
+        bg_cfg.loss.weights[(int)LossWeightIndex::AlphaReg] = 0.0f;
+        bg_cfg.background.lr_dc = 1e-3f;
+        bg_cfg.background.lr_sh = 5e-4f;
+        bg_cfg.background.randomize_weight = 0.6f;
+        const float color[3] = {0.2f, 0.65f, 0.9f};
+
+        for (int mode = 0; mode < 5; mode++, step++) {
+            if (mode == 0) engine_init_background_color(color, 0, false);
+            if (mode == 1) engine_init_background_noise(0, false);
+            if (mode == 2) engine_init_background_pseudorandom(0, false);
+            if (mode == 3) engine_init_background_random(0, false);
+            if (mode == 4) engine_init_background_sh(2, 0, false);
+            bg_cfg.background.seed = 41u + (uint32_t)mode;
+            auto losses = engine_train_step(
+                step, max_steps, "3dgs", 3, false, W, H, "PINHOLE", "NONE",
+                ttv(vm.data(), 4, {C, 4, 4}), ttv(intr.data(), 4, {C, 4}),
+                ttv(dist.data(), 4, {C, kCameraDistortionParams}),
+                ttv(gt_rgb.data(), 1, {C, H, W, 3}), ttv_null(), ttv_null(),
+                ttv_null(), ttv_null(), bg_cfg);
+            for (const auto& kv : losses) {
+                if (!std::isfinite(kv.second)) {
+                    std::fprintf(stderr, "non-finite background loss in mode %d\n",
+                                 mode);
+                    return 1;
+                }
+            }
+        }
+        backend::device_synchronize();
+        if (const char* err = backend::last_error()) {
+            std::fprintf(stderr, "backend error (background train steps): %s\n",
+                         err);
+            return 1;
+        }
+        std::printf("engine_train_parity: all background training modes passed\n");
+    }
     if (dumping) {
         std::ofstream f(argv[2], std::ios::binary);
         f.write((const char*)&nt, 8);

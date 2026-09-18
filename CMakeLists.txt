@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.18 FATAL_ERROR)
 project(spirula_studio LANGUAGES C CXX)  # CUDA enabled by the cuda backend module
+enable_testing()
 
 # The build (see build_develop.bash / build_develop.bat and docs/build.md).
 #
@@ -54,6 +55,7 @@ if(SS_BUILD_SAM)
 endif()
 
 include(SsApps)
+include(SsTests)
 
 # After SsApps: the packaging targets depend on the `spirula` target.
 include(SsPackage)

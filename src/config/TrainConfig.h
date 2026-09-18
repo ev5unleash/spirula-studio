@@ -147,10 +147,12 @@ inline int train_tier_rank(const char* tier) {
     X(std::string, primitive, "3dgs", "splats", "basic", "3dgs|mip|3dgut")   \
     X(int, sh_degree, 3, "splats", "basic", "")                              \
     X(int, sh_degree_warmup_every, 1000, "splats", "expert", "")             \
-    X(std::string, background_mode, "black", "splats", "basic", "black|noise|sh|pseudorandom") \
+    X(std::string, background_mode, "color", "splats", "basic", "color|noise|pseudorandom|random|sh") \
+    X(TrainVec3f, background_color, train_v3f(0.0f, 0.0f, 0.0f), "splats", "basic", "") \
     X(int, background_sh_degree, 4, "splats", "basic", "")                   \
     X(int, background_noise_warmup, 2000, "splats", "expert", "")            \
     X(float, background_noise_pre_warmup, 0.25f, "splats", "expert", "")     \
+    X(bool, background_match_luminance, false, "splats", "advanced", "")     \
     X(std::optional<float>, scale_init, std::nullopt, "splats", "advanced", "") \
     X(std::optional<float>, opacity_init, std::nullopt, "splats", "advanced", "") \
     X(bool, suppress_initial_scales, false, "splats", "expert", "")          \
@@ -204,7 +206,7 @@ inline int train_tier_rank(const char* tier) {
     X(float, alpha_loss_weight, 0.1f, "loss", "basic", "")                   \
     X(float, alpha_loss_weight_under, 0.0f, "loss", "basic", "")             \
     X(float, loss_saturation_threshold, -1.0f, "loss", "advanced", "")       \
-    X(bool, normalize_loss_by_luminance, false, "loss", "advanced", "")      \
+    X(float, loss_luminance_normalization, 0.0f, "loss", "advanced", "")     \
                                                                              \
     /* ==== geometry -- how crisp the surfaces come out, and depth/normal guidance ==== */ \
     X(std::string, floater_suppression, "off", "geometry", "basic", "off|mild|strong") \
@@ -257,6 +259,7 @@ inline int train_tier_rank(const char* tier) {
     X(bool, use_ppisp, true, "correction", "basic", "")                      \
     X(std::string, ppisp_param_type, "no_crf_no_vig", "correction", "basic", "original|rqs|no_crf|no_crf_clamp|no_crf_no_vig|no_crf_no_vig_clamp") \
     X(bool, ppisp_exposure_from_exif, false, "correction", "basic", "")      \
+    X(bool, ppisp_exposure_arithmetic_mean, true, "correction", "expert", "") \
     X(bool, apply_ppisp_before_bilagrid, true, "correction", "advanced", "") \
     X(bool, apply_ppisp_before_color_space, false, "correction", "advanced", "") \
     X(bool, use_adagrad_ppisp_optim, true, "correction", "advanced", "")     \
@@ -430,10 +433,11 @@ inline bool train_apply_preset(TrainConfig& c, const std::string& name) {
         // c.apply_ppisp_before_color_space = true;
         // c.ppisp_adagrad_lr = 0.25f;
         c.ppisp_exposure_from_exif = true;
-        // c.background_mode = "noise";
+        c.background_mode = "random";
+        c.background_match_luminance = true;
         // c.depth_distortion_reg = 0.01f;
         c.loss_saturation_threshold = 0.98f;
-        c.normalize_loss_by_luminance = true;
+        // c.loss_luminance_normalization = 0.5f;
         c.dc_reg = 0.0f;
         c.max_screen_size = 0.15f;
         // c.features_dc_lr = 0.0015f;
