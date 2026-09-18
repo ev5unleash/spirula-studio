@@ -26,9 +26,11 @@ int main(int argc, char** argv) {
         app::worker::Result result;
         result.outcome = "success";
         result.exit_code = 0;
-        result.outputs = {mode == "missing-output"
-            ? (fs::u8path(request.work_dir) / "absent").u8string()
-            : request.work_dir};
+        const fs::path run_dir =
+            fs::u8path(request.result_path).parent_path();
+        result.outputs = {
+            mode == "missing-output" ? (run_dir / "absent").u8string() :
+            mode == "outside-claim" ? request.work_dir : run_dir.u8string()};
         return app::worker::publish_result(request, result) ? 0 : 1;
     }
     int failures = 0;
@@ -40,8 +42,9 @@ int main(int argc, char** argv) {
         const fs::path root = fs::current_path() / "protocol-fixture";
         fs::create_directories(root);
         const std::string exe = fs::absolute(fs::u8path(argv[0])).u8string();
-        for (const char* mode : {"valid", "wrong-job", "wrong-attempt", "wrong-phase",
-                                 "truncated", "missing-output"}) {
+        for (const char* mode : {"valid", "wrong-job", "wrong-attempt",
+                                 "wrong-phase", "truncated", "missing-output",
+                                 "outside-claim"}) {
             const fs::path work = root / mode;
             fs::create_directories(work);
             sched::JobScheduler scheduler((work / "queue").u8string(), exe);

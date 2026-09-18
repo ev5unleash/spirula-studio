@@ -180,6 +180,37 @@ int main(int argc, char** argv) {
               "legacy publish-before-train order migrates");
     }
     {
+        const fs::path publish_root = root / "publish-artifact-validation";
+        const fs::path workspace = publish_root / "workspace";
+        const fs::path missing = workspace / "missing-output";
+        fs::create_directories(workspace);
+        std::ofstream(publish_root / "job-state.json",
+                      std::ios::binary | std::ios::trunc)
+            << R"({"schema_version":2,"jobs":[{"order":0,"job_id":"publish-missing","phase":"publish","device":"gpu-publish","device_name":"Publish GPU","work_dir":")"
+            << publish_root.generic_u8string() << R"(","run_dir":")"
+            << (publish_root / "run").generic_u8string()
+            << R"(","output_dir":"","workspace":")"
+            << workspace.generic_u8string()
+            << R"(","source_paths":[],"options_payload":"","created_at":"created","state":"Queued","attempt_id":"","error":"","pending_resume":false,"last_exit_code":0,"completed_prefix":1,"current_phase":1,"args":[],"path_claims":[{"path":")"
+            << workspace.generic_u8string()
+            << R"(","write":true}],"phases":[{"phase":"geometry","optional":false,"planned_device":"gpu-publish","planned_device_name":"Publish GPU","actual_device":"gpu-publish","actual_device_name":"Publish GPU","output":")"
+            << missing.generic_u8string() << R"(","outputs":[")"
+            << missing.generic_u8string()
+            << R"("],"args":[],"payload":"{}","outcome":"success","completed":true,"exit_code":0,"error":""},{"phase":"publish","optional":false,"planned_device":"","planned_device_name":"","actual_device":"","actual_device_name":"","output":"","outputs":[],"args":[],"payload":"{}","outcome":"pending","completed":false,"exit_code":-1,"error":""}]}]})";
+        sched::JobScheduler scheduler(publish_root.u8string(), exe);
+        scheduler.pause_dispatch(true);
+        scheduler.load();
+        scheduler.pause_dispatch(false);
+        check(wait_for([&] {
+            const auto jobs = scheduler.list();
+            return jobs.size() == 1 &&
+                   jobs[0].state == sched::JobState::Failed &&
+                   jobs[0].completed_prefix == 1 &&
+                   jobs[0].phases[0].completed &&
+                   !jobs[0].phases[1].completed;
+        }), "publish rejects a vanished final artifact");
+    }
+    {
         const fs::path invalid = root / "invalid-path";
         fs::create_directories(invalid);
         const fs::path state = invalid / "job-state.json";
@@ -837,15 +868,40 @@ int main(int argc, char** argv) {
             out << text;
         }
         sched::JobScheduler s3(root.u8string(), exe);
+        s3.pause_dispatch(true);
         s3.load();
         auto lst = s3.list();
         bool saw_interrupted = false;
+        std::string interrupted_claim;
         for (const auto& j : lst)
             if (j.state == sched::JobState::Interrupted) {
                 saw_interrupted = true;
                 check(j.pending_resume, "interrupted row has pending_resume set");
+                for (const auto& claim : j.path_claims)
+                    if (claim.write && interrupted_claim.empty())
+                        interrupted_claim = claim.path;
             }
         check(saw_interrupted, "persisted Running reloads as Interrupted");
+        app::OutputLease second_owner;
+        std::string second_owner_error;
+        check(!interrupted_claim.empty() &&
+                  !second_owner.acquire(fs::u8path(interrupted_claim),
+                                        second_owner_error),
+              "interrupted row retains its output lease");
+        sched::SubmitOpts overlapping;
+        overlapping.phase = "train";
+        overlapping.device = "gpu-overlap";
+        overlapping.work_dir = root.u8string();
+        overlapping.output_dir = interrupted_claim;
+        overlapping.args = {"--help"};
+        const std::string overlapping_id = s3.submit(overlapping);
+        bool overlap_blocked = false;
+        for (const auto& j : s3.list())
+            if (j.job_id == overlapping_id &&
+                j.state == sched::JobState::Blocked)
+                overlap_blocked = true;
+        check(overlap_blocked,
+              "interrupted row rejects a second output owner");
     }
 
     // Blocked-retry: submit on a busy device with dispatch paused, retry.

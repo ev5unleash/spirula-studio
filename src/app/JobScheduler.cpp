@@ -278,34 +278,78 @@ bool output_exists(const std::string& path) {
     return fs::exists(fs::u8path(path), ec) && !ec;
 }
 
-bool validate_phase_result(const Job& job, const Phase& phase, const app::worker::Result& result,
-                          std::string& error) {
-    const bool usable = result.outcome == "success" || result.outcome == "partial" ||
+bool output_is_claimed(const Job& job, const std::string& value) {
+    const fs::path output = fs::u8path(canonical_claim_path(value));
+    if (output.empty()) return false;
+    for (const PathClaim& claim : job.path_claims) {
+        if (!claim.write) continue;
+        const fs::path root = fs::u8path(canonical_claim_path(claim.path));
+        if (root.empty()) continue;
+        auto parent = root.begin();
+        auto child = output.begin();
+        while (parent != root.end() && child != output.end() &&
+               *parent == *child) {
+            ++parent;
+            ++child;
+        }
+        if (parent == root.end()) return true;
+    }
+    return false;
+}
+
+bool validate_output(const Job& job, const std::string& output,
+                     std::string& error) {
+    if (!output_exists(output)) {
+        error = "worker output does not exist: " + output;
+        return false;
+    }
+    if (!output_is_claimed(job, output)) {
+        error = "worker output is outside claimed paths: " + output;
+        return false;
+    }
+    return true;
+}
+
+bool validate_phase_result(const Job& job, const Phase& phase,
+                           const app::worker::Result& result,
+                           std::string& error) {
+    const bool usable = result.outcome == "success" ||
+                        result.outcome == "partial" ||
                         result.outcome == "nonmetric";
-    if (!usable) { error = result.message.empty() ? "worker reported " + result.outcome : result.message; return false; }
+    if (!usable) {
+        error = result.message.empty() ? "worker reported " + result.outcome
+                                       : result.message;
+        return false;
+    }
     if (phase.phase == "train") {
-        if (!training_output_published(job, error)) return false;
+        if (!training_output_published(job, error) ||
+            !validate_output(job, job.output_dir, error))
+            return false;
     }
     if (phase.phase == "prep") {
         if (result.outputs.empty() && phase.output.empty()) {
             error = "prep worker produced no validated output";
             return false;
         }
+        if (result.outputs.empty() &&
+            !validate_output(job, phase.output, error))
+            return false;
     }
     if (phase.phase == "sfm") {
-        const std::string sparse = result.sparse_path.empty() ? phase.output : result.sparse_path;
-        if (sparse.empty() || !output_exists(sparse)) {
+        const std::string sparse =
+            result.sparse_path.empty() ? phase.output : result.sparse_path;
+        if (sparse.empty()) {
             error = "SfM worker produced no validated sparse model";
             return false;
         }
+        if (!validate_output(job, sparse, error)) return false;
     }
     if (phase.phase == "geometry" && result.outputs.empty()) {
         error = "geometry worker produced no validated output";
         return false;
     }
-    for (const std::string& output : result.outputs) {
-        if (!output_exists(output)) { error = "worker output does not exist: " + output; return false; }
-    }
+    for (const std::string& output : result.outputs)
+        if (!validate_output(job, output, error)) return false;
     return true;
 }
 
@@ -369,9 +413,11 @@ void write_request_file(const app::worker::Request& r, const fs::path& path) {
     if (!f) throw std::runtime_error("cannot flush request file");
 }
 
-bool owns_claims(JobState state) {
-    return state == JobState::Queued || state == JobState::Starting ||
-           state == JobState::Running || state == JobState::Stopping;
+bool owns_claims(const Job& job) {
+    return job.state == JobState::Queued ||
+           job.state == JobState::Starting ||
+           job.state == JobState::Running ||
+           job.state == JobState::Stopping || job.pending_resume;
 }
 
 bool normalize_path(const std::string& value, const fs::path& base,
@@ -599,7 +645,7 @@ bool JobScheduler::claim_paths_locked(const Job& job, std::string& error) const 
             }
         }
         for (const auto& [id, other] : _jobs) {
-            if (id == job.job_id || !owns_claims(other->state)) continue;
+            if (id == job.job_id || !owns_claims(*other)) continue;
             for (const PathClaim& theirs : other->path_claims) {
                 if (path_claims_conflict(claim, theirs)) {
                     error = "path claim overlaps job " + id;
@@ -1168,7 +1214,8 @@ void JobScheduler::load() {
             load_changed = true;
         }
         _jobs[j->job_id] = j;
-        if (j->state == JobState::Queued) {
+        if (owns_claims(*j)) {
+            const bool queued = j->state == JobState::Queued;
             std::string lease_error;
             if (!claim_paths_locked(*j, lease_error) ||
                 !acquire_claim_leases_locked(*j, lease_error)) {
@@ -1179,7 +1226,7 @@ void JobScheduler::load() {
                     j->phases[j->current_phase].outcome = "failed";
                     j->phases[j->current_phase].error = lease_error;
                 }
-            } else {
+            } else if (queued) {
                 _queue.push_back(j->job_id);
             }
         }
@@ -1188,8 +1235,8 @@ void JobScheduler::load() {
         for (auto j = std::next(i); j != _jobs.end(); ++j)
             for (const PathClaim& a : i->second->path_claims)
                 for (const PathClaim& b : j->second->path_claims)
-                    if (owns_claims(i->second->state) &&
-                        owns_claims(j->second->state) &&
+                    if (owns_claims(*i->second) &&
+                        owns_claims(*j->second) &&
                         path_claims_conflict(a, b)) {
                         _state_error = "scheduler state has overlapping path claims";
                         _paused.store(true);
@@ -1227,20 +1274,21 @@ bool JobScheduler::advance_local_phase_locked(Job& j) {
            j.phases[j.current_phase].phase == "publish") {
         Phase& p = j.phases[j.current_phase];
         if (j.completed_prefix != j.current_phase) return false;
-        if (j.current_phase > 0 &&
-            j.phases[j.current_phase - 1].outputs.empty() &&
-            j.phases[j.current_phase - 1].output.empty()) {
+        if (j.current_phase == 0) return false;
+        const Phase& previous = j.phases[j.current_phase - 1];
+        if (previous.outputs.empty() && previous.output.empty()) return false;
+        std::string artifact_error;
+        if (!previous.output.empty() &&
+            !validate_output(j, previous.output, artifact_error))
             return false;
-        }
+        for (const std::string& output : previous.outputs)
+            if (!validate_output(j, output, artifact_error)) return false;
         p.outcome = "success";
         p.completed = true;
         p.error.clear();
-        if (j.current_phase) {
-            const Phase& previous = j.phases[j.current_phase - 1];
-            p.output = previous.output;
-            p.outputs = previous.outputs;
-            if (p.outputs.empty() && !p.output.empty()) p.outputs.push_back(p.output);
-        }
+        p.output = previous.output;
+        p.outputs = previous.outputs;
+        if (p.outputs.empty() && !p.output.empty()) p.outputs.push_back(p.output);
         j.completed_prefix++;
         j.current_phase++;
     }
@@ -1410,10 +1458,10 @@ void JobScheduler::supervisor_main(std::shared_ptr<Attempt> att) {
         if (it != _jobs.end()) {
             Job& job = *it->second; _leases.erase(phase.planned_device); Phase& saved = job.phases[att->phase_index]; saved.actual_device = phase.planned_device; saved.actual_device_name = phase.planned_device_name; saved.exit_code = exit_code;
             const bool cancelled = process.outcome == proc::ProcessOutcome::Cancelled; const bool stopped = process.outcome == proc::ProcessOutcome::Stopped; const bool spawn = process.outcome == proc::ProcessOutcome::SpawnFailed;
-            if (cancelled) { saved.outcome = "interrupted"; saved.error = "force-stopped"; transition_locked(job, JobState::Interrupted, saved.error); job.pending_resume = true; release_claim_leases_locked(job.job_id); }
+            if (cancelled) { saved.outcome = "interrupted"; saved.error = "force-stopped"; transition_locked(job, JobState::Interrupted, saved.error); job.pending_resume = true; }
             else if (result_ok && (result.outcome == "success" || result.outcome == "partial" || result.outcome == "nonmetric") && process.outcome == proc::ProcessOutcome::Success && (exit_code == 0 || (phase.phase == "sfm" && (exit_code == 3 || exit_code == 4)))) {
                 saved.outcome = result.outcome; saved.completed = true; saved.error.clear(); saved.outputs = result.outputs; if (!result.sparse_path.empty()) { saved.output = result.sparse_path; saved.outputs.push_back(result.sparse_path); } job.completed_prefix = std::max(job.completed_prefix, att->phase_index + 1); job.current_phase = att->phase_index + 1; job.attempt_id.clear(); job.pending_resume = false; if (advance_local_phase_locked(job)) { if (job.state != JobState::Succeeded) { job.state = JobState::Queued; _queue.push_back(job.job_id); } else release_claim_leases_locked(job.job_id); queue_event_locked(job); } else { saved.error = "workflow could not advance"; transition_locked(job, JobState::Failed, saved.error); release_claim_leases_locked(job.job_id); }
-            } else if (result_ok && result.outcome == "stopped" && (process.outcome == proc::ProcessOutcome::Success || stopped)) { saved.outcome = "stopped"; saved.error = result.message; transition_locked(job, JobState::Stopped, saved.error); job.pending_resume = true; release_claim_leases_locked(job.job_id); }
+            } else if (result_ok && result.outcome == "stopped" && (process.outcome == proc::ProcessOutcome::Success || stopped)) { saved.outcome = "stopped"; saved.error = result.message; transition_locked(job, JobState::Stopped, saved.error); job.pending_resume = true; }
             else { saved.outcome = spawn ? "spawn_failed" : "failed"; saved.error = message.empty() ? "worker exited " + std::to_string(exit_code) : message; transition_locked(job, JobState::Failed, saved.error); release_claim_leases_locked(job.job_id); }
             job.last_exit_code = exit_code; if (job.current_phase < job.phases.size()) { job.phase = job.phases[job.current_phase].phase; job.device = job.phases[job.current_phase].planned_device; job.device_name = job.phases[job.current_phase].planned_device_name; job.args = job.phases[job.current_phase].args; job.output_dir = job.phases[job.current_phase].output; }
         }

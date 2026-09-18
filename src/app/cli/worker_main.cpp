@@ -211,6 +211,7 @@ int run_prep(const app::worker::Request& r, app::worker::Result& result) {
     WorkerControl control;
     try {
         app::PrepJob job = app::worker::deserialize_prep_job(r.payload);
+        job.device = r.device;
         std::string reject;
         if (app::worker::reject_external_masking(job, reject) ||
             (job.mask_enable && !app::backends().builtin_masking)) {
