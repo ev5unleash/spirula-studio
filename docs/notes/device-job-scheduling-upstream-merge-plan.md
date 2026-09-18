@@ -628,7 +628,53 @@ Abort guidance applies only to a future genuinely pending merge: preserve
 resolutions/evidence, then use `git merge --abort` and verify status/stashes.
 Never abort, reset, or rewrite the current committed merge candidate.
 
-## 11. References
+## 11. Continuation execution record
+
+The 2026-09-18 host-side continuation produced behavioral candidate
+`007bce9897c3519b37bc498181d8fd0693bb0b0c` in three scoped local commits:
+
+- `11328eee` retains path ownership across interrupted recovery, validates every
+  worker/final-publish artifact against write claims, rechecks artifacts at
+  publish time, and makes the request's retargeted device authoritative.
+- `89194b4a` always replaces same-step checkpoints with current engine state.
+  The displaced checkpoint remains discoverable during the cross-platform
+  directory replacement window, including run-directory, absolute pinned, and
+  relative pinned resume.
+- `007bce98` persists active batch scheduler IDs across restart, keeps pending
+  recovery batches live, and rearms batch completion tracking after Retry.
+
+The acceptance build from section 4.2 passed with the required Vulkan, GUI, SfM,
+SAM, and patent-disabled options. The final focused checkpoint regression passed
+1/1, and the integrated GUI-enabled headless gate passed 19/19 in 8.34 seconds.
+The three generators were idempotent, their generated trees stayed clean, and
+all source checks listed in section 4.2 passed.
+
+A live read-only refresh observed:
+
+- `origin/feature/device-job-scheduling` unchanged at
+  `2850f729d1da98e8fb90449d54f9f6d5bee8aebd`;
+- `origin/continue/device-job-scheduling-headless` at the pre-continuation
+  handoff commit `8f8c0f5a58c4740824ef5e9d4a335614424e4860`;
+- canonical `upstream/master` unchanged at selected tip
+  `d579cf8c755f475d43eebaf7e2f0874eb633e595`.
+
+The canonical tip was already an ancestor through sanitized merge `4f158724`
+with parents `9fc6dde5` and `d579cf8c`, so the conditional merge in section 10
+was a no-op and no redundant merge commit was created. The approved local
+`AGENTS.md` blob remained `27dff3c8f27db4b8b26e713553873053efd216c6`.
+No ref was pushed and no PR or remote CI run was created.
+
+This is partial host acceptance, not full integration acceptance. GPU and
+desktop work remains paused: supported-device training, background/PPISP
+numerics, real SfM/geometry outcomes, actual notification-command execution,
+the outstanding R1-R9 UI surfaces, and physical device routing remain open.
+R4 additionally lacks a second eligible non-NVIDIA GPU. No NVIDIA/CUDA
+substitute or self-generated parity baseline was used. `.clangd` and the
+preserved ValidationSkill work remain included; this workstation's language
+server did not load the configured compilation database, so successful MSVC
+builds and executed tests are the diagnostic authority for this continuation.
+
+## 12. References
 
 - [Headless behavior testing plan](headless-testing-plan.md)
 - [Deferred GPU and desktop debugging handoff](headless-validation-debugging.md)
