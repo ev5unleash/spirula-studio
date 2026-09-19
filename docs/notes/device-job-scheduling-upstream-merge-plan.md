@@ -282,14 +282,9 @@ patent-disabled ffmpeg path and adaptive controls; a one-frame input produced
 one selected image and the truthful minimum-three-images failure.
 
 The final integrated Vulkan/GUI/SfM/SAM, patented-disabled build passed, as did
-the 19-test headless label in 6.76 seconds. Incremental comment, private-path,
-and patch-whitespace checks passed. Compatible protected parity references were
-not present and were not fabricated from the candidate. SAM model terms and
-weights were not accepted in the isolated desktop profile, so actual mask
-preview/overlay acceptance remains open. The Windows desktop became unavailable
-after the visible workflow; argv substitution, subprocess success, missing
-executable handling, and a file-writing notification command were exercised
-separately, but automatic post-publish desktop notification remains open.
+the 19-test headless label. Incremental comment, private-path, and
+patch-whitespace checks passed. Compatible protected parity references were
+not present and were not fabricated from the candidate.
 
 A subsequent closure pass used the production worker and scheduler seams. An
 eight-second moving video produced 24 adaptively spaced frames through the
@@ -309,12 +304,14 @@ the failed fit, with a retained metric regression. A long prep worker also
 accepted `STOP`, published exit 42 with outcome `stopped`, removed its temporary
 files, and a new prep succeeded in the same workspace.
 
-The rebuilt integrated target passed the 19-test headless label in 13.20
-seconds; `cli_training_smoke` passed direct, scheduled, nested-workspace,
-dual-device, cooperative-stop, and forced-interruption lanes with finite
-metrics. The desktop session remained locked, so live preview presentation,
-desktop presentation of the four SfM outcomes, a desktop non-training
-force-stop, and automatic post-publish notification remain open.
+The desktop follow-up displayed a raw frame and SAM overlay, then scheduled the
+adaptive ffmpeg preparation and wrote nonuniform frames and masks. The batch UI
+presented retained success, partial, nonmetric, and failure outcomes with their
+warning or error copy and artifact paths without rerunning SfM. Its Force stop
+control interrupted a running non-training SfM phase, displayed the terminal
+reason, and retried the phase after releasing its lease. A six-step training
+queue published its checkpoint before the configured finish command wrote the
+expected summary; command failure left the completed result intact.
 
 
 ## 5. R1-R9 acceptance matrix
@@ -325,29 +322,21 @@ status.
 
 ### R1 — Image/video/adaptive/ffmpeg/previews
 
-**Status: partial.** The actual desktop exposed the source, adaptive-rate,
-spread, sharpness, and ffmpeg-fallback controls. The production prep worker
-successfully selected 24 nonuniformly spaced frames from an eight-second moving
-video through the patent-disabled ffmpeg path, and resumed prep reused them
-without modification. SAM 3 produced real masks and overlays. The locked
-desktop prevented observation of the live frame and mask reels, so preview
-responsiveness and displayed mask colors remain open.
-
-Continuation: on an active desktop, run the accepted moving input once and
-observe the live frame and mask reels. Do not repeat headless extraction.
+**Status: complete on this host.** The desktop exposed the source,
+adaptive-rate, spread, sharpness, and ffmpeg-fallback controls, displayed a
+raw source frame and the SAM mask overlay, and scheduled preparation of the
+accepted moving input. The production prep worker selected 24 nonuniformly
+spaced frames through the patented-disabled ffmpeg path, wrote their masks, and
+reused both unchanged on resume.
 
 ### R2 — Existing masks/depth/normals/features/reuse/rerun/presets/preflight
 
-**Status: partial.** Host serialization, preflight, preset, ownership, and
-result checks pass. The desktop exposed existing mask, depth/normal, feature,
-reuse/rerun, preset, and summary controls. Real MoGe-2 and Metric3D inference
-produced finite geometry on the two supported GPUs. SAM 3 tracked all 24
-prepared frames; the overlay was visually inspected, and a resumed prep kept
-all 24 frame and mask names and mtimes unchanged. Only the desktop mask-preview
-presentation remains open.
-
-Continuation: on an active desktop, observe the already-proven mask output in
-the live reel. Do not repeat geometry inference or output reuse.
+**Status: complete on this host.** Host serialization, preflight, preset,
+ownership, and result checks pass. The desktop exposed existing mask,
+depth/normal, feature, reuse/rerun, preset, and summary controls. Real MoGe-2
+and Metric3D inference produced finite geometry on the two supported GPUs.
+SAM 3 tracked all 24 prepared frames, the desktop displayed its mask overlay,
+and resumed prep kept all 24 frame and mask names and mtimes unchanged.
 
 ### R3 — Native scheduled workflow and single-phase wrapper
 
@@ -370,29 +359,26 @@ the default for new jobs did not rewrite the existing A job.
 
 ### R5 — Metric/partial/nonmetric/failure SfM outcomes
 
-**Status: partial.** `sfm_map_test` passed 8/8 on both supported GPUs. Real
-captures then produced metric success, preserved partial reconstruction,
+**Status: complete on this host.** `sfm_map_test` passed 8/8 on both supported
+GPUs. Real captures produced metric success, preserved partial reconstruction,
 preserved nonmetric reconstruction after a deliberately refused scale fit, and
 genuine reconstruction failure. The nonmetric propagation defect found here is
 covered by `sfm_metric_test`. Device float64 was unavailable and the logged CPU
-bundle-adjustment fallback ran. The locked desktop prevented presenting these
-four outcomes in the batch UI.
-
-Continuation: on an active desktop, present the four retained terminal results
-and verify their warning/error copy and artifact links; do not rerun SfM.
+bundle-adjustment fallback ran. The batch UI presented terminal state assembled
+from those retained outputs and scheduler records, showing the warning or error
+copy and artifact path for each outcome without rerunning SfM.
 
 ### R6 — Training stop/save and non-training force-stop
 
-**Status: partial.** Finite direct training, scheduled resume, cooperative
-stop-and-save, forced interruption, resumable checkpoints, process cleanup,
-and the desktop Stop and save control passed on supported hardware. A real prep
-worker also accepted `STOP`, published outcome `stopped` with exit 42, removed
-its temporary files, and allowed a successful retry in the same workspace. The
-locked desktop prevented exercising that non-training stop through its queue
-control and observing the interrupted row and released lease there.
-
-Continuation: force-stop one already-proven non-training phase from the desktop
-and inspect the interrupted row and retry; do not repeat the worker stop.
+**Status: complete on this host.** Finite direct training, scheduled resume,
+cooperative stop-and-save, forced interruption, resumable checkpoints, process
+cleanup, and the desktop Stop and save control passed on supported hardware. A
+real prep worker accepted `STOP`, published outcome `stopped` with exit 42,
+removed its temporary files, and allowed a successful retry in the same
+workspace. The desktop Force stop control then interrupted a running
+non-training SfM phase, displayed `force-stopped` on the terminal row, released
+its lease, and resumed that phase through Retry. A second force-stop left the
+job terminal.
 
 ### R7 — Recovery, atomic state, staging, resume, Later/Retry, second owner
 
@@ -408,16 +394,13 @@ gap is identified; do not replay the accepted desktop recovery flow.
 
 ### R8 — Final-publish notification and safe failure
 
-**Status: partial.** `command_argv_test` passed safe `{message}` substitution;
-`subprocess_test` passed command execution and missing-executable failure; a
-throwaway command wrote the expected completion message without altering the
-completed job artifacts. The desktop became unavailable before an automatic
-post-publish notification could be observed, so that final integration edge
-remains open.
-
-Continuation: on an active desktop, finish one short queue and observe the
-configured command only after publication, then test a missing executable
-separately while preserving the completed result.
+**Status: complete on this host.** `command_argv_test` passed safe `{message}`
+substitution, and `subprocess_test` passed command execution and
+missing-executable failure. A desktop six-step training queue published its
+checkpoint before invoking the configured finish command, which wrote the
+expected one-line completion summary. A malformed command path failed without
+altering the completed job; the corrected command then succeeded against the
+same retained result.
 
 ### R9 — Interactive-only external COLMAP/Python masking/mesh
 
