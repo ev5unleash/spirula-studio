@@ -1,6 +1,6 @@
 # Headless behavior testing and desktop smoke
 
-Status: **Headless implementation verified locally; deeper GPU and desktop interaction validation deferred by user.**
+Status: **Headless implementation verified; later GPU and desktop acceptance closed in the primary continuation plan.**
 
 For the current committed baseline and upstream-integration acceptance mapping,
 use the [primary continuation plan](device-job-scheduling-upstream-merge-plan.md).
@@ -12,25 +12,25 @@ The NVIDIA lanes in this original plan are superseded by the current
 implementation, investigation and validation have stopped; no further CUDA or
 NVIDIA-Vulkan checks are required. Existing legacy code remains untouched.
 
-Observed locally on Windows:
+Original paused snapshot on Windows:
 - GUI-enabled Vulkan headless suite: 19/19 passed in 7.63 s; two concurrent
   invocations passed in 8.65 s and 7.54 s.
 - GUI-OFF core suite: 14/14 passed in 6.65 s; GUI-enabled build restored.
 - Empty selection and deliberate runner failure returned nonzero; failure logs
   and owned artifacts were retained. CI execution on Linux/macOS remains unobserved.
-- The supported AMD Vulkan training attempt crashed in `amdvlk64.dll`; GPU
-  acceptance remains open. Earlier NVIDIA results do not satisfy the new policy.
-- Desktop first frame rendered the generated scene and normal close exited zero.
-  Submit/cancel remains unverified: background and foreground canvas input did
-  not activate the controls. Prior scheduling desktop backlog remains open.
+- At this pause, the supported AMD Vulkan training attempt crashed in
+  `amdvlk64.dll`; GPU acceptance was still open. Earlier NVIDIA results did not
+  satisfy the new policy.
+- The desktop first frame rendered and normal close exited zero. Submit/cancel
+  was unverified because canvas input did not activate the controls. The later
+  primary plan closes the desktop acceptance.
 - GUI-OFF-to-ON rebuild took 72.73 s, separate from test runtime; this was not a
   clean-build measurement.
 
-Investigation stopped at the user's request before applying a GPU fix.
-See [the debugging handoff](headless-validation-debugging.md) for observed
-failure order, diagnostic variants, retained artifacts and bounded next steps.
-Deferred validation is not a pass and does not block delivery of the headless
-workflow improvements under the revised scope.
+Investigation stopped at the user's request before applying a GPU fix. The later
+continuation completed the accepted Vulkan path without reopening NVIDIA work.
+See [the debugging handoff](headless-validation-debugging.md) for the historical
+failure order, diagnostic variants, retained artifacts and bounded steps.
 
 ## 1. Goal and release boundary
 
@@ -70,10 +70,11 @@ Implementation touching those paths waits for an explicit ownership handoff or
 integration of that work. Independent new-file work may proceed only when its
 source dependencies are available in its isolated checkout.
 
-The outstanding desktop checks in [the handoff](../../HANDOFF.md) and the
-[device scheduling plan](device-job-scheduling-plan.md) are not waived, replaced
-or marked complete by this plan. Their historical branch names and implementation
-tables are not a reason to overwrite the current integration tree.
+At the time of this plan, the desktop checks in
+[the handoff](../../handoff.md) and the
+[device scheduling plan](device-job-scheduling-plan.md) were not waived by
+headless coverage. They were later reconciled and closed by the
+[primary continuation plan](device-job-scheduling-upstream-merge-plan.md).
 
 ## 2. Existing seams and actual gaps
 

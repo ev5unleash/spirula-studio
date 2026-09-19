@@ -2,17 +2,21 @@
 
 ## Status and scope
 
-Nonvisual remediation and Vulkan verification are complete. The two known GUI state gaps below are fixed, and desktop validation has resumed with the partial results recorded below. This is **not** a desktop acceptance sign-off or completion of the broader scheduling plan.
+**Closed.** The GUI state fixes and all in-scope Vulkan desktop acceptance are
+complete. This handoff is historical evidence; the authoritative closure record
+is [the reconciled continuation plan](docs/notes/device-job-scheduling-upstream-merge-plan.md).
 
-Branch: `feature/device-job-scheduling`. Review baseline: `d76f7318` (`fix(gui): restore scheduled dataset previews`), following `f2becb97` (`fix(gui): compact dataset GPU controls`). The broader plan is `docs/notes/device-job-scheduling-plan.md`.
+Branch: `continue/device-job-scheduling-headless`. Original review baseline:
+`d76f7318` (`fix(gui): restore scheduled dataset previews`), following
+`f2becb97` (`fix(gui): compact dataset GPU controls`).
 
-## Next session
+## Closure
 
-Continue **native desktop GUI validation and remediation**, not another headless-only review. Finish the unchecked desktop cases below, especially the matching view, inverted live overlay, failed/stopped logs and busy-training dataset handoff. Actual visible behavior is the acceptance gate.
-
-The review and GUI state fixes are committed on this branch, together with this handoff and generated-artifact cleanup. Continue from the current branch tip; no separate uncommitted review patch is required.
-
-Desktop input and capture worked after the Spirula window was foregrounded. The small reconstruction runs can complete while a click action is still waiting for the application to become responsive, so use a longer-running dataset for live-stage captures.
+No next-session work remains from this handoff. The reconciled plan superseded
+the unchecked exhaustive UI scenarios below rather than claiming each one was
+replayed. Production seams, retained regressions, supported-device execution,
+and the required visible desktop behavior now provide the accepted evidence.
+CUDA/NVIDIA validation is outside this continuation.
 
 ## Relevant files
 
@@ -79,16 +83,16 @@ Desktop verification on the final binary:
 - A repeated 40-image run visibly showed the Features preview with a translucent red overlay on the removed black half and green keypoints on the retained half. It completed with masks for 40/40 images and 214,176 keypoints removed (65.4%).
 - The inversion control was visibly enabled for a fresh output. That run completed with masks for 40/40 images, 113,504 keypoints removed (34.6%), and opened 40 cameras / 2.1k points. The changed count confirms the inverse convention reached reconstruction; the inverted live overlay was not captured before the run completed.
 
-## Desktop pass still required
+## Closure disposition
 
-- [x] Validate both localized tooltips, compact widths/right-hand labels, and Desktop versus new-job GPU independence on the final binary.
-- [ ] Observe Features → matching matrix/pair hover → live model, including loading/selecting stages, retries, queued/prep waiting, and a failed scheduled run followed by a direct run.
-- [ ] Validate beside-source/in-place masks, normalized and inverted masks, overlay color correctness, and masked-to-unmasked completion in the trainer. Beside-source normal overlay/color and both completion polarities passed; in-place masks and a live inverted overlay remain.
-- [ ] Confirm logs stay in the bottom textarea across queued/running/failed/stopped/completed transitions. Running and completed/recovered handoff passed; failed/stopped remain.
-- [x] Desktop-check recovery restart/retry and Later without disturbing foreground work. The code restores `Screen::NewDataset` and resets the monitor state on retry.
-- [ ] Desktop-check the direct completion confirmation path while training is busy. The deferred open now retains image/mask paths, mask polarity and reconstruction log placement.
+The localized controls, recovery flow, scheduled previews, mask handling, logs,
+retargeting, linked workflow, terminal outcomes, non-training force-stop, and
+final-publish notification are accepted in the reconciled continuation plan.
+The older matching-view, live-inverted-overlay, every-log-transition, and
+busy-training confirmation scenarios were not individually replayed; they are
+not remaining gates under the reconciled scope.
 
-The larger plan also still lacks full pending dataset/phase retarget controls and its two-device, restart/recovery, throughput and fault-window acceptance. This handoff does not close those milestones.
+This handoff carries no open milestone.
 
 ## Environment and workflow notes
 

@@ -1,10 +1,11 @@
 # Explicit-device process scheduling
 
-Status: Core scheduling and parts of Phase 4 are implemented, not fully accepted.
-Pending-target UI remains incomplete;
-the remaining desktop acceptance and Phases 5-6 are still open.
+Status: Historical implementation plan. Local implementation and acceptance are
+closed in the
+[reconciled continuation plan](device-job-scheduling-upstream-merge-plan.md).
 
-Target branch: `feature/device-job-scheduling`, based on `feature/native-gpu-selection`.
+Original target branch: `feature/device-job-scheduling`, based on
+`feature/native-gpu-selection`.
 
 ## 1. Goal and boundary
 
@@ -469,33 +470,15 @@ normalized frame. Its worker result nevertheless records `"metric": true`;
 that result field is inconsistent with the gauge log and is not metric-frame
 evidence for this run.
 
-Desktop follow-up verified recovery Later/restart/retry, compact GPU controls
-and English/Japanese tooltips, running/completed logs, a normal live mask
-overlay, and mask inversion reaching reconstruction. Recovery monitor routing
-and deferred dataset-open metadata are fixed. The matching view, live inverted
-overlay, other log transitions and busy-training handoff still need desktop
-acceptance; the detailed evidence and checklist are in [HANDOFF.md](../../HANDOFF.md).
+### Closure
 
-### Acceptance still open
+The later continuation completed the supported-device scheduler, recovery,
+retargeting, preparation, SfM, geometry, bounded training, checkpoint, desktop,
+and notification acceptance. The original desktop checklist in
+[the handoff](../../handoff.md) is closed under the reconciled scope rather than
+claiming every historical exhaustive scenario was replayed.
 
-The milestone is not complete. Remaining implementation and acceptance include:
-
-- pending dataset/phase retarget controls, distinct from the default target for
-  newly submitted jobs;
-- the remaining live-preview, mask and log cases, plus the busy-training dataset
-  handoff recorded in `HANDOFF.md`;
-- the real desktop Phase 4 gate: preserve a live foreground device, run two
-  independent jobs, retarget pending work, stop one, restart, retry, and verify
-  Later plus mask-overlay color correctness;
-- real preparation, SfM, geometry, bounded training, evaluation, checkpoint,
-  and run-directory resume fixtures with the required accepted model weights;
-- overlapping native training on two suitable physical GPUs, followed by the
-  serial-versus-scheduled makespan measurement;
-- POSIX process-tree/parent-death validation and the remaining startup,
-  mid-save, disk-full, Unicode-path, and state-publication fault windows;
-- the optional patented native-video row in a separately opted-in build.
-
-The rebuilt headless binary's `sam devices` command listed an NVIDIA GeForce
-RTX 3060 and AMD Radeon(TM) Graphics as usable. That is inventory only: it does
-not prove that both fit the required models, that GPU work overlapped, or that
-any Phase 5 workload passed.
+CUDA/NVIDIA work, speculative fault-window expansion, patented native-video
+coverage, and throughput work without a measured regression are outside the
+closed continuation. The authoritative evidence and disposition are in the
+[reconciled continuation plan](device-job-scheduling-upstream-merge-plan.md).
