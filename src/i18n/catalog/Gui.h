@@ -1040,21 +1040,6 @@ SS_MSG(device_detail_missing,
     RU("ни одно устройство не соответствует этому запросу"),
     TR("bu istekle eşleşen aygıt yok"));
 
-SS_MSG(device_detail_ambiguous,
-    EN("more than one device matches this request, so it is not specific enough"),
-    JA("複数のデバイスが一致するため、指定が不十分です"),
-    ZH_HANS("有多个设备匹配，该请求不够具体"),
-    ZH_HANT("有多個裝置相符，該要求不夠明確"),
-    KO("여러 장치가 일치하므로 요청이 충분히 구체적이지 않습니다"),
-    DE("mehrere Geräte passen, die Angabe ist nicht eindeutig genug"),
-    FR("plusieurs périphériques correspondent ; la demande n'est pas assez précise"),
-    ES("varios dispositivos coinciden; la solicitud no es lo bastante concreta"),
-    PT("vários dispositivos correspondem; a solicitação não é específica o bastante"),
-    IT("più dispositivi corrispondono; la richiesta non è abbastanza specifica"),
-    NL("meerdere apparaten komen overeen; de aanvraag is niet specifiek genoeg"),
-    RU("совпадает несколько устройств; запрос недостаточно конкретен"),
-    TR("birden fazla aygıt eşleşiyor; istek yeterince belirgin değil"));
-
 SS_MSG(device_detail_no_device,
     EN("no usable Vulkan device was found"),
     JA("使用可能な Vulkan デバイスが見つかりませんでした"),

@@ -378,7 +378,7 @@ bool load_session(const Options& o, sam::Session& session) {
     mp.profile = o.profile;
     mp.img_size = o.img_size;
     // One spelling, resolved by the shared parser inside loadModel: "auto" or
-    // -1, an ordinal, a unique name substring, or "uuid:<32 hex>". An ordinal
+    // -1, an ordinal, a name substring, or "uuid:<32 hex>". An ordinal
     // is an index here, never a substring of a GPU name.
     mp.device = o.device;
     if (!session.loadModel(mp)) {

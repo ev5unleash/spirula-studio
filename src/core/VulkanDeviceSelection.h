@@ -13,7 +13,10 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
+#include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -202,7 +205,6 @@ enum class ResolveStatus {
     Malformed,
     OutOfRange,
     Missing,
-    Ambiguous,
     Unusable,
     NoDevice,
 };
@@ -215,16 +217,22 @@ struct Resolution {
     bool          ok() const { return status == ResolveStatus::Ok; }
 };
 
+// First record reporting `uuid`, or -1. A driver whose ICD manifest is
+// installed twice reports every GPU twice; all runtimes settle on the first.
 inline int findByUuid(const std::vector<DeviceRecord>& devices,
                       const uint8_t uuid[VK_UUID_SIZE]) {
-    int found = -1;
-    for (size_t i = 0; i < devices.size(); i++) {
-        if (uuidIsZero(devices[i].uuid) || !uuidEquals(devices[i].uuid, uuid))
-            continue;
-        if (found >= 0) return -2;  // The runtime reported a duplicate identity.
-        found = (int)i;
-    }
-    return found;
+    for (size_t i = 0; i < devices.size(); i++)
+        if (!uuidIsZero(devices[i].uuid) && uuidEquals(devices[i].uuid, uuid))
+            return (int)i;
+    return -1;
+}
+
+// Resolution repeats in every runtime and SfM worker; say each thing once.
+inline void warnOnce(const std::string& what) {
+    static std::mutex m;
+    static std::set<std::string> said;
+    std::lock_guard<std::mutex> lock(m);
+    if (said.insert(what).second) std::fprintf(stderr, "warning: %s\n", what.c_str());
 }
 
 // Auto's total order: type rank first, VRAM second. A record with no reported
@@ -295,9 +303,6 @@ inline Resolution resolveRequest(const Request& r,
             want[i] = (uint8_t)(nibble(hex[2 * i]) << 4 | nibble(hex[2 * i + 1]));
         }
         picked = findByUuid(devices, want);
-        if (picked == -2)
-            return fail(ResolveStatus::Ambiguous,
-                        "multiple Vulkan devices report " + r.text);
         if (picked < 0)
             return fail(ResolveStatus::Missing,
                         "no Vulkan device has " + r.text);
@@ -315,23 +320,29 @@ inline Resolution resolveRequest(const Request& r,
             return fail(ResolveStatus::Missing,
                         "no Vulkan device name contains '" + r.text + "'");
         if (found > 1)
-            return fail(ResolveStatus::Ambiguous,
-                        "device name '" + r.text + "' matches " +
-                        std::to_string(found) +
-                        " devices; use a longer name or a uuid: selector");
+            warnOnce("device name '" + r.text + "' matches " +
+                     std::to_string(found) + " devices; using the first, device " +
+                     std::to_string(picked) + " (" + devices[picked].name + ")");
     }
 
-    const DeviceRecord& d = devices[picked];
     // An ordinal or a name only looks a record up; the identity is what the
     // caller keeps, so a record that has none cannot answer a request.
-    if (uuidIsZero(d.uuid))
+    if (uuidIsZero(devices[picked].uuid))
         return fail(ResolveStatus::Missing,
-                    "device " + std::to_string(picked) + " (" + d.name +
+                    "device " + std::to_string(picked) + " (" +
+                        devices[picked].name +
                         ") reports no physical-device UUID, so it cannot be "
                         "selected by identity");
-    if (findByUuid(devices, d.uuid) == -2)
-        return fail(ResolveStatus::Ambiguous,
-                    "multiple Vulkan devices report " + uuidSelector(d.uuid));
+    int copies = 0;
+    for (const DeviceRecord& o : devices)
+        if (uuidEquals(o.uuid, devices[picked].uuid)) copies++;
+    if (copies > 1) {
+        picked = findByUuid(devices, devices[picked].uuid);
+        warnOnce(std::to_string(copies) + " Vulkan devices report " +
+                 uuidSelector(devices[picked].uuid) + "; using the first, device " +
+                 std::to_string(picked) + " (" + devices[picked].name + ")");
+    }
+    const DeviceRecord& d = devices[picked];
     if (!d.usable) {
         std::string why = "device " + std::to_string(picked) + " (" + d.name +
                           ") is not usable";

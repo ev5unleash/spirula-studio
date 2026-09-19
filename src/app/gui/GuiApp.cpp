@@ -78,8 +78,6 @@ inline const Msg& device_detail(spirula::vkselect::ResolveStatus s) {
             return msg::device_detail_malformed;
         case spirula::vkselect::ResolveStatus::OutOfRange:
             return msg::device_detail_out_of_range;
-        case spirula::vkselect::ResolveStatus::Ambiguous:
-            return msg::device_detail_ambiguous;
         case spirula::vkselect::ResolveStatus::Unusable:
             return msg::device_unusable_native;
         case spirula::vkselect::ResolveStatus::NoDevice:
@@ -3865,7 +3863,7 @@ void GuiApp::draw_device_picker(bool as_menu) {
 
     auto row_label = [](const NativeDeviceRow& d, size_t index, bool with_id,
                          char* buf, size_t n) {
-        char suffix[32] = {};
+        char suffix[64] = {};
         if (with_id)
             std::snprintf(suffix, sizeof suffix, "##native_device_%zu", index);
         std::snprintf(buf, n, "%s [%zu]%s", d.name.c_str(), index, suffix);

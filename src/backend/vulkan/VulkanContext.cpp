@@ -305,8 +305,7 @@ int resolve_device_index() {
 // Public index for the live UUID; context and list enumerations may differ.
 int context_device_index() {
     if (!g_context_uuid_set.load()) return -1;
-    const int index = sel::findByUuid(enumerate_devices(), g_context_uuid);
-    return index >= 0 ? index : -1;
+    return sel::findByUuid(enumerate_devices(), g_context_uuid);
 }
 }  // namespace
 

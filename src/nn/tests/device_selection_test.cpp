@@ -51,10 +51,13 @@ const nn::DeviceInfo* autoUsable(
     return best;
 }
 
+// Another identity, not another record: a driver installed twice reports the
+// same GPU twice.
 const nn::DeviceInfo* anotherUsable(
     const std::vector<nn::DeviceInfo>& devices, const nn::DeviceInfo* first) {
     for (const auto& d : devices)
-        if (&d != first && d.usable && !d.uuid.empty()) return &d;
+        if ((!first || d.uuid != first->uuid) && d.usable && !d.uuid.empty())
+            return &d;
     return nullptr;
 }
 const nn::DeviceInfo* lifecycleDevice(
@@ -176,31 +179,26 @@ void testFailures() {
         makeRecord(1, "RTX 3060", VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU, kUuidB),
         makeRecord(2, "no-identity", VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU, ""),
     };
-    // A UUID is an identity, so duplicate reports are not selectable.
+    // A duplicate UUID resolves to its first record, so every runtime agrees.
     std::vector<sel::DeviceRecord> duplicate = devices;
     for (int i = 0; i < VK_UUID_SIZE; i++) duplicate[1].uuid[i] = duplicate[0].uuid[i];
-    check(sel::resolveRequest(
-              sel::parseRequest("uuid:" + std::string(kUuidA)), duplicate).status ==
-              sel::ResolveStatus::Ambiguous,
-          "duplicate uuid is ambiguous");
     duplicate[1].name = "other";
-    check(sel::resolveRequest(sel::parseRequest("auto"), duplicate).status ==
-              sel::ResolveStatus::Ambiguous,
-          "auto rejects duplicate uuid");
-    check(sel::resolveRequest(sel::parseRequest("0"), duplicate).status ==
-              sel::ResolveStatus::Ambiguous,
-          "ordinal rejects duplicate uuid");
-    check(sel::resolveRequest(
-              sel::parseRequest("RTX 3060"), duplicate).status ==
-              sel::ResolveStatus::Ambiguous,
-          "name rejects duplicate uuid");
+    auto first = [&](const std::string& request) {
+        const sel::Resolution res =
+            sel::resolveRequest(sel::parseRequest(request), duplicate);
+        return res.ok() && res.device.index == 0 &&
+               res.selector == "uuid:" + std::string(kUuidA);
+    };
+    check(first("uuid:" + std::string(kUuidA)), "duplicate uuid takes the first");
+    check(first("auto"), "auto takes the first of a duplicate uuid");
+    check(first("1"), "ordinal of a duplicate takes the first");
+    check(first("other"), "name of a duplicate takes the first");
 
     check(sel::resolveRequest(sel::parseRequest("nope"), devices).status ==
               sel::ResolveStatus::Missing,
           "missing name fails");
-    check(sel::resolveRequest(sel::parseRequest("RTX 3060"), devices).status ==
-              sel::ResolveStatus::Ambiguous,
-          "duplicate names are ambiguous, not first-match");
+    const sel::Resolution byName = sel::resolveRequest(sel::parseRequest("RTX 3060"), devices);
+    check(byName.ok() && byName.device.index == 0, "a shared name takes the first match");
     check(sel::resolveRequest(sel::parseRequest("9"), devices).status ==
               sel::ResolveStatus::OutOfRange,
           "out-of-range ordinal fails");
