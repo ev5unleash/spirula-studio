@@ -478,7 +478,7 @@ bool fixGauge(std::vector<Reconstruction>& models, const SfmConfig& cfg,
             gauge[i].up = exif_up ? "cameras+exif" : "cameras";
             if (verbose) L::err(Tag::Orient, M::orient_done, {(long long)i, L::num(T.scale, 4)});
         }
-    return true;
+    return all;
 }
 
 // An EXR carries its own colour space. Reading it needs no declaration -- the

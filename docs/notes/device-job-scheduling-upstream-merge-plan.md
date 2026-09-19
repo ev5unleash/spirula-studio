@@ -291,6 +291,31 @@ after the visible workflow; argv substitution, subprocess success, missing
 executable handling, and a file-writing notification command were exercised
 separately, but automatic post-publish desktop notification remains open.
 
+A subsequent closure pass used the production worker and scheduler seams. An
+eight-second moving video produced 24 adaptively spaced frames through the
+patent-disabled ffmpeg path. SAM 3 tracked the point-prompted object through all
+24 frames; a three-frame overlay was visually inspected, and resumed prep
+changed neither frame nor mask outputs. A real linked job ran
+`prep → partial SfM → MoGe-2 → six-step training → publish` on device A. Its
+first attempt exposed a missing nested training directory when the scheduler
+leased the parent workspace; the trainer now creates that directory under the
+inherited lease, and `cli_training_smoke` retains the regression.
+
+Real SfM runs then produced all four terminal facts: metric success
+(24/32 images, 1.489 px mean reprojection), partial reconstruction, refused
+metric scale, and reconstruction failure. The nonmetric case exposed
+`fixGauge()` returning success after a refused requested fit; it now propagates
+the failed fit, with a retained metric regression. A long prep worker also
+accepted `STOP`, published exit 42 with outcome `stopped`, removed its temporary
+files, and a new prep succeeded in the same workspace.
+
+The rebuilt integrated target passed the 19-test headless label in 13.20
+seconds; `cli_training_smoke` passed direct, scheduled, nested-workspace,
+dual-device, cooperative-stop, and forced-interruption lanes with finite
+metrics. The desktop session remained locked, so live preview presentation,
+desktop presentation of the four SfM outcomes, a desktop non-training
+force-stop, and automatic post-publish notification remain open.
+
 
 ## 5. R1-R9 acceptance matrix
 
@@ -301,40 +326,39 @@ status.
 ### R1 — Image/video/adaptive/ffmpeg/previews
 
 **Status: partial.** The actual desktop exposed the source, adaptive-rate,
-spread, sharpness, and ffmpeg-fallback controls. Patent-disabled ffmpeg
-extraction and adaptive selection ran through the production path; a one-frame
-input produced one image and the truthful minimum-three-images failure.
-Successful multi-frame adaptive extraction, live previews, and mask colors
-remain open.
+spread, sharpness, and ffmpeg-fallback controls. The production prep worker
+successfully selected 24 nonuniformly spaced frames from an eight-second moving
+video through the patent-disabled ffmpeg path, and resumed prep reused them
+without modification. SAM 3 produced real masks and overlays. The locked
+desktop prevented observation of the live frame and mask reels, so preview
+responsiveness and displayed mask colors remain open.
 
-Continuation: use a moving multi-frame input and accepted SAM weights to check
-successful adaptive selection, preview responsiveness, and overlay colors. Do
-not repeat already-accepted ffmpeg preparation merely through another GUI path.
+Continuation: on an active desktop, run the accepted moving input once and
+observe the live frame and mask reels. Do not repeat headless extraction.
 
 ### R2 — Existing masks/depth/normals/features/reuse/rerun/presets/preflight
 
 **Status: partial.** Host serialization, preflight, preset, ownership, and
 result checks pass. The desktop exposed existing mask, depth/normal, feature,
 reuse/rerun, preset, and summary controls. Real MoGe-2 and Metric3D inference
-produced finite geometry on the two supported GPUs. SAM preview and output
-reuse/rerun artifacts remain open because the isolated profile had no accepted
-SAM weights.
+produced finite geometry on the two supported GPUs. SAM 3 tracked all 24
+prepared frames; the overlay was visually inspected, and a resumed prep kept
+all 24 frame and mask names and mtimes unchanged. Only the desktop mask-preview
+presentation remains open.
 
-Continuation: accept the applicable model terms, then verify mask, preview,
-reuse/rerun, and persisted-output truth without clearing the hidden manifest
-condition. Do not rerun accepted geometry inference through the GUI.
+Continuation: on an active desktop, observe the already-proven mask output in
+the live reel. Do not repeat geometry inference or output reuse.
 
 ### R3 — Native scheduled workflow and single-phase wrapper
 
-**Status: partial.** Scheduler, request/result, lease, persistence, and
-lost-wake checks pass. The desktop submitted, monitored, stopped, recovered,
-and retried a real train-only scheduled job. The complete
-`prep → SfM → [geometry] → [linked train] → publish` workflow is not yet
-accepted end to end.
-
-Continuation: run one real linked workflow and check phase order, canonical
-attempt results, output publication, and actual child device identity. Existing
-train-only scheduler and desktop evidence need not be repeated.
+**Status: complete on this host.** Scheduler, request/result, lease,
+persistence, and lost-wake checks pass. The desktop submitted, monitored,
+stopped, recovered, and retried a real train-only scheduled job. A production
+linked job then completed `prep → partial SfM → MoGe-2 → six-step training →
+publish` on the explicit device-A UUID. Every GPU-using child reported A, every
+phase published validated artifacts in order, and the local publish phase
+completed. The nested-workspace output-directory regression found by this run
+is retained in `cli_training_smoke`.
 
 ### R4 — Queued A→B targeting and ownership
 
@@ -346,26 +370,29 @@ the default for new jobs did not rewrite the existing A job.
 
 ### R5 — Metric/partial/nonmetric/failure SfM outcomes
 
-**Status: partial.** `sfm_map_test` passed 8/8 on both supported GPUs, covering
-manifest/live-match, partial, continuation, audit, disconnected-component, and
-rig-like cases. Device float64 was unavailable and the logged CPU bundle
-adjustment fallback ran. A full reconstruction and the desktop presentation of
-metric success, preserved partial, preserved nonmetric, and genuine failure
-remain open.
+**Status: partial.** `sfm_map_test` passed 8/8 on both supported GPUs. Real
+captures then produced metric success, preserved partial reconstruction,
+preserved nonmetric reconstruction after a deliberately refused scale fit, and
+genuine reconstruction failure. The nonmetric propagation defect found here is
+covered by `sfm_metric_test`. Device float64 was unavailable and the logged CPU
+bundle-adjustment fallback ran. The locked desktop prevented presenting these
+four outcomes in the batch UI.
 
-Continuation: run one real reconstruction and preserve each of the four
-terminal outcomes with truthful phase, error, and artifacts.
+Continuation: on an active desktop, present the four retained terminal results
+and verify their warning/error copy and artifact links; do not rerun SfM.
 
 ### R6 — Training stop/save and non-training force-stop
 
 **Status: partial.** Finite direct training, scheduled resume, cooperative
 stop-and-save, forced interruption, resumable checkpoints, process cleanup,
-and the desktop Stop and save control passed on supported hardware. A
-non-training prep/SfM/geometry force-stop was not exercised through the desktop.
+and the desktop Stop and save control passed on supported hardware. A real prep
+worker also accepted `STOP`, published outcome `stopped` with exit 42, removed
+its temporary files, and allowed a successful retry in the same workspace. The
+locked desktop prevented exercising that non-training stop through its queue
+control and observing the interrupted row and released lease there.
 
-Continuation: force-stop one real non-training phase and verify process-tree
-reaping, truthful interrupted state, and lease release. Do not repeat the
-accepted training lifecycle.
+Continuation: force-stop one already-proven non-training phase from the desktop
+and inspect the interrupted row and retry; do not repeat the worker stop.
 
 ### R7 — Recovery, atomic state, staging, resume, Later/Retry, second owner
 
@@ -662,15 +689,16 @@ was a no-op and no redundant merge commit was created. The approved local
 `AGENTS.md` blob remained `27dff3c8f27db4b8b26e713553873053efd216c6`.
 No ref was pushed and no PR or remote CI run was created.
 
-This is partial host acceptance, not full integration acceptance. GPU and
-desktop work remains paused: supported-device training, background/PPISP
-numerics, real SfM/geometry outcomes, actual notification-command execution,
-the outstanding R1-R9 UI surfaces, and physical device routing remain open.
-R4 additionally lacks a second eligible non-NVIDIA GPU. No NVIDIA/CUDA
-substitute or self-generated parity baseline was used. `.clangd` and the
-preserved ValidationSkill work remain included; this workstation's language
-server did not load the configured compilation database, so successful MSVC
-builds and executed tests are the diagnostic authority for this continuation.
+The resumed 2026-09-18 acceptance in section 4.3 supersedes the earlier paused
+snapshot. Supported-device training, background and PPISP numerics, real
+SfM/geometry/SAM work, physical dual-device routing, and the notification
+command itself have now run. Host acceptance remains partial only at the named
+boundaries: compatible protected parity references are absent, and the locked
+desktop prevented live preview presentation, four-outcome SfM presentation, a
+desktop non-training force-stop, and automatic post-publish notification.
+No NVIDIA/CUDA substitute or self-generated parity baseline was used. `.clangd`
+and the preserved ValidationSkill work remain included; successful MSVC builds
+and executed tests are the diagnostic authority for this continuation.
 
 ## 12. References
 

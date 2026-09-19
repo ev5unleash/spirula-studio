@@ -773,10 +773,16 @@ void TrainerSession::setup_engine() {
                   (fs::path(cfg.data).stem().string() + "_" + stamp);
     }
     std::string output_error;
-    // The scheduler holds this lock across the worker process lifetime.
-    if (!spirula::env_on("OUTPUT_LEASE_HELD") &&
-        !output_lease.acquire(out_dir, output_error))
+    // The scheduler may lease a parent workspace rather than this nested run.
+    if (spirula::env_on("OUTPUT_LEASE_HELD")) {
+        std::error_code ec;
+        fs::create_directories(out_dir, ec);
+        if (ec)
+            throw std::runtime_error("cannot create output directory: " +
+                                     ec.message());
+    } else if (!output_lease.acquire(out_dir, output_error)) {
         throw std::runtime_error("cannot acquire output directory: " + output_error);
+    }
     if (write_config_json) {
         save_config_json(cfg, out_dir, preset);
         save_scene_transform_json(ds, cfg, out_dir);

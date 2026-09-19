@@ -6,12 +6,14 @@
 #include "checkpoint/Resume.h"
 #include "core/Env.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstdio>
 #include <future>
+#include <iterator>
 #include <map>
 #include <thread>
 
@@ -43,6 +45,7 @@ bool has_nonfinite_number(const std::string& line) {
     }
     return false;
 }
+
 
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
@@ -81,6 +84,7 @@ int main(int argc, char** argv) {
         const fs::path outputs = root / "outputs";
         test::write_scene(dataset);
         const std::string exe = fs::absolute(fs::u8path(argv[1])).u8string();
+
         auto args = [&](int steps) {
             return std::vector<std::string>{"--data", dataset.u8string(), "--data-format", "nerfstudio",
                 "--output-dir-prefix", outputs.u8string(), "--num-iterations", std::to_string(steps),
@@ -186,6 +190,33 @@ int main(int argc, char** argv) {
                 for (const auto& output : result.outputs) require(fs::exists(fs::u8path(output)), "worker output exists");
             }
             require(matched_result, "scheduled result matches its published attempt");
+            const fs::path nested_workspace = root / "nested-workflow";
+            fs::remove_all(nested_workspace);
+            auto nested_args = args(6);
+            *std::next(std::find(nested_args.begin(), nested_args.end(),
+                                 "--output-dir-prefix")) =
+                (nested_workspace / "outputs").u8string();
+            sched::WorkflowSubmitOpts nested;
+            nested.work_dir = root.u8string();
+            nested.workspace = nested_workspace.u8string();
+            nested.source_paths.push_back(dataset.u8string());
+            nested.path_claims = {{nested_workspace.u8string(), true},
+                                  {dataset.u8string(), false}};
+            sched::Phase nested_train;
+            nested_train.phase = "train";
+            nested_train.planned_device = device;
+            nested_train.planned_device_name = info.name;
+            nested_train.args = std::move(nested_args);
+            nested.phases.push_back(std::move(nested_train));
+            const auto nested_id = scheduler.submit(nested);
+            require(!nested_id.empty(), "nested-workspace training accepted");
+            const auto nested_job = wait(nested_id, [](const auto& j) {
+                return j.state == sched::JobState::Succeeded;
+            });
+            require(nested_job.phases.size() == 2 &&
+                        fs::is_regular_file(fs::u8path(nested_job.output_dir) /
+                                            "config.json"),
+                    "parent workspace lease publishes nested training output");
             if (!second_device.empty()) {
                 scheduler.pause_dispatch(true);
                 const auto first = submit(100000, "");

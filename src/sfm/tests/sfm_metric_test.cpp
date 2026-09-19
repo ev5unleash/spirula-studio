@@ -15,6 +15,7 @@
 #include "sfm/map/Orient.h"
 #include "sfm/core/Pose.h"
 #include "sfm/map/MetricGauge.h"
+#include "sfm/Pipeline.h"
 #include "sfm/tests/TestMain.h"
 
 using namespace sfm;
@@ -839,6 +840,35 @@ int cmdMetricSelftest(int, char**) {
         check(flat.ok && std::fabs(flat.T.scale / T.scale - 1.0) <= 1e-12,
               "T13: the horizontal fit takes it and recovers the scale");
         check(flat.inliers == 60, "T13: with every camera an inlier");
+    }
+
+    {
+        namespace fs = std::filesystem;
+        const fs::path dir = fs::temp_directory_path() / "sfm_metric_outcome";
+        fs::remove_all(dir);
+        fs::create_directories(dir);
+        const fs::path positions = dir / "positions.txt";
+        Reconstruction rec;
+        const auto centres = arcCentres(6);
+        std::ofstream out(positions.string());
+        for (int i = 0; i < 6; ++i) {
+            Image image;
+            image.id = (uint32_t)(i + 1);
+            image.name = "frame" + std::to_string(i) + ".jpg";
+            image.pose = lookAt(centres[i], {0, 0, 0});
+            image.registered = true;
+            rec.images[image.id] = image;
+            out << image.name << " 0 0 0\n";
+        }
+        out.close();
+        SfmConfig cfg;
+        cfg.metric_positions = positions.string();
+        cfg.orient = false;
+        std::vector<Reconstruction> models{rec};
+        std::vector<ModelGauge> gauge;
+        check(!fixGauge(models, cfg, dir.string(), false, gauge),
+              "T14: refused requested metric frame remains nonmetric");
+        fs::remove_all(dir);
     }
 
     printf("%s\n", fails ? "FAIL" : "PASS");
