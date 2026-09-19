@@ -28,6 +28,9 @@
 #include "i18n/catalog/SamHelp.h"
 #include "nn/core/Log.h"
 #include "sam/Masking.h"
+#ifdef SS_TOOL_SFM
+#include "sfm/core/Telemetry.h"
+#endif
 
 #include <cstdio>
 #include <cstdlib>
@@ -83,6 +86,8 @@ void usage() {
     help_row("    --scale <f>", H::xh_scale);
     help_row("    --track <i>", H::xh_track);
     help_row("    --sync", H::xh_sync);
+    help_row("    --adaptive", H::xh_adaptive);
+    help_row("    --adaptive-range <f>", H::xh_adaptive_range);
     help_row("    --threads <n>", H::xh_threads);
 
     std::fprintf(stderr, "\n%s\n", H::xh_360_section.get());
@@ -119,6 +124,8 @@ struct Options {
     float  scale = 1.0f;
     int    track = -1;
     bool   sync = false;
+    bool   adaptive = false;
+    float  adaptive_range = 4.0f;
     int    threads = 0;
 
     std::string pano_mode = "faces";
@@ -158,6 +165,9 @@ bool parse_args(int argc, char** argv, Options& o) {
         else if (a == "--scale") o.scale = std::strtof(next("--scale"), nullptr);
         else if (a == "--track") o.track = std::atoi(next("--track"));
         else if (a == "--sync") o.sync = true;
+        else if (a == "--adaptive") o.adaptive = true;
+        else if (a == "--adaptive-range")
+            o.adaptive_range = std::strtof(next("--adaptive-range"), nullptr);
         else if (a == "--threads") o.threads = std::atoi(next("--threads"));
         else if (a == "--360") o.pano_mode = next("--360");
         else if (a == "--360-size") o.pano.size = std::atoi(next("--360-size"));
@@ -255,6 +265,8 @@ int sam_cli_extract(int argc, char** argv) {
     job.scale = o.scale;
     job.track = o.track;
     job.sync_tracks = o.sync;
+    job.adaptive = o.adaptive;
+    job.adaptive_range = o.adaptive_range;
     job.threads = o.threads;
     job.write_overlay = o.overlay;
     // A 360 file is recognised by its packing, not by its name, and only then
@@ -263,8 +275,14 @@ int sam_cli_extract(int argc, char** argv) {
         std::string err;
         const std::vector<std::pair<int, int>> tracks =
             app::video_track_sizes(o.input, err);
+        app::Pano360Meta meta;
+#ifdef SS_TOOL_SFM
+        const sfm::VideoProjection pr = sfm::video_projection(o.input);
+        meta = app::Pano360Meta{pr.name, pr.mode};
+#endif
         if (tracks.size() == 2 && tracks[0] == tracks[1] &&
-            app::eac360_detect(2, tracks[0].first, tracks[0].second, job.eac)) {
+            app::pano360_detect(2, tracks[0].first, tracks[0].second, meta,
+                                job.eac)) {
             o.pano.mode = o.pano_mode == "equirect" ? app::Pano360Mode::Equirect
                                                     : app::Pano360Mode::Faces;
             job.views = app::pano360_views(job.eac, o.pano);
@@ -272,7 +290,7 @@ int sam_cli_extract(int argc, char** argv) {
                          job.eac.track_w, job.eac.track_h, job.views.size(),
                          job.views[0].width, job.views[0].height);
         } else {
-            job.eac = app::Eac360Layout{};
+            job.eac = app::Pano360Layout{};
         }
     }
     if (!o.model.empty()) {

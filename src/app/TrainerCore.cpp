@@ -11,6 +11,7 @@
 #include "i18n/catalog/Log.h"
 #include "data/CameraMath.h"
 #include "data/ImageProbe.h"
+#include "data/RandomPoints.h"
 #include "data/Knn.h"
 #include "sfm/core/Exif.h"
 
@@ -220,11 +221,11 @@ SeedSplats seed_splats(const ColmapPoints3D& pts, const TrainConfig& cfg,
     s.features_dc.assign(cap * 3, 0.f);
     s.features_sh.assign(cap * (dim_sh - 1) * 3, 0.f);
 
-    // means, scaled into the training frame
-    float rescale = cfg.relative_scale.value_or(1.0f);
+    // `pts` is in the training frame already: load_dataset() applied
+    // relative_scale to it along with the cameras.
     for (int64_t i = 0; i < num; i++)
         for (int d = 0; d < 3; d++)
-            s.means[i*3 + d] = (float)(pts.xyz[pick[i]*3 + d] * rescale);
+            s.means[i*3 + d] = (float)pts.xyz[pick[i]*3 + d];
 
     // log(scale_init * sqrt(mean d^2 of 4-NN)) over xyz, over the DISTINCT
     // points: a repeat is its own zero-distance neighbor, and would seed
@@ -313,7 +314,7 @@ build_loss_weights(const TrainConfig& c, int step) {
     float median_factor = std::min((float)step / std::max(c.median_warmup, 1), 1.0f);
     float alpha_reg_factor = c.alpha_reg_weight *
         std::min((float)step / std::max(c.alpha_reg_warmup, 1), 1.0f);
-    float mask = c.apply_loss_for_mask ? 1.0f : 0.0f;
+    float mask = c.apply_loss_for_mask.value_or(false) ? 1.0f : 0.0f;
 
     float w_rgb_l1 = std::max(0.0f, c.l1_weight);
     float w_rgb_l2 = std::max(0.0f, c.l2_weight);
@@ -369,7 +370,7 @@ EngineStepConfig build_step_config(const TrainConfig& c, const RunState& st, int
     cfg.loss.loss_map_power = c.densify_loss_map_power;
     cfg.loss.loss_map_accum_mode = densify_accum_mode_int(c.densify_accum_mode);
     cfg.loss.saturation_threshold = c.loss_saturation_threshold;
-    cfg.loss.normalize_by_luminance = c.normalize_loss_by_luminance;
+    cfg.loss.luminance_normalization = c.loss_luminance_normalization;
     cfg.loss.overexposure_reg_weight = c.overexposure_reg;
     if (st.bilagrid_rgb_init || st.ppisp_init) {
         cfg.loss.color_shift_reg_weight = c.color_shift_reg_weight;
@@ -492,10 +493,12 @@ EngineStepConfig build_step_config(const TrainConfig& c, const RunState& st, int
     cfg.ppisp.run_before_color_space = c.apply_ppisp_before_color_space;
 
     // ---- background ----------------------------------------------------
-    if (c.background_mode == "noise" || c.background_mode == "pseudorandom") {
+    if (c.background_mode == "noise" || c.background_mode == "pseudorandom" ||
+        c.background_mode == "random") {
         float rw = std::min((float)step / std::max(c.background_noise_warmup, 1), 1.0f);
         cfg.background.randomize_weight =
             1.0f - (1.0f - c.background_noise_pre_warmup) * (1.0f - rw);
+        cfg.background.match_luminance = c.background_match_luminance;
     } else if (c.background_mode == "sh") {
         cfg.background.lr_dc = scheduled_lr(step, max_steps_lr, c.background_dc_lr);
         cfg.background.lr_sh = scheduled_lr(step, max_steps_lr, c.background_sh_lr);
@@ -587,6 +590,46 @@ void TrainerSession::check_config() {
                  {cfg.orientation_method, cfg.center_method}));
 }
 
+// A cut-out image's alpha is its mask when masks are on, and against a constant
+// background its colour is that background where transparent -- which is what
+// eval scores a render against, and what a soft edge renders as.
+void TrainerSession::set_alpha_config(DataManagerConfig& dm,
+                                      const std::vector<uint8_t>& alpha) const {
+    if (cfg.load_masks) dm.alpha_masks = alpha;
+    if (cfg.background_mode == "color") {
+        dm.composite_alpha = alpha;
+        for (int c = 0; c < 3; c++) dm.composite_color[c] = cfg.background_color[c];
+    }
+}
+
+// After relative_scale, so the cloud is sized by the cameras it will train
+// with. Into ds.points itself: the GUI's preview draws the seed that is used.
+void TrainerSession::seed_at_random() {
+    const std::string& mode = cfg.random_init;
+    if (mode != "never" && mode != "auto" && mode != "always")
+        throw std::runtime_error("unknown random_init '" + mode + "'");
+    const int64_t had = ds.points.num();
+    if (had == 0 && mode == "never")
+        throw std::runtime_error(lmsg::random_init_never.get());
+    if (mode == "never" || (mode == "auto" && had > 0)) return;
+
+    RandomPointsConfig rc;
+    rc.count = std::max<int64_t>(
+        1, (int64_t)std::llround((double)cfg.random_init_fraction * cfg.cap_max));
+    rc.distribution = cfg.random_init_distribution;
+    rc.center = cfg.random_init_center;
+    rc.spread = cfg.random_init_spread;
+    rc.std_scale = cfg.random_init_std;
+    RandomPointsFit fit;
+    ds.points = random_seed_points(ds.c2w.data(), ds.num_cameras, rc, &fit);
+    if (had > 0) log(lfmt(lmsg::random_init_replaced, {(long long)had}));
+    char sigma[96];
+    std::snprintf(sigma, sizeof sigma, "%.4g, %.4g, %.4g",
+                  fit.sigma[0], fit.sigma[1], fit.sigma[2]);
+    log(lfmt(lmsg::random_init_drawn,
+             {(long long)rc.count, rc.distribution, rc.center, sigma, mode}));
+}
+
 void TrainerSession::load_dataset() {
     DatasetParserConfig pcfg;
     pcfg.recon_dir            = cfg.colmap_recon_dir;
@@ -644,13 +687,29 @@ void TrainerSession::load_dataset() {
     }
     if (!cfg.auto_scale_poses) ds.train_frame_scale = 1.0f;
 
+    seed_at_random();
+
     // POST-split camera bake (identity when no warp flag applies).
     post = bake_post_split(
         ds, cfg.warp_to_pinhole, cfg.warp_spherical_to_pinhole,
         resolve_face_fit(cfg), cfg.warp_back_face);
 
     // Warp-path guards, plus: a modality no weight reads is not loaded at all.
-    has_mask   = !ds.mask_filenames.empty()   && cfg.load_masks;
+    alpha_images = probe_alpha_masks(ds.image_filenames);
+    has_mask   = (!ds.mask_filenames.empty() || !alpha_images.empty()) &&
+                 cfg.load_masks;
+    if (!alpha_images.empty() && cfg.load_masks) {
+        const long long n = std::count(alpha_images.begin(), alpha_images.end(), 1);
+        log(lfmt(ds.mask_filenames.empty() ? lmsg::alpha_masks_found
+                                           : lmsg::alpha_masks_with_files,
+                 {n, (long long)ds.num_cameras}));
+    }
+    // A cut-out's transparent pixels are empty space, not distractors. Mask
+    // files could be either, so with any of them the default stays "ignore".
+    if (!cfg.apply_loss_for_mask.has_value()) {
+        cfg.apply_loss_for_mask = !alpha_images.empty() && ds.mask_filenames.empty();
+        if (*cfg.apply_loss_for_mask) log(lmsg::alpha_masks_cut_out.get());
+    }
     has_depth  = !ds.depth_filenames.empty()  && cfg.load_depths &&
                  cfg.depth_supervision_weight > 0.0f;
     has_normal = !ds.normal_filenames.empty() && cfg.load_normals &&
@@ -717,34 +776,39 @@ static void check_cuda_runtime() {
 }
 #endif  // SS_BACKEND_VULKAN
 
-// PPISP exposure seeds: mean-relative EXIF EV x 0.5 per POST-split slot; empty
-// when no image has the tags. The 0.5: PPISP multiplies the sRGB-encoded
+// PPISP exposure seeds: 0.5 x EXIF EV per POST-split slot, centred like the
+// exposure-mean regularizer; empty without tags. 0.5: PPISP scales the sRGB
 // render, where a bracketed +1 EV measures x2^0.49 (0.34-0.76 by tone curve).
 static std::vector<float> exif_exposure_evs(const ParsedDataset& ds,
                                             const PostSplitCameras& post,
+                                            bool arithmetic_mean,
                                             int& n_found) {
     int64_t n = ds.num_cameras;
-    std::vector<double> ev(n, 0.0);
+    std::vector<double> gain(n, 0.0);
     std::vector<char> has(n, 0);
     double sum = 0.0;
     n_found = 0;
     for (int64_t i = 0; i < n; i++) {
         double v;
         if (sfm::exifExposureEv(sfm::readExif(ds.image_filenames[i]), v)) {
-            ev[i] = v;
+            gain[i] = 0.5 * v;
             has[i] = 1;
-            sum += v;
-            // sum += std::exp2(v);
+            sum += gain[i];
             n_found++;
         }
     }
     if (n_found == 0) return {};
-    double mean = sum / n_found;
-    // double mean = std::log2(sum / n_found);
+    double center = sum / n_found;
+    if (arithmetic_mean) {
+        double sum_exp = 0.0;
+        for (int64_t i = 0; i < n; i++)
+            if (has[i]) sum_exp += std::exp2(gain[i] - center);
+        center += std::log2(sum_exp / n_found);
+    }
     std::vector<float> out((size_t)post.n_post, 0.0f);
     for (int64_t i = 0; i < n; i++) {
         if (!has[i]) continue;
-        float v = 0.5f * (float)(ev[i] - mean);
+        float v = (float)(gain[i] - center);
         if (post.K_per_camera.empty()) {
             out[i] = v;
         } else {
@@ -807,6 +871,13 @@ void TrainerSession::setup_engine() {
     else if (cfg.background_mode == "pseudorandom")
         engine_init_background_pseudorandom((int)color.splat_transfer,
                                             color.splat_linear);
+    else if (cfg.background_mode == "random")
+        engine_init_background_random((int)color.splat_transfer,
+                                      color.splat_linear);
+    else if (cfg.background_mode == "color")
+        engine_init_background_color(cfg.background_color.data(),
+                                     (int)color.splat_transfer,
+                                     color.splat_linear);
     else if (cfg.background_mode == "sh")
         engine_init_background_sh(cfg.background_sh_degree,
                                   (int)color.splat_transfer,
@@ -853,6 +924,7 @@ void TrainerSession::setup_engine() {
     dm.train_batch_size = train_bs;
     dm.val_batch_size   = val_bs;
     dm.flip_mask = cfg.flip_mask;
+    set_alpha_config(dm, alpha_images);
     dm.mask_boundary_offset = cfg.mask_boundary_offset;
     dm.exif_quarter_turns = ds.exif_quarter_turns;
     engine_setup_data_manager(
@@ -931,13 +1003,16 @@ void TrainerSession::setup_engine() {
         std::vector<float> exif_ev;
         if (cfg.ppisp_exposure_from_exif) {
             int n_exif = 0;
-            exif_ev = exif_exposure_evs(ds, post, n_exif);
+            exif_ev = exif_exposure_evs(ds, post,
+                                        cfg.ppisp_exposure_arithmetic_mean,
+                                        n_exif);
             if (n_exif > 0)
                 log(lfmt(lmsg::ppisp_exif_exposure,
                          {(long long)n_exif, (long long)ds.num_cameras}));
         }
         engine_init_ppisp(n_grids, cfg.ppisp_param_type,
-                          cfg.use_adagrad_ppisp_optim, exif_ev);
+                          cfg.use_adagrad_ppisp_optim,
+                          cfg.ppisp_exposure_arithmetic_mean, exif_ev);
         st.ppisp_init = true;
     }
 
@@ -1321,8 +1396,11 @@ void TrainerSession::eval() {
     // otherwise pack several resolutions into one step.
     DataManagerConfig dm;
     dm.cache_mode  = (cfg.cache_images == "disk") ? CacheMode::DISK : CacheMode::CPU;
-    const bool eval_masks = !eds.mask_filenames.empty() && cfg.load_masks;
+    const std::vector<uint8_t> eval_alpha = probe_alpha_masks(eds.image_filenames);
+    const bool eval_masks =
+        (!eds.mask_filenames.empty() || !eval_alpha.empty()) && cfg.load_masks;
     dm.load_masks  = eval_masks || epost.any_fov_mask;
+    set_alpha_config(dm, eval_alpha);
     dm.load_depths = false;
     dm.load_normals = false;
     dm.train_batch_size = 1;

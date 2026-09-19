@@ -65,6 +65,7 @@ set(SS_TOOL_LIBS "")
 list(APPEND SS_TOOL_SOURCES
      ${SS_SRC}/app/FrameMask.cpp
      ${SS_SRC}/app/FrameLook.cpp
+     ${SS_SRC}/app/FrameMotion.cpp
      ${SS_SRC}/app/Pano360.cpp
      ${SS_SRC}/app/AppPaths.cpp
      ${SS_SRC}/app/CrashLog.cpp)
@@ -309,7 +310,8 @@ if(SS_SEPARATE_TOOLS)
     endif()
     if(SS_BUILD_SAM)
         set(_sam_src ${SS_SRC}/app/cli/sam_main.cpp ${SS_SRC}/app/FrameMask.cpp
-                     ${SS_SRC}/app/FrameLook.cpp ${SS_SRC}/app/Pano360.cpp)
+                     ${SS_SRC}/app/FrameLook.cpp ${SS_SRC}/app/FrameMotion.cpp
+                     ${SS_SRC}/app/Pano360.cpp)
         set(_sam_lib ss_sam)
         if(SS_ENABLE_PATENTED)
             list(APPEND _sam_src ${SS_SRC}/app/cli/sam_extract.cpp
@@ -321,13 +323,51 @@ if(SS_SEPARATE_TOOLS)
 endif()
 
 # ---------------------------------------------------------------------------
-# Host-side tests for src/core/ and src/mesh/. Backend-agnostic -- both builds
-# get them, and they link the engine library, which is where those .cpp live.
+# Host-side tests for src/core/, src/data/ and src/mesh/. Backend-agnostic --
+# both builds get them, and they link the engine library, which is where those
+# .cpp live.
 # ---------------------------------------------------------------------------
 file(GLOB SS_CORE_TESTS CONFIGURE_DEPENDS
-     ${SS_SRC}/core/tests/*.cpp ${SS_SRC}/mesh/tests/*.cpp)
+     ${SS_SRC}/core/tests/*.cpp ${SS_SRC}/data/tests/*.cpp
+     ${SS_SRC}/mesh/tests/*.cpp)
 foreach(test_src ${SS_CORE_TESTS})
     get_filename_component(test_name ${test_src} NAME_WE)
     add_executable(${test_name} ${test_src})
     ss_configure_app(${test_name})
 endforeach()
+
+# The frame plan: no device, no GUI, and a wrong answer is silent.
+add_executable(frame_motion_test
+    ${SS_SRC}/app/tests/frame_motion_test.cpp
+    ${SS_SRC}/app/FrameMotion.cpp
+    ${SS_SRC}/app/Pano360.cpp)
+ss_configure_app(frame_motion_test)
+
+# The GUI files with no GUI in them: the stamp that decides whether a finished
+# reconstruction is kept or built again, and the preset serializers. Named
+# rather than globbed -- each such test names its own sources.
+if(SS_BUILD_GUI)
+    add_executable(recon_stamp_test
+        ${SS_SRC}/app/gui/tests/recon_stamp_test.cpp
+        ${SS_SRC}/app/gui/ReconStamp.cpp)
+    ss_configure_app(recon_stamp_test)
+
+    add_executable(frames_stamp_test
+        ${SS_SRC}/app/gui/tests/frames_stamp_test.cpp
+        ${SS_SRC}/app/gui/ReconStamp.cpp)
+    ss_configure_app(frames_stamp_test)
+
+    add_executable(command_argv_test
+        ${SS_SRC}/app/gui/tests/command_argv_test.cpp
+        ${SS_SRC}/app/gui/Subprocess.cpp)
+    ss_configure_app(command_argv_test)
+
+    add_executable(preset_roundtrip_test
+        ${SS_SRC}/app/gui/tests/preset_roundtrip_test.cpp
+        ${SS_SRC}/app/gui/DatasetPreset.cpp
+        ${SS_SRC}/app/gui/MeshJob.cpp
+        ${SS_SRC}/app/gui/MeshPreset.cpp
+        ${SS_SRC}/app/gui/PresetFile.cpp
+        ${SS_SRC}/app/AppPaths.cpp)
+    ss_configure_app(preset_roundtrip_test)
+endif()

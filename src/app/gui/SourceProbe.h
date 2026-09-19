@@ -18,7 +18,8 @@ struct SourceProbeInfo {
     bool done = false;
     int video_tracks = 0;
     int width = 0, height = 0;
-    app::Eac360Layout eac360;
+    app::Pano360Layout pano360;
+    bool pano360_unsupported = false;
 };
 
 class SourceProbe {

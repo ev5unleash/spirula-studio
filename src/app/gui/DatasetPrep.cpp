@@ -15,6 +15,9 @@
 #include "core/ExrImage.h"
 #include "core/ImageOrient.h"
 #include "sfm/core/Exif.h"
+#ifdef SS_TOOL_SFM
+#include "sfm/core/Telemetry.h"
+#endif
 #include "external/stb_image.h"      // stbi_info (image size probe), stbi_load
 #include "external/stb_image_write.h"  // stbi_write_jpg (the photo re-encode)
 
@@ -89,6 +92,14 @@ bool is_image_file(const fs::path& p) {
     for (auto& c : e) c = (char)std::tolower((unsigned char)c);
     return e == ".jpg" || e == ".jpeg" || e == ".png" || e == ".webp" ||
            e == ".tif" || e == ".tiff" || e == ".bmp" || e == ".exr";
+}
+
+// Candidates ffmpeg resamples per frame kept. Adaptive selection picks from
+// them, so there have to be enough for the fastest rate it may ask for.
+int candidate_group(const PrepJob& job) {
+    const int window = std::max(job.sharp_window, 1);
+    return job.adaptive_fps ? std::max(window, (int)std::ceil(job.adaptive_range))
+                            : window;
 }
 
 // Throw away what a previous run generated, for a step being re-done. Only
@@ -393,6 +404,76 @@ std::string human_duration(double seconds) {
     return fmt(lmsg::dur_hours, {round_to(seconds / 3600.0, 1)});
 }
 
+// The adaptive pass writes nothing, so the step's tally cannot move and a long
+// video would sit on an unchanged bar. It shows its own share of `frames`
+// instead -- the whole group, which is measured before any of it is written.
+class ScanProgress {
+public:
+    using Clock = std::chrono::steady_clock;
+
+    ScanProgress(RunProgress* prog, int64_t frames)
+        : _prog(prog), _total(frames), _last(Clock::now()) {}
+
+    // The step has to be RUNNING or the panel draws no bar at all: nothing has
+    // entered Frames yet when a group is being measured. The same line goes to
+    // the log, which is the other place a user looks for signs of life.
+    void begin(std::string name) {
+        _name = std::move(name);
+        _prog->enter(Stage::Frames, line(_base));
+        _prog->fraction(Stage::Frames, share(_base));
+        // Only once the length is known: the first update() brings it where the
+        // caller could not, and "0 of 0" is not a sign of life.
+        if (_total > 0) _prog->note(Stage::Frames, line(_base), /*detail=*/false);
+    }
+
+    void update(int64_t done, int64_t total) {
+        const int64_t at = _total > 0 ? _base + done : done;
+        if (_total <= 0) _total = total;
+        _prog->fraction(Stage::Frames, share(at));
+        const auto now = Clock::now();
+        if (now - _last < std::chrono::milliseconds(150)) return;
+        _last = now;
+        _prog->detail(Stage::Frames, line(at));
+    }
+
+    void finish(int64_t frames) { _base += frames; }
+
+private:
+    float share(int64_t at) const {
+        return _total > 0 ? (float)std::min(1.0, (double)at / (double)_total)
+                          : -1.0f;
+    }
+    std::string line(int64_t at) const {
+        return fmt(lmsg::scanning_motion,
+                   {(long long)at, (long long)_total, _name});
+    }
+
+    RunProgress* _prog;
+    int64_t _total = 0, _base = 0;
+    std::string _name;
+    Clock::time_point _last;
+};
+
+// A kept-frame plan as a strip: the local rate at each slice of the capture,
+// against the fastest. Read off the gaps rather than counted per slice, so a
+// plan of forty frames is a curve and not forty ticks.
+std::vector<float> spacing_bars(const std::vector<int64_t>& plan, int64_t frames) {
+    // Sliced exactly as the measured curve is, since the panel draws the two
+    // against one another: a strip of its own width would end short of it.
+    if (plan.size() < 2 || frames <= 0) return {};
+    std::vector<float> bars((size_t)kScanSlices, 0.0f);
+    size_t k = 0;
+    for (int b = 0; b < kScanSlices; b++) {
+        const int64_t at = (int64_t)(((double)b + 0.5) * frames / kScanSlices);
+        while (k + 2 < plan.size() && plan[k + 1] < at) k++;
+        bars[(size_t)b] = 1.0f / (float)std::max<int64_t>(1, plan[k + 1] - plan[k]);
+    }
+    const float top = *std::max_element(bars.begin(), bars.end());
+    if (top > 0.0f)
+        for (float& v : bars) v /= top;
+    return bars;
+}
+
 // Progress that answers "how long is this going to take", which is the only
 // question a user has during a twenty-minute masking pass, and the one a
 // counter that ticks every tenth frame does not answer.
@@ -479,18 +560,18 @@ private:
     Clock::time_point _start, _last;
 };
 
-// One frame is written every this many source frames, from the run's kept
-// frame rate and what the container says it holds.
-int frame_skip(const PrepJob& job, double src_fps) {
-    return std::max(1, (int)std::lround(src_fps / std::max(job.video_fps, 0.01f)));
+// One frame is written every this many source frames, from the kept frame rate
+// this input asked for and what the container says it holds.
+int frame_skip(float fps, double src_fps) {
+    return std::max(1, (int)std::lround(src_fps / std::max(fps, 0.01f)));
 }
 
 // What a video is expected to yield, for the step's bar. The extraction loop
 // stops on the real end of stream either way.
-int64_t expected_frames(const PrepJob& job, double src_fps, int64_t src_frames,
-                        int tracks) {
+int64_t expected_frames(const PrepJob& job, float fps, double src_fps,
+                        int64_t src_frames, int tracks) {
     int64_t expect = src_frames > 0
-                         ? (src_frames / frame_skip(job, src_fps)) * (int64_t)tracks
+                         ? (src_frames / frame_skip(fps, src_fps)) * (int64_t)tracks
                          : 0;
     if (job.max_frames > 0 &&
         (expect == 0 || expect > (int64_t)job.max_frames * tracks))
@@ -540,9 +621,12 @@ bool ffmpeg_probe_video(const std::string& ffmpeg_exe, const std::string& path,
                             out.duration = hh * 3600.0 + mm * 60.0 + ss;
                     }
                     // "... 1920x1080, 19938 kb/s, 30.01 fps, 30 tbr, ..."
+                    // A cover picture is a video stream to ffmpeg and is not a
+                    // lens; counting it gives a DJI .osv three of them.
                     const size_t f = line.find(" fps");
                     if (f == std::string::npos ||
-                        line.find("Video:") == std::string::npos)
+                        line.find("Video:") == std::string::npos ||
+                        line.find("(attached pic)") != std::string::npos)
                         return;
                     // The frame size off the same line. The 16-pixel floor is
                     // what rejects the fourcc ("0x31637661"), which is also
@@ -626,8 +710,8 @@ int probe_video_tracks(const std::string& ffmpeg_exe, const std::string& path,
 std::vector<std::string> lens_dirs(const PrepJob& job, const PrepInput& in) {
     std::vector<std::string> out;
     if (!in.is_video) return out;
-    if (in.eac360.valid()) {
-        for (const app::Pano360View& v : app::pano360_views(in.eac360, job.pano))
+    if (in.pano360.valid()) {
+        for (const app::Pano360View& v : app::pano360_views(in.pano360, job.pano))
             if (!v.dir.empty()) out.push_back(v.dir);
         if (out.size() < 2) out.clear();
         return out;
@@ -637,10 +721,10 @@ std::vector<std::string> lens_dirs(const PrepJob& job, const PrepInput& in) {
     return out;
 }
 
-app::Eac360Layout probe_eac360(const std::string& ffmpeg_exe,
-                               const std::string& path,
-                               const std::atomic<bool>& cancel) {
-    app::Eac360Layout layout;
+Pano360Probe probe_pano360(const std::string& ffmpeg_exe,
+                           const std::string& path,
+                           const std::atomic<bool>& cancel) {
+    Pano360Probe out;
     std::vector<std::pair<int, int>> tracks;
 #ifdef SS_HAVE_VIDEO
     {
@@ -653,9 +737,20 @@ app::Eac360Layout probe_eac360(const std::string& ffmpeg_exe,
         if (ffmpeg_probe_video(ffmpeg_exe, path, facts, cancel))
             tracks = facts.tracks;
     }
-    if (tracks.size() == 2 && tracks[0] == tracks[1])
-        app::eac360_detect(2, tracks[0].first, tracks[0].second, layout);
-    return layout;
+    if (tracks.size() != 2 || tracks[0] != tracks[1]) return out;
+    app::Pano360Meta meta;
+#ifdef SS_TOOL_SFM
+    // What the camera says it wrote beats what the frame size suggests: two
+    // GoPro generations pack 5952x1920 differently and only the tag tells them
+    // apart.
+    const sfm::VideoProjection pr = sfm::video_projection(path);
+    meta = app::Pano360Meta{pr.name, pr.mode};
+#endif
+    const int w = tracks[0].first, h = tracks[0].second;
+    if (!app::pano360_detect(2, w, h, meta, out.layout))
+        out.unsupported = app::pano360_unsupported(2, w, h, meta);
+
+    return out;
 }
 
 namespace {
@@ -771,13 +866,24 @@ static bool metashape_export_here(const fs::path& p) {
     return has_xml && has_ply;
 }
 
+// A COLMAP model written straight into the folder rather than under sparse/,
+// the last place ColmapParser looks. points3D is optional, as it is there.
+static bool colmap_model_here(const fs::path& p) {
+    std::error_code ec;
+    for (const char* base : {"cameras", "images"})
+        if (!fs::exists(p / (std::string(base) + ".bin"), ec) &&
+            !fs::exists(p / (std::string(base) + ".txt"), ec))
+            return false;
+    return true;
+}
+
 bool folder_looks_like_dataset(const std::string& dir) {
     std::error_code ec;
     const fs::path p(dir);
     if (fs::exists(p / "transforms.json", ec) ||
         fs::is_directory(p / "sparse", ec) || fs::is_directory(p / "colmap", ec))
         return true;
-    return metashape_export_here(p);
+    return colmap_model_here(p) || metashape_export_here(p);
 }
 
 // A folder is the run's leftover only if the run would write it. When images/
@@ -815,7 +921,7 @@ WorkspaceState probe_workspace(const std::string& workspace,
     // is a directory somebody made, and reconstructing into it is right.
     st.model = has_content(ws / "sparse") || has_content(ws / "colmap") ||
                fs::exists(ws / "transforms.json", ec) ||
-               metashape_export_here(ws);
+               colmap_model_here(ws) || metashape_export_here(ws);
     st.geometry = has_content(ws / "normals") || has_content(ws / "depths");
     st.recon_stamp = fs::exists(ws / kReconStampFile, ec);
     return st;
@@ -977,7 +1083,7 @@ int DatasetPrep::exec(
 int64_t DatasetPrep::estimate_frames(const PrepJob& job, const PrepInput& in,
                                      const std::string& images) {
     // What a resumed run keeps is exactly what is there already.
-    if (job.resume && !job.redo_frames) {
+    if (job.resume && !frames_stale(job)) {
         const int have = count_images(images);
         if (have > 0) return have;
     }
@@ -993,15 +1099,16 @@ int64_t DatasetPrep::estimate_frames(const PrepJob& job, const PrepInput& in,
 
     // A 360 capture writes one image per view; its two tracks are one frame.
     const int per_frame =
-        in.eac360.valid()
-            ? (int)app::pano360_views(in.eac360, job.pano).size()
+        in.pano360.valid()
+            ? (int)app::pano360_views(in.pano360, job.pano).size()
             : 0;
 #ifdef SS_HAVE_VIDEO
     if (!job.force_external_decode && native_decode_reason().empty()) {
         std::string err;
         video::VideoProbe probe;
         if (video::probe_video(in.path, probe, err) && probe.tracks > 0)
-            return expected_frames(job, probe.fps > 1.0 ? probe.fps : 30.0,
+            return expected_frames(job, input_fps(job, in),
+                                   probe.fps > 1.0 ? probe.fps : 30.0,
                                    probe.frame_count,
                                    per_frame > 0 ? per_frame : probe.tracks);
     }
@@ -1009,7 +1116,7 @@ int64_t DatasetPrep::estimate_frames(const PrepJob& job, const PrepInput& in,
     VideoFacts facts;
     if (ffmpeg_probe_video(job.ffmpeg_exe, in.path, facts, _cancel) &&
         facts.fps > 1.0)
-        return expected_frames(job, facts.fps, facts.frames,
+        return expected_frames(job, input_fps(job, in), facts.fps, facts.frames,
                                per_frame > 0 ? per_frame
                                              : (is_dual_fisheye_path(in.path) ? 2 : 1));
     return 0;
@@ -1057,6 +1164,20 @@ bool DatasetPrep::run(const PrepJob& job_in, PrepResult& out, std::string& error
     if (wants_native_decode && !sam::freeze_device(job.device, error))
         return false;
 #endif
+
+    // Frames already there were extracted with settings the workspace records;
+    // a run asking for others has to go back to the video (ReconStamp.h).
+    const ReconStamp frames_now = frames_stamp(job);
+    {
+        const std::string moved =
+            recon_stamp_change(read_recon_stamp(ws.string(), kFramesStampFile),
+                               frames_now);
+        if (!moved.empty()) {
+            _frames_stale = true;
+            out.frames_rebuilt = true;
+            log(fmt(lmsg::frames_settings_changed, {moved}), /*detail=*/false);
+        }
+    }
 
     // Where each input's images and masks ended up, so the masking pass below
     // can run per input (see generate_masks) instead of over one flat tree.
@@ -1150,10 +1271,29 @@ bool DatasetPrep::run(const PrepJob& job_in, PrepResult& out, std::string& error
             planned[i] = estimate_frames(job, in, p.images);
             _frames_tally.plan(planned[i]);
         }
+        _plans.assign(job.inputs.size(), std::vector<int64_t>());
+        _planned.assign(job.inputs.size(), false);
+        // The panel that watches the measuring pass wants the whole list, so
+        // a folder of photographs among the clips is a row that says so rather
+        // than a gap. A video's length arrives with its first measured step.
+        if (job.adaptive_fps) {
+            std::vector<ScanRow> rows(job.inputs.size());
+            for (size_t i = 0; i < job.inputs.size(); i++) {
+                rows[i].name = leaf_name(job.inputs[i].path);
+                rows[i].video = job.inputs[i].is_video;
+                if (!rows[i].video) rows[i].frames = planned[i];
+            }
+            _prog->scan_reset(std::move(rows));
+        }
         for (size_t i = 0; i < job.inputs.size(); i++) {
             const PrepInput& in = job.inputs[i];
             Prepared& p = per[i];
             if (in.is_video) {
+                const bool keeping =
+                    job.resume && !frames_stale(job) && count_images(p.images) > 0;
+                if (!keeping && !job.force_external_decode &&
+                    native_decode_reason().empty() && !plan_group(job, i, error))
+                    return false;
                 if (!extract_video(job, in, p.images, p.masks, out, p.have_masks,
                                    error))
                     return false;
@@ -1176,6 +1316,10 @@ bool DatasetPrep::run(const PrepJob& job_in, PrepResult& out, std::string& error
         if (camera_subfolders(out.image_dir).size() > 1)
             out.per_folder_cameras = true;
     }
+
+    // Written once the images are there, so an interrupted extraction is not
+    // recorded as having produced what it was asked for.
+    write_recon_stamp(ws.string(), frames_now, kFramesStampFile);
 
     out.n_images = count_images(out.image_dir, skip_dir);
     log(fmt(lmsg::found_images, {(long long)out.n_images, out.image_dir}),
@@ -1281,8 +1425,8 @@ bool DatasetPrep::extract_video(const PrepJob& job, const PrepInput& in,
                                 bool& masked, std::string& error) {
     // Resume: frames are moved into place in one batch after selection, so a
     // non-empty folder means a previous extraction of THIS input finished.
-    if (job.redo_frames) clear_generated(images, job.workspace);
-    if (job.resume && !job.redo_frames) {
+    if (frames_stale(job)) clear_generated(images, job.workspace);
+    if (job.resume && !frames_stale(job)) {
         const int have = count_images(images);
         if (have > 0) {
             log(fmt(lmsg::resume_keep_frames, {(long long)have, images}),
@@ -1319,11 +1463,116 @@ bool DatasetPrep::extract_video(const PrepJob& job, const PrepInput& in,
         // fallback is for, and the user should not have to know which is which.
         log(fmt(lmsg::decode_fallback_ffmpeg, {error}), /*detail=*/false);
     }
-    const bool ok = in.eac360.valid() && job.pano.mode != app::Pano360Mode::Off
+    const bool ok = in.pano360.valid() && job.pano.mode != app::Pano360Mode::Off
                         ? extract_360_ffmpeg(job, in, images, out, error)
                         : extract_video_ffmpeg(job, in, images, out, error);
-    if (ok) out.captures.push_back({in.subdir, in.path, (double)job.video_fps});
+    // The stems are candidate numbers, and the candidates were resampled at
+    // the kept rate times the group -- which is the rate that times them.
+    if (ok)
+        out.captures.push_back(
+            {in.subdir, in.path, (double)input_fps(job, in) * candidate_group(job)});
     return ok;
+}
+
+#ifdef SS_HAVE_VIDEO
+// The job's frame-selection half, which the scan and the extraction have to
+// read the same way or a plan would be spaced against the wrong schedule.
+static bool builtin_job(const PrepJob& job, const PrepInput& in,
+                        app::FrameExtractJob& fx, int64_t* frames,
+                        std::string& error) {
+    video::VideoProbe probe;
+    std::string probe_err;
+    if (!video::probe_video(in.path, probe, probe_err) || probe.tracks <= 0) {
+        error = probe_err.empty() ? "no video track" : probe_err;
+        return false;
+    }
+    if (frames) *frames = probe.frame_count;
+    const double src_fps = probe.fps > 1.0 ? probe.fps : 30.0;
+    const int window = std::max(job.sharp_window, 1);
+    fx.input = in.path;
+    fx.device = job.device;
+    fx.skip = frame_skip(input_fps(job, in), src_fps);
+    fx.keep = window > 1 ? window : 0;
+    fx.max_frames = job.max_frames;
+    fx.sync_tracks = job.sync_tracks;
+    fx.adaptive = job.adaptive_fps;
+    fx.adaptive_range = job.adaptive_range;
+    fx.auto_rotate = job.auto_rotate;
+    fx.quality = 95;
+    if (in.pano360.valid()) {
+        const std::vector<app::Pano360View> views =
+            app::pano360_views(in.pano360, job.pano);
+        if (!views.empty()) {
+            fx.eac = in.pano360;
+            fx.views = views;
+        }
+    }
+    return true;
+}
+#endif
+
+// Every video extracted at one rate, planned against one budget: a clip that
+// walks briskly then takes more of it than the one shot from a bench. Scanned
+// here so the whole group is measured before the first of it is written.
+bool DatasetPrep::plan_group(const PrepJob& job, size_t at, std::string& error) {
+#ifndef SS_HAVE_VIDEO
+    (void)job; (void)at; (void)error;
+    return true;
+#else
+    if (!job.adaptive_fps || _plans.size() != job.inputs.size()) return true;
+    if (_planned[at]) return true;
+    const size_t g = fps_group(job.inputs, at);
+    std::vector<size_t> rows;
+    for (size_t i = 0; i < job.inputs.size(); i++)
+        if (job.inputs[i].is_video && fps_group(job.inputs, i) == g)
+            rows.push_back(i);
+
+    // Probed first, so the bar covers the group from its first frame instead of
+    // restarting at each video of it.
+    std::vector<app::FrameExtractJob> jobs(rows.size());
+    std::vector<int64_t> lengths(rows.size(), 0);
+    int64_t group_frames = 0;
+    for (size_t k = 0; k < rows.size(); k++) {
+        if (!builtin_job(job, job.inputs[rows[k]], jobs[k], &lengths[k], error))
+            return false;
+        group_frames += std::max<int64_t>(0, lengths[k]);
+    }
+
+    app::FrameExtractSinks sinks;
+    sinks.log = [this](const std::string& l) { log(l); };
+    sinks.cancel = &_cancel;
+    ScanProgress scan(_prog, group_frames);
+    sinks.scanning = [&](int64_t done, int64_t total) { scan.update(done, total); };
+    std::vector<app::MotionPlanInput> measured(rows.size());
+    std::vector<double> fps(rows.size(), 0.0);
+    for (size_t k = 0; k < rows.size(); k++) {
+        scan.begin(leaf_name(job.inputs[rows[k]].path));
+        _prog->scan_open(rows[k]);
+        sinks.measured = [this, row = rows[k]](int64_t at, int64_t of, float c) {
+            _prog->scan_step(row, at, of, c);
+        };
+        app::FrameExtractStats stats;
+        if (!app::scan_motion(jobs[k], sinks, measured[k], stats, error))
+            return false;
+        fps[k] = measured[k].fps;
+        scan.finish(lengths[k] > 0 ? lengths[k] : measured[k].frames);
+    }
+    const std::vector<std::vector<int64_t>> plans =
+        app::plan_by_motion(measured, job.adaptive_range);
+    for (size_t k = 0; k < rows.size() && k < plans.size(); k++) {
+        if (plans[k].empty()) {
+            error = lmsg::err_capture_too_short.get();
+            return false;
+        }
+        _plans[rows[k]] = plans[k];
+        _planned[rows[k]] = true;
+        _prog->scan_kept(rows[k], spacing_bars(plans[k], measured[k].frames),
+                         (int64_t)plans[k].size());
+        sinks.planned = nullptr;
+        app::report_plan(sinks, plans[k], measured[k].frames, fps[k]);
+    }
+    return true;
+#endif
 }
 
 // Extraction writes frames and nothing else: masking is a separate pass
@@ -1349,31 +1598,19 @@ bool DatasetPrep::extract_video_builtin(const PrepJob& job, const PrepInput& in,
         return false;
     }
     const std::vector<app::Pano360View> views =
-        in.eac360.valid() ? app::pano360_views(in.eac360, job.pano)
+        in.pano360.valid() ? app::pano360_views(in.pano360, job.pano)
                           : std::vector<app::Pano360View>();
     if (!views.empty()) out.per_folder_cameras = views.size() > 1;
     else if (probe.tracks > 1) out.per_folder_cameras = true;
 
-    const double src_fps = probe.fps > 1.0 ? probe.fps : 30.0;
-    const int window = std::max(job.sharp_window, 1);
-    const int skip = frame_skip(job, src_fps);
-
     app::FrameExtractJob fx;
-    fx.input = in.path;
+    if (!builtin_job(job, in, fx, nullptr, error)) return false;
     fx.image_dir = images;
-    fx.device = job.device;
-    fx.skip = skip;
-    fx.keep = window > 1 ? window : 0;
-    fx.max_frames = job.max_frames;
-    fx.sync_tracks = job.sync_tracks;
-    fx.auto_rotate = job.auto_rotate;
-    fx.quality = 95;
-    if (!views.empty()) {
-        fx.eac = in.eac360;
-        fx.views = views;
+    const size_t row = input_index(job, in);
+    if (row < _plans.size()) fx.plan = _plans[row];
+    if (!views.empty())
         log(fmt(lmsg::pano360_plan, {(long long)views.size(), views[0].width,
                                      views[0].height}), /*detail=*/false);
-    }
 
     app::FrameExtractSinks sinks;
     sinks.log = [this](const std::string& l) { log(l); };
@@ -1383,6 +1620,21 @@ bool DatasetPrep::extract_video_builtin(const PrepJob& job, const PrepInput& in,
     sinks.progress = [&](int64_t written, int64_t decoded) {
         (void)decoded;
         progress.update(written);
+    };
+    // Only where this run is going to measure for itself: a plan handed in was
+    // made by plan_group, which reported its own pass.
+    ScanProgress scan(_prog, probe.frame_count);
+    if (fx.adaptive && fx.plan.empty()) {
+        scan.begin(leaf_name(in.path));
+        sinks.scanning = [&](int64_t done, int64_t total) {
+            scan.update(done, total);
+        };
+    }
+    sinks.measured = [this, row](int64_t at, int64_t of, float c) {
+        _prog->scan_step(row, at, of, c);
+    };
+    sinks.planned = [this, row](const std::vector<int64_t>& plan, int64_t frames) {
+        _prog->scan_kept(row, spacing_bars(plan, frames), (int64_t)plan.size());
     };
     if (_films.frames) {
         const fs::path root(images);
@@ -1420,34 +1672,32 @@ bool DatasetPrep::extract_video_ffmpeg(const PrepJob& job, const PrepInput& in,
     }
     log(fmt(lmsg::video_input, {in.path}), /*detail=*/false);
 
-    // Multi-track videos (Insta360 .insv): one folder per track, one camera
-    // per folder, as in reference/scripts/extract_frames.py.
-    std::vector<int> streams = {0};
-    if (is_dual_fisheye_path(in.path)) {
-        std::vector<int> found;
-        run_process({"ffprobe", "-v", "error", "-select_streams", "v",
-                     "-show_entries", "stream=index", "-of", "csv=p=0",
-                     in.path}, "",
-                    [&](const std::string& l) {
-                        try { found.push_back(std::stoi(l)); } catch (...) {}
-                    }, _cancel);
-        if (found.size() > 1) streams = found;
-    }
-    if (streams.size() > 1) out.per_folder_cameras = true;
+    // Multi-track videos (an Insta360 .insv, a DJI .osv): one folder per track,
+    // one camera per folder. Counted off the stream table rather than ffprobe's
+    // stream list, which calls an attached cover picture a video track.
+    VideoFacts facts;
+    ffmpeg_probe_video(job.ffmpeg_exe, in.path, facts, _cancel);
+    size_t streams = 1;
+    if (is_dual_fisheye_path(in.path) && facts.tracks.size() > 1)
+        streams = facts.tracks.size();
+    if (streams > 1) out.per_folder_cameras = true;
 
     const int window = std::max(job.sharp_window, 1);
-    for (size_t tr = 0; tr < streams.size(); tr++) {
+    const int group = candidate_group(job);
+    const bool fisheye = streams > 1 && !facts.tracks.empty() &&
+                         facts.tracks[0].first == facts.tracks[0].second;
+    for (size_t tr = 0; tr < streams; tr++) {
         std::string track_path = in.path;
-        const fs::path out_dir = streams.size() > 1
+        const fs::path out_dir = streams > 1
             ? fs::path(images) / ("cam" + std::to_string(tr))
             : fs::path(images);
-        if (job.resume && !job.redo_frames &&
+        if (job.resume && !frames_stale(job) &&
             count_images(out_dir.string()) > 0) {
             log(fmt(lmsg::resume_keep_frames_dir, {out_dir.string()}),
                 /*detail=*/false);
             continue;
         }
-        if (streams.size() > 1) {
+        if (streams > 1) {
             enter(Stage::Frames, fmt(lmsg::stage_split_track, {(long long)tr}));
             const fs::path tmp_track =
                 ws / ("track_cam" + std::to_string(tr) + ".mp4");
@@ -1471,7 +1721,7 @@ bool DatasetPrep::extract_video_ffmpeg(const PrepJob& job, const PrepInput& in,
         std::error_code ec;
         fs::create_directories(cand, ec);
         char vf[64];
-        std::snprintf(vf, sizeof vf, "fps=%g", (double)job.video_fps * window);
+        std::snprintf(vf, sizeof vf, "fps=%g", (double)input_fps(job, in) * group);
         // ffmpeg turns the picture by the container's matrix unless told not
         // to, which is what the built-in decoder's auto_rotate matches.
         std::vector<std::string> argv{job.ffmpeg_exe, "-nostdin", "-y"};
@@ -1499,12 +1749,31 @@ bool DatasetPrep::extract_video_ffmpeg(const PrepJob& job, const PrepInput& in,
 
         if (window > 1) enter(Stage::Frames, lmsg::stage_select_sharpest.get());
         fs::create_directories(out_dir, ec);
+        FrameSelectOptions so;
+        so.group = group;
+        so.max_frames = job.max_frames;
+        so.adaptive = job.adaptive_fps;
+        so.range = job.adaptive_range;
+        so.window = window;
+        if (fisheye) so.view = app::MotionView::Fisheye;
+        so.out_fov = fisheye ? 3.4034f : 1.5708f;
+        ScanProgress scan(_prog, 0);
+        scan.begin(leaf_name(in.path));
+        const size_t row = input_index(job, in);
+        _prog->scan_open(row);
+        so.scanning = [&](int64_t done, int64_t total) { scan.update(done, total); };
+        so.measured = [this, row](int64_t at, int64_t of, float c) {
+            _prog->scan_step(row, at, of, c);
+        };
+        so.planned = [this, row](const std::vector<int64_t>& plan, int64_t frames) {
+            _prog->scan_kept(row, spacing_bars(plan, frames), (int64_t)plan.size());
+        };
         const int kept = select_sharpest_frames(
-            cand.string(), out_dir.string(), "", window, job.max_frames,
+            cand.string(), out_dir.string(), "", so,
             [this](const std::string& l) { log(l); }, _cancel);
         progress.update(std::max<int64_t>(kept, 0), /*force=*/true);
         remove_tree(cand);
-        if (streams.size() > 1) fs::remove(track_path, ec);
+        if (streams > 1) fs::remove(track_path, ec);
         if (kept < 0) {
             error = _cancel.load() ? "cancelled" : "frame selection failed";
             return false;
@@ -1525,7 +1794,7 @@ namespace {
 // thread per view, each with a share of the cores: the resampler threads and
 // the JPEG encode does not, so overlapping them is what fills the machine.
 bool warp_canvases(const fs::path& from, const fs::path& to,
-                   const app::Eac360Layout& layout,
+                   const app::Pano360Layout& layout,
                    const std::vector<app::Pano360View>& views,
                    const std::atomic<bool>& cancel,
                    const std::function<void(int64_t)>& progress,
@@ -1588,7 +1857,7 @@ bool DatasetPrep::extract_360_ffmpeg(const PrepJob& job, const PrepInput& in,
         return false;
     }
     const std::vector<app::Pano360View> views =
-        app::pano360_views(in.eac360, job.pano);
+        app::pano360_views(in.pano360, job.pano);
     if (views.empty()) {
         error = lmsg::err_ffmpeg_extract_failed.get();
         return false;
@@ -1600,6 +1869,7 @@ bool DatasetPrep::extract_360_ffmpeg(const PrepJob& job, const PrepInput& in,
 
     const fs::path ws = job.workspace;
     const int window = std::max(job.sharp_window, 1);
+    const int group = candidate_group(job);
     std::error_code ec;
 
     // ffmpeg decodes both tracks and cuts the overlap strips out; the warp is
@@ -1611,8 +1881,8 @@ bool DatasetPrep::extract_360_ffmpeg(const PrepJob& job, const PrepInput& in,
     remove_tree(cand);
     fs::create_directories(cand, ec);
     char pre[64];
-    std::snprintf(pre, sizeof pre, "fps=%g", (double)job.video_fps * window);
-    const std::string graph = app::pano360_graph(in.eac360, pre);
+    std::snprintf(pre, sizeof pre, "fps=%g", (double)input_fps(job, in) * group);
+    const std::string graph = app::pano360_graph(in.pano360, pre);
     // A 360 capture's geometry is the EAC layout, not the display matrix: the
     // built-in path leaves it alone and so must this one.
     int rc = exec({job.ffmpeg_exe, "-nostdin", "-y", "-noautorotate", "-i", in.path,
@@ -1631,8 +1901,28 @@ bool DatasetPrep::extract_360_ffmpeg(const PrepJob& job, const PrepInput& in,
     const fs::path kept = ws / "canvas_tmp";
     remove_tree(kept);
     fs::create_directories(kept, ec);
+    FrameSelectOptions so;
+    so.group = group;
+    so.max_frames = job.max_frames;
+    so.adaptive = job.adaptive_fps;
+    so.range = job.adaptive_range;
+    so.window = window;
+    so.view = app::MotionView::Packed360;
+    so.eac = in.pano360;
+    so.out_fov = app::motion_out_fov(views);
+    ScanProgress scan(_prog, 0);
+    scan.begin(leaf_name(in.path));
+    const size_t row = input_index(job, in);
+    _prog->scan_open(row);
+    so.scanning = [&](int64_t done, int64_t total) { scan.update(done, total); };
+    so.measured = [this, row](int64_t at, int64_t of, float c) {
+        _prog->scan_step(row, at, of, c);
+    };
+    so.planned = [this, row](const std::vector<int64_t>& plan, int64_t frames) {
+        _prog->scan_kept(row, spacing_bars(plan, frames), (int64_t)plan.size());
+    };
     const int n = select_sharpest_frames(
-        cand.string(), kept.string(), "", window, job.max_frames,
+        cand.string(), kept.string(), "", so,
         [this](const std::string& l) { log(l); }, _cancel);
     remove_tree(cand);
     if (n < 0) {
@@ -1646,7 +1936,7 @@ bool DatasetPrep::extract_360_ffmpeg(const PrepJob& job, const PrepInput& in,
     RateLimitedProgress progress(_prog, Stage::Frames, lmsg::noun_frames_written,
                                  _frames_tally);
     const bool ok = warp_canvases(
-        kept, fs::path(images), in.eac360, views, _cancel,
+        kept, fs::path(images), in.pano360, views, _cancel,
         [&](int64_t done) { progress.update(done * (int64_t)views.size()); },
         error);
     remove_tree(kept);

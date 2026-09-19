@@ -43,6 +43,12 @@ repo: read `src/backend/README.md`, then `src/backend/vulkan/README.md`.
 | dataset parsing (native) | `src/data/parsers/{Colmap,Nerfstudio,Metashape}Parser.cpp`, `DatasetCommon.cpp`, `DatasetParser.h` |
 | image cache / prefetch / warp | `src/data/DataManager.cpp` |
 | training session orchestration | `src/app/TrainerCore.cpp` — the single training driver, shared by the CLI and the GUI |
+| saved presets | `src/app/gui/PresetFile.{h,cpp}` — the file header, folder and probe every kind shares; `TrainPreset`, `DatasetPreset` and `MeshPreset` add one hand-written field table each |
+| batch processing | `src/app/gui/BatchProcess.{h,cpp}` — the rows, the pre-flight and the plan they expand into. The driver is `GuiApp::advance_batch()`, which reuses the three live runners rather than being a fourth |
+| telling somebody a queue is over | `src/app/gui/CommandRunner.{h,cpp}` runs the command, `gui::command_argv()` (Subprocess.h) builds its argv with `{message}` replaced by a summary that carries nothing a JSON payload would have to escape |
+| the input list a dataset run takes | `src/app/gui/SourceList.{h,cpp}` — one answer to "which lens is this capture", shared by the New Dataset screen and a batch row |
+| what a meshing run writes | `src/mesh/MeshExport.{h,cpp}` — the writers, which colors each format can carry, and the plan a request for several of them expands into. `src/app/gui/MeshJob.h` is the GUI's side of the same request |
+| reading a mesh back | `src/mesh/MeshImport.cpp` (every front end but one) and `viewer/src/viewer.cpp` (the WASM viewer, whose constraints are genuinely different) |
 | the actual training step | `Engine*.cpp`, entered via `engine_train_step_managed` |
 | kernels | `src/kernels/**/*.cu` (CUDA) + `src/backend/vulkan/shaders/*.slang` + `src/backend/vulkan/kernels/*.cpp` |
 | web viewer client | `src/app/webviewer/viewer.html` — single source, embedded into the engine library at build time; every front end serves the same bytes |

@@ -206,10 +206,13 @@ void blend_background_noise_forward(
     int transfer,
     bool is_linear,
     bool blocky,                          // tiled RGB corners instead of U[0,1)
+    unsigned block_px,                    // cell side; 0 = one cell per image
     DeviceTensor3D<float3> rgb,           // [B, H, W, 3]
     DeviceTensor3D<float>  transmittance, // [B, H, W, 1]
     float randomize_weight,
     uint32_t seed,
+    const float* exponent_by_cam,         // power per camera slot; null = 1
+    const int32_t* cam_indices,           // [B] slot per image
     DeviceTensor3D<float3> out_rgb        // [B, H, W, 3]
 );
 
@@ -218,10 +221,32 @@ void blend_background_noise_backward(
     int transfer,
     bool is_linear,
     bool blocky,                             // tiled RGB corners instead of noise
+    unsigned block_px,                       // cell side; 0 = one cell per image
     DeviceTensor3D<float3> rgb,              // [B, H, W, 3] PRE-blend
     DeviceTensor3D<float>  transmittance,    // [B, H, W, 1]
     float randomize_weight,
     uint32_t seed,
+    const float* exponent_by_cam,            // as in the forward
+    const int32_t* cam_indices,
+    float overexposure_weight,               // fused image-space reg, 0 = off
+    DeviceTensor3D<float3> v_out_rgb,        // [B, H, W, 3]
+    DeviceTensor3D<float3> v_rgb,            // [B, H, W, 3]
+    DeviceTensor3D<float>  v_transmittance   // [B, H, W, 1]
+);
+
+
+void blend_background_color_forward(
+    DeviceTensor3D<float3> rgb,           // [B, H, W, 3]
+    DeviceTensor3D<float>  transmittance, // [B, H, W, 1]
+    float3 background,                    // working color space
+    DeviceTensor3D<float3> out_rgb        // [B, H, W, 3]
+);
+
+
+void blend_background_color_backward(
+    DeviceTensor3D<float3> rgb,              // [B, H, W, 3] PRE-blend
+    DeviceTensor3D<float>  transmittance,    // [B, H, W, 1]
+    float3 background,                       // working color space
     float overexposure_weight,               // fused image-space reg, 0 = off
     DeviceTensor3D<float3> v_out_rgb,        // [B, H, W, 3]
     DeviceTensor3D<float3> v_rgb,            // [B, H, W, 3]
@@ -574,6 +599,7 @@ void compute_ppsip_regularization_forward(
     TorchTensorView ppisp_params,       // [B, PPISP_NUM_PARAMS]
     const std::array<float, (int)PPISPRegLossIndex::length> loss_weights_0,
     std::string param_type,
+    bool exposure_arithmetic_mean,      // log2(mean gain) = 0, else mean(log2 gain) = 0
     TorchTensorView losses,             // [PPISPRegLossIndex::length] (must be pre-zeroed)
     TorchTensorView raw_losses          // [B+1, RawPPISPRegLossIndex::length] (must be pre-zeroed)
 );
@@ -585,5 +611,6 @@ void compute_ppsip_regularization_backward(
     TorchTensorView raw_losses,         // [B+1, RawPPISPRegLossIndex::length]
     TorchTensorView v_losses,           // [PPISPRegLossIndex::length]
     std::string param_type,
+    bool exposure_arithmetic_mean,
     TorchTensorView v_ppisp_params      // [B, PPISP_NUM_PARAMS] (must be pre-zeroed)
 );

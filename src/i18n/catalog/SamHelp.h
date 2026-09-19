@@ -470,41 +470,52 @@ SS_MSG(trk_keep_prompted,
        "oluşturma hattının istediği budur"));
 
 SS_MSG(mask_dilate,
-    EN("grow every detection by this share of its own size before it joins the "
-       "mask, covering the rim of colour a tight outline leaves behind. 0 turns "
-       "the margin off"),
-    JA("マスクに加える前に、検出ごとに自身の大きさのこの割合だけ膨らませます。"
-       "輪郭がきつすぎて残る色の縁を覆うためです。0 で余白なし"),
-    ZH_HANS("在并入蒙版之前，把每个检测按自身尺寸的这个比例向外扩张，"
-            "用来盖住紧贴轮廓留下的一圈残色。填 0 关闭"),
-    ZH_HANT("在併入遮罩之前，把每個偵測按自身尺寸的這個比例向外擴張，"
-            "用來蓋住緊貼輪廓留下的一圈殘色。填 0 關閉"),
-    KO("마스크에 합치기 전에 각 검출을 자기 크기의 이 비율만큼 넓힙니다. 윤곽선이 "
-       "너무 딱 맞아 남는 테두리 색을 덮기 위해서입니다. 0이면 여백 없음"),
-    DE("jede Erkennung vor dem Zusammenfassen um diesen Anteil ihrer eigenen "
-       "Größe wachsen lassen, was den Farbsaum abdeckt, den eine zu enge Kontur "
-       "zurücklässt. 0 schaltet den Rand ab"),
-    FR("élargir chaque détection de cette fraction de sa propre taille avant de "
-       "la fondre dans le masque, ce qui couvre le liseré que laisse un contour "
-       "trop serré. 0 supprime la marge"),
-    ES("agrandar cada detección en esta fracción de su propio tamaño antes de "
-       "unirla a la máscara, lo que tapa el borde que deja un contorno "
-       "demasiado ceñido. 0 quita el margen"),
-    PT("aumentar cada detecção nesta fração do seu próprio tamanho antes de a "
-       "juntar à máscara, o que tapa a orla que um contorno demasiado justo "
-       "deixa. 0 desliga a margem"),
-    IT("ingrandire ogni rilevamento di questa frazione della propria dimensione "
-       "prima di unirlo alla maschera, il che copre il bordo che un contorno "
-       "troppo aderente lascia. 0 toglie il margine"),
-    NL("elke detectie met dit deel van haar eigen grootte laten groeien voordat "
-       "ze in het masker opgaat, wat de kleurrand dekt die een te strakke "
-       "omtrek achterlaat. 0 zet de marge uit"),
-    RU("увеличить каждое обнаружение на эту долю его собственного размера перед "
-       "объединением в маску: это закрывает кайму, которую оставляет слишком "
-       "плотный контур. 0 отключает поле"),
-    TR("her algılamayı maskeye katılmadan önce kendi boyutunun bu oranı kadar "
-       "büyütür; böylece fazla dar bir sınırın bıraktığı renk kenarı kapanır. "
-       "0 payı kapatır"));
+    EN("move every detection's outline by this share of its own size before it "
+       "joins the mask. Positive grows it, covering the rim of colour a tight "
+       "outline leaves behind; negative trims it back inside. 0 turns the "
+       "margin off"),
+    JA("マスクに加える前に、検出ごとに輪郭を自身の大きさのこの割合だけ動かします。"
+       "正なら外側へ広げて、輪郭がきつすぎて残る色の縁を覆います。負なら内側へ"
+       "削ります。0 で余白なし"),
+    ZH_HANS("在并入蒙版之前，把每个检测的轮廓按自身尺寸的这个比例移动。正值向外"
+            "扩张，用来盖住紧贴轮廓留下的一圈残色；负值向内收进去。填 0 关闭"),
+    ZH_HANT("在併入遮罩之前，把每個偵測的輪廓按自身尺寸的這個比例移動。正值向外"
+            "擴張，用來蓋住緊貼輪廓留下的一圈殘色；負值向內收進去。填 0 關閉"),
+    KO("마스크에 합치기 전에 각 검출의 윤곽선을 자기 크기의 이 비율만큼 옮깁니다. "
+       "양수면 바깥으로 넓혀 윤곽선이 너무 딱 맞아 남는 테두리 색을 덮고, 음수면 "
+       "안쪽으로 깎습니다. 0이면 여백 없음"),
+    DE("die Kontur jeder Erkennung vor dem Zusammenfassen um diesen Anteil "
+       "ihrer eigenen Größe verschieben. Positiv lässt sie wachsen und deckt "
+       "den Farbsaum ab, den eine zu enge Kontur zurücklässt; negativ trägt sie "
+       "nach innen ab. 0 schaltet den Rand ab"),
+    FR("déplacer le contour de chaque détection de cette fraction de sa propre "
+       "taille avant de la fondre dans le masque. Positif l'élargit et couvre "
+       "le liseré que laisse un contour trop serré ; négatif le rentre. 0 "
+       "supprime la marge"),
+    ES("mover el contorno de cada detección en esta fracción de su propio "
+       "tamaño antes de unirla a la máscara. En positivo lo agranda y tapa el "
+       "borde que deja un contorno demasiado ceñido; en negativo lo mete hacia "
+       "dentro. 0 quita el margen"),
+    PT("mover o contorno de cada detecção nesta fração do seu próprio tamanho "
+       "antes de a juntar à máscara. Positivo aumenta-o e tapa a orla que um "
+       "contorno demasiado justo deixa; negativo puxa-o para dentro. 0 desliga "
+       "a margem"),
+    IT("spostare il contorno di ogni rilevamento di questa frazione della "
+       "propria dimensione prima di unirlo alla maschera. Positivo lo ingrandisce "
+       "e copre il bordo che un contorno troppo aderente lascia; negativo lo "
+       "ritira all'interno. 0 toglie il margine"),
+    NL("de omtrek van elke detectie met dit deel van haar eigen grootte "
+       "verplaatsen voordat ze in het masker opgaat. Positief laat hem groeien "
+       "en dekt de kleurrand die een te strakke omtrek achterlaat; negatief "
+       "trekt hem naar binnen. 0 zet de marge uit"),
+    RU("сместить контур каждого обнаружения на эту долю его собственного "
+       "размера перед объединением в маску. Положительное расширяет его и "
+       "закрывает кайму, которую оставляет слишком плотный контур; "
+       "отрицательное втягивает внутрь. 0 отключает поле"),
+    TR("her algılamanın dış çizgisini maskeye katılmadan önce kendi boyutunun "
+       "bu oranı kadar kaydırır. Artı değer büyütür ve fazla dar bir sınırın "
+       "bıraktığı renk kenarını kapatır; eksi değer içeri çeker. 0 payı "
+       "kapatır"));
 
 SS_MSG(trk_overlay,
     EN("write a colour overlay instead"),
@@ -933,6 +944,69 @@ SS_MSG(xh_sync,
        "мгновения (одно окно резкости на все); кадры с одним именем тогда образуют риг"),
     TR("çok izli bir dosyayı adım adım birlikte çözerek her izin aynı anları tutmasını sağla "
        "(tüm izler için tek keskinlik penceresi); aynı adlı kareler böylece bir rig olur"));
+
+SS_MSG(xh_adaptive,
+    EN("space the kept frames by how much the view changes rather than by time: "
+       "more where the camera moves fast or passes close to something, fewer "
+       "where it turns on the spot. --skip then sets the average"),
+    JA("残すフレームの間隔を時間ではなく見えの変化量で決めます。速く動いたときや近くの物の"
+       "そばを通ったときは多く、その場で向きを変えただけのときは少なくなります。--skip は"
+       "平均値の指定になります"),
+    ZH_HANS("按画面变化量而不是按时间来安排保留的帧：相机移动快或贴近物体时多取，原地转动时"
+            "少取。--skip 此时表示平均值"),
+    ZH_HANT("依畫面變化量而非時間安排保留的影格：相機移動快或貼近物體時多取，原地轉動時少取。"
+            "--skip 此時表示平均值"),
+    KO("남길 프레임 간격을 시간이 아니라 시야가 바뀐 정도로 정합니다. 빠르게 움직이거나 "
+       "가까운 물체를 지날 때는 많이, 제자리에서 돌기만 할 때는 적게 남깁니다. --skip은 "
+       "평균값이 됩니다"),
+    DE("die behaltenen Bilder nach der Änderung des Blicks statt nach der Zeit verteilen: "
+       "mehr, wo die Kamera schnell fährt oder dicht an etwas vorbeikommt, weniger, wo sie "
+       "sich nur dreht. --skip gibt dann den Durchschnitt an"),
+    FR("espacer les images conservées selon le changement de vue plutôt que selon le temps : "
+       "davantage là où la caméra va vite ou frôle un objet, moins là où elle pivote sur "
+       "place. --skip donne alors la moyenne"),
+    ES("espaciar los fotogramas conservados según cuánto cambia la vista y no según el tiempo: "
+       "más donde la cámara va rápido o pasa cerca de algo, menos donde solo gira sobre sí "
+       "misma. --skip pasa a indicar el promedio"),
+    PT("espaçar os quadros guardados pela mudança da vista em vez do tempo: mais onde a câmara "
+       "anda depressa ou passa perto de algo, menos onde apenas gira no lugar. --skip passa a "
+       "indicar a média"),
+    IT("distanziare i fotogrammi tenuti in base a quanto cambia la vista anziché al tempo: di "
+       "più dove la camera va veloce o sfiora qualcosa, di meno dove ruota sul posto. --skip "
+       "indica allora la media"),
+    NL("de bewaarde beelden verdelen naar hoeveel het beeld verandert in plaats van naar tijd: "
+       "meer waar de camera snel gaat of vlak langs iets komt, minder waar hij alleen draait. "
+       "--skip geeft dan het gemiddelde"),
+    RU("располагать сохраняемые кадры по изменению вида, а не по времени: чаще там, где камера "
+       "идёт быстро или проходит близко к предмету, реже там, где она лишь поворачивается на "
+       "месте. --skip тогда задаёт среднее"),
+    TR("saklanan kareleri zamana göre değil görüntünün ne kadar değiştiğine göre yerleştir: "
+       "kamera hızlı giderken ya da bir şeyin yakınından geçerken daha sık, yerinde dönerken "
+       "daha seyrek. --skip böylece ortalamayı verir"));
+
+SS_MSG(xh_adaptive_range,
+    EN("how far the adaptive rate may stray from the average, either way "
+       "(default 4: a quarter of it to four times it)"),
+    JA("可変レートが平均からどれだけ離れてよいかです（既定 4: 平均の 1/4 から 4 倍まで）"),
+    ZH_HANS("自适应帧率相对平均值的上下浮动倍数（默认 4：平均值的 1/4 到 4 倍）"),
+    ZH_HANT("自適應影格率相對平均值的上下浮動倍數（預設 4：平均值的 1/4 到 4 倍）"),
+    KO("가변 프레임 속도가 평균에서 벗어날 수 있는 배수입니다(기본 4: 평균의 1/4에서 4배)"),
+    DE("wie weit die angepasste Rate nach beiden Seiten vom Durchschnitt abweichen darf "
+       "(Vorgabe 4: ein Viertel bis das Vierfache)"),
+    FR("de combien le débit adaptatif peut s'écarter de la moyenne, dans les deux sens "
+       "(4 par défaut : du quart au quadruple)"),
+    ES("cuánto puede alejarse la tasa adaptativa del promedio, en ambos sentidos "
+       "(4 por defecto: de la cuarta parte al cuádruple)"),
+    PT("quanto a taxa adaptativa pode afastar-se da média, nos dois sentidos "
+       "(4 por omissão: de um quarto ao quádruplo)"),
+    IT("di quanto la frequenza adattiva può scostarsi dalla media, in entrambi i sensi "
+       "(4 di default: da un quarto al quadruplo)"),
+    NL("hoever het aangepaste tempo van het gemiddelde mag afwijken, beide kanten op "
+       "(standaard 4: een kwart tot vier keer)"),
+    RU("насколько адаптивная частота может отходить от средней в обе стороны "
+       "(по умолчанию 4: от четверти до четырёхкратной)"),
+    TR("uyarlanan hızın ortalamadan iki yöne de ne kadar sapabileceği "
+       "(varsayılan 4: dörtte birinden dört katına)"));
 
 SS_MSG(xh_track,
     EN("video track to read; default is every track, written to <out>/cam0, "

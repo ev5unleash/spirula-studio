@@ -257,7 +257,7 @@ in registers, and measure on Apple either way.
 MoltenVK translates our SPIR-V to Metal Shading Language through
 SPIRV-Cross, and two of its habits turn correct SPIR-V into wrong or
 uncompilable MSL. Both are invisible on every other driver, and both were
-found the same way: `spirv-cross --msl --stage comp build/spirv/<blob>.spv`
+found the same way: `spirv-cross --msl --stage comp build_vulkan/spirv/<blob>.spv`
 prints exactly what the Metal compiler will see, so read that before
 guessing.
 
@@ -435,6 +435,7 @@ the engine level.
 - `kernels/PixelWiseRender.cpp` + `backend/vulkan/shaders/pixel_wise_render.slang`:
   the render-path PixelWise subset — `blend_background_forward`,
   `blend_background_noise_forward` (hash_uint3 ported bit-exact),
+  `blend_background_color_forward`,
   `rgb_to_srgb_forward`, `depth_to_normal_forward{,_tv}` (16x16 shared-mem
   apron tile as a flat 256-thread workgroup per the X-dim subgroup rule).
 - `kernels/Visualizer.cpp` + `backend/vulkan/shaders/visualizer.slang`: full
@@ -514,7 +515,7 @@ the engine level.
   randomness — parity compares only its deterministic count channel.
 - **Pixel-wise training + background-SH backward (phase 5, second slice)**:
   `kernels/PixelWiseTrain.cpp` + `pixel_wise_train.slang` implement the
-  blend/noise/srgb backwards, overexposure_grad_add, depth_to_normal_backward
+  blend/noise/color/srgb backwards, overexposure_grad_add, depth_to_normal_backward
   (16x16 tile apron + neighbor scatter), linear_depth_to_ray_depth_inplace,
   and color_shift_reg_step (ColorShiftReg.cu; shared-mem float atomics ->
   groupshared serial reduce + one portable atomic add per channel/block).

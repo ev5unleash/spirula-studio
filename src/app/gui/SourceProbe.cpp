@@ -26,10 +26,6 @@ SourceProbeInfo probe(const std::string& path, const std::string& ffmpeg_exe,
         out.video_tracks = (int)native_sizes.size();
         out.width = native_sizes[0].first;
         out.height = native_sizes[0].second;
-        if (is_pano360_path(path) && native_sizes.size() == 2 &&
-            native_sizes[0] == native_sizes[1])
-            app::eac360_detect(2, native_sizes[0].first, native_sizes[0].second,
-                               out.eac360);
     }
 #endif
     if (!cancel.load() && !have_native_metadata) {
@@ -38,11 +34,12 @@ SourceProbeInfo probe(const std::string& path, const std::string& ffmpeg_exe,
             out.width = facts.width;
             out.height = facts.height;
             out.video_tracks = (int)facts.tracks.size();
-            if (is_pano360_path(path) && facts.tracks.size() == 2 &&
-                facts.tracks[0] == facts.tracks[1])
-                app::eac360_detect(2, facts.tracks[0].first,
-                                   facts.tracks[0].second, out.eac360);
         }
+    }
+    if (!cancel.load() && out.video_tracks == 2 && is_pano360_path(path)) {
+        const Pano360Probe p = probe_pano360(ffmpeg_exe, path, cancel);
+        out.pano360 = p.layout;
+        out.pano360_unsupported = p.unsupported;
     }
     out.done = true;
     return out;

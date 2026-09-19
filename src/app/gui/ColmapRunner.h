@@ -77,6 +77,8 @@ struct ColmapJob {
     bool redo_masks = false;
     bool redo_model = false;             // reconstruct again over existing
                                          // frames, masks and features
+    bool settings_built_model = false;   // see SfmJob
+    bool mask_features = true;           // ... and so is this
     PhotoImport photo_import = PhotoImport::ConvertJpeg;  // see PrepJob
 
     // Canonical native selector for frame extraction and masking; external
@@ -109,6 +111,8 @@ struct ColmapJob {
 
     // Video extraction
     float video_fps = 2.0f;              // kept frames per second
+    bool adaptive_fps = false;           // see PrepJob
+    float adaptive_range = 4.0f;
     int sharp_window = 3;                // pick sharpest of N candidates (1 = off)
     app::Pano360Options pano;            // see PrepJob
     int max_frames = 100000;

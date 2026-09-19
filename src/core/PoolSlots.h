@@ -257,6 +257,7 @@ enum class SaveClass : uint8_t {
   X(EngBgSkyImage                  , "eng.bg_sky.image",                  Appearance, Never) \
   X(EngBgSkyRgbPost                , "eng.bg_sky.rgb_post",               Appearance, Never) \
   X(EngBgSkyVTsScratch             , "eng.bg_sky.v_Ts_scratch",           Appearance, Never) \
+  X(EngBgExponentByCam             , "eng.bg.exponent_by_cam",            Appearance, Never) \
   X(EngBgSkyVBg                    , "eng.bg_sky.v_bg",                   Appearance, Never) \
   X(EngBgSkyVSh                    , "eng.bg_sky.v_sh",                   Appearance, Never) \
   /* ---- PPISP ---- */ \
@@ -318,6 +319,7 @@ enum class SaveClass : uint8_t {
   X(DensifyWswrKeysOut             , "densify_wswr_keys_out",             Other    , Never) \
   X(DensifyWswrIndicesIn           , "densify_wswr_indices_in",           Other    , Never) \
   X(DensifyWswrIndicesOut          , "densify_wswr_indices_out",          Other    , Never) \
+  X(DensifyWswrEligible            , "densify_wswr_eligible",             Other    , Never) \
   X(DensifyRelocMask               , "densify_reloc_mask",                Other    , Never) \
   X(DensifyRelocCount              , "densify_reloc_count",               Other    , Never) \
   X(DensifyRelocDstIndices         , "densify_reloc_dst_indices",         Other    , Never) \

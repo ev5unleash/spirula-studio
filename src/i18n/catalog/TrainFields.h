@@ -692,35 +692,47 @@ SS_MSG(load_masks,
     RU("Использовать маски набора"),
     TR("Veri kümesinin maskelerini kullan"));
 SS_MSG(load_masks_help,
-    EN("Use the dataset's masks when they exist. What they then mean is set by "
+    EN("Use the dataset's masks when they exist, and the alpha channel of "
+       "images that have one. What they then mean is set by "
        "apply_loss_for_mask; turn off to train as if the dataset had none."),
-    JA("データセットにマスクがあれば使います。その意味は apply_loss_for_mask で"
-       "決まります。オフにするとマスクがないものとして学習します。"),
-    ZH_HANS("数据集里有蒙版时就使用它们。它们的含义由 apply_loss_for_mask 决定；"
-            "关掉就当作数据集没有蒙版来训练。"),
-    ZH_HANT("資料集裡有遮罩時就使用它們。它們的含意由 apply_loss_for_mask 決定；"
-            "關掉就當作資料集沒有遮罩來訓練。"),
-    KO("데이터셋에 마스크가 있으면 사용합니다. 그 의미는 apply_loss_for_mask가 "
-       "정하며, 끄면 마스크가 없는 데이터셋처럼 학습합니다."),
-    DE("Die Masken des Datensatzes verwenden, sofern vorhanden. Was sie bedeuten, "
-       "legt apply_loss_for_mask fest; abschalten trainiert wie ohne Masken."),
-    FR("Utiliser les masques du jeu de données lorsqu'ils existent. Ce qu'ils "
-       "signifient est fixé par apply_loss_for_mask ; décocher entraîne comme "
-       "si le jeu n'en avait pas."),
-    ES("Usar las máscaras del conjunto de datos cuando existan. Lo que significan "
-       "lo fija apply_loss_for_mask; desactive para entrenar como si no hubiera."),
-    PT("Usar as máscaras do conjunto de dados quando existirem. O que elas "
-       "significam é definido por apply_loss_for_mask; desligue para treinar "
-       "como se não houvesse nenhuma."),
-    IT("Usare le maschere del set di dati quando ci sono. Che cosa significhino "
-       "lo stabilisce apply_loss_for_mask; disattivare addestra come se non ce "
-       "ne fossero."),
-    NL("De maskers van de dataset gebruiken als die er zijn. Wat ze betekenen, "
-       "bepaalt apply_loss_for_mask; zet uit om te trainen alsof er geen zijn."),
-    RU("Использовать маски набора, если они есть. Что они означают, задаёт "
+    JA("データセットにマスクがあれば使います。アルファチャンネルのある画像は"
+       "それもマスクとして使います。その意味は apply_loss_for_mask で決まりま"
+       "す。オフにするとマスクがないものとして学習します。"),
+    ZH_HANS("数据集里有蒙版时就使用它们，带 Alpha 通道的图像也用该通道作蒙版。"
+            "它们的含义由 apply_loss_for_mask 决定；关掉就当作数据集没有蒙版"
+            "来训练。"),
+    ZH_HANT("資料集裡有遮罩時就使用它們，帶 Alpha 通道的影像也用該通道作遮罩。"
+            "它們的含意由 apply_loss_for_mask 決定；關掉就當作資料集沒有遮罩"
+            "來訓練。"),
+    KO("데이터셋에 마스크가 있으면 사용하며, 알파 채널이 있는 이미지는 그 채"
+       "널도 마스크로 씁니다. 그 의미는 apply_loss_for_mask가 정하며, 끄면 마"
+       "스크가 없는 데이터셋처럼 학습합니다."),
+    DE("Die Masken des Datensatzes verwenden, sofern vorhanden, dazu den "
+       "Alphakanal von Bildern, die einen haben. Was sie bedeuten, legt "
+       "apply_loss_for_mask fest; abschalten trainiert wie ohne Masken."),
+    FR("Utiliser les masques du jeu de données lorsqu'ils existent, ainsi que "
+       "le canal alpha des images qui en ont un. Ce qu'ils signifient est fixé "
+       "par apply_loss_for_mask ; décocher entraîne comme si le jeu n'en avait "
+       "pas."),
+    ES("Usar las máscaras del conjunto de datos cuando existan, y el canal "
+       "alfa de las imágenes que lo tengan. Lo que significan lo fija "
+       "apply_loss_for_mask; desactive para entrenar como si no hubiera."),
+    PT("Usar as máscaras do conjunto de dados quando existirem, e o canal alfa "
+       "das imagens que tiverem um. O que elas significam é definido por "
+       "apply_loss_for_mask; desligue para treinar como se não houvesse "
+       "nenhuma."),
+    IT("Usare le maschere del set di dati quando ci sono, e il canale alfa "
+       "delle immagini che ne hanno uno. Che cosa significhino lo stabilisce "
+       "apply_loss_for_mask; disattivare addestra come se non ce ne fossero."),
+    NL("De maskers van de dataset gebruiken als die er zijn, en het alfakanaal "
+       "van beelden die er een hebben. Wat ze betekenen, bepaalt "
+       "apply_loss_for_mask; zet uit om te trainen alsof er geen zijn."),
+    RU("Использовать маски набора, если они есть, а также альфа-канал "
+       "изображений, у которых он есть. Что они означают, задаёт "
        "apply_loss_for_mask; выключите, чтобы обучать как без масок."),
-    TR("Veri kümesinde maskeler varsa onları kullanır. Ne anlama geldiklerini "
-       "apply_loss_for_mask belirler; maskesiz eğitmek için kapatın."));
+    TR("Veri kümesinde maskeler varsa onları, alfa kanalı olan görüntülerde de "
+       "bu kanalı kullanır. Ne anlama geldiklerini apply_loss_for_mask "
+       "belirler; maskesiz eğitmek için kapatın."));
 
 SS_MSG(apply_loss_for_mask,
     EN("Train masked pixels as empty"), JA("マスク部分を空として学習"),
@@ -739,51 +751,76 @@ SS_MSG(apply_loss_for_mask_help,
     EN("Whether masked-out pixels are ignored or trained as empty space. Off "
        "ignores them, which is how you hide distractions such as people, cars, "
        "or the black area outside a fisheye circle. On trains them as empty, "
-       "which removes the background and leaves just the subject."),
-    JA("マスクされた画素を無視するか、空として学習するかを決めます。オフなら無"
-       "視され、通行人や車、魚眼の円外の黒い部分といった邪魔物を隠すのに使えま"
-       "す。オンなら空として学習され、背景が取り除かれて被写体だけが残ります。"),
+       "which removes the background and leaves just the subject. Left unset, "
+       "it is on when the only masks are the images' own alpha channel, and "
+       "off otherwise."),
+    JA("マスクされた画素を無視するか、空として学習するかを決めます。オフなら"
+       "無視され、通行人や車、魚眼の円外の黒い部分といった邪魔物を隠すのに使"
+       "えます。オンなら空として学習され、背景が取り除かれて被写体だけが残り"
+       "ます。未設定なら、マスクが画像自身のアルファチャンネルだけのときにオ"
+       "ン、それ以外はオフになります。"),
     ZH_HANS("被遮住的像素是忽略还是按空白训练。关闭时忽略它们，可用来隐藏行人、"
             "汽车、鱼眼圆外的黑边等干扰物。开启时按空白训练，会去掉背景，只留"
-            "下主体。"),
+            "下主体。未设置时，若蒙版只有图像自身的 Alpha 通道则开启，否则关"
+            "闭。"),
     ZH_HANT("被遮住的像素是忽略還是按空白訓練。關閉時忽略它們，可用來隱藏行人、"
             "汽車、魚眼圓外的黑邊等干擾物。開啟時按空白訓練，會去掉背景，只留"
-            "下主體。"),
-    KO("가려진 픽셀을 무시할지, 빈 공간으로 학습할지 정합니다. 끄면 무시하므로"
-       " 사람, 자동차, 어안 원 바깥의 검은 영역 같은 방해물을 가리는 데 쓸 수"
-       " 있습니다. 켜면 빈 곳으로 학습해 배경이 사라지고 피사체만 남습니다."),
-    DE("Ob maskierte Pixel ignoriert oder als leerer Raum trainiert werden. Aus "
-       "ignoriert sie, womit sich Störendes wie Passanten, Autos oder der schwarze "
-       "Bereich außerhalb des Fischaugenkreises ausblenden lässt. An trainiert "
-       "sie als leer, was den Hintergrund entfernt und nur das Motiv übrig lässt."),
-    FR("Les pixels masqués sont-ils ignorés ou entraînés comme du vide. Décoché, "
-       "ils sont ignorés, ce qui permet de cacher les gêneurs : passants, voitures, "
-       "ou la zone noire hors du cercle fisheye. Coché, ils sont entraînés comme "
-       "vides, ce qui supprime l'arrière-plan et ne laisse que le sujet."),
-    ES("Si los píxeles enmascarados se ignoran o se entrenan como espacio vacío. "
-       "Desactivado los ignora, que es como se ocultan elementos molestos: transeúntes, "
-       "coches o la zona negra fuera del círculo de ojo de pez. Activado los "
-       "entrena como vacíos, lo que elimina el fondo y deja solo el sujeto."),
+            "下主體。未設定時，若遮罩只有影像自身的 Alpha 通道則開啟，否則關"
+            "閉。"),
+    KO("가려진 픽셀을 무시할지, 빈 공간으로 학습할지 정합니다. 끄면 무시하므"
+       "로 사람, 자동차, 어안 원 바깥의 검은 영역 같은 방해물을 가리는 데 쓸 "
+       "수 있습니다. 켜면 빈 곳으로 학습해 배경이 사라지고 피사체만 남습니다."
+       " 설정하지 않으면 마스크가 이미지 자체의 알파 채널뿐일 때 켜지고, 그 "
+       "밖에는 꺼집니다."),
+    DE("Ob maskierte Pixel ignoriert oder als leerer Raum trainiert werden. "
+       "Aus ignoriert sie, womit sich Störendes wie Passanten, Autos oder der "
+       "schwarze Bereich außerhalb des Fischaugenkreises ausblenden lässt. An "
+       "trainiert sie als leer, was den Hintergrund entfernt und nur das Motiv "
+       "übrig lässt. Ungesetzt ist es an, wenn die einzigen Masken der "
+       "Alphakanal der Bilder selbst sind, sonst aus."),
+    FR("Les pixels masqués sont-ils ignorés ou entraînés comme du vide. "
+       "Décoché, ils sont ignorés, ce qui permet de cacher les gêneurs : "
+       "passants, voitures, ou la zone noire hors du cercle fisheye. Coché, "
+       "ils sont entraînés comme vides, ce qui supprime l'arrière-plan et ne "
+       "laisse que le sujet. Non défini, il est coché quand les seuls masques "
+       "sont le canal alpha des images elles-mêmes, décoché sinon."),
+    ES("Si los píxeles enmascarados se ignoran o se entrenan como espacio "
+       "vacío. Desactivado los ignora, que es como se ocultan elementos "
+       "molestos: transeúntes, coches o la zona negra fuera del círculo de ojo "
+       "de pez. Activado los entrena como vacíos, lo que elimina el fondo y "
+       "deja solo el sujeto. Sin definir, se activa cuando las únicas máscaras "
+       "son el canal alfa de las propias imágenes, y se desactiva en otro caso."),
     PT("Se os pixels mascarados são ignorados ou treinados como espaço vazio. "
-       "Desligado os ignora, que é como se escondem elementos indesejados: pessoas, "
-       "carros ou a área preta fora do círculo olho de peixe. Ligado os treina "
-       "como vazios, o que remove o fundo e deixa só o sujeito."),
+       "Desligado os ignora, que é como se escondem elementos indesejados: "
+       "pessoas, carros ou a área preta fora do círculo olho de peixe. Ligado "
+       "os treina como vazios, o que remove o fundo e deixa só o sujeito. Sem "
+       "valor definido, fica ligado quando as únicas máscaras são o canal alfa "
+       "das próprias imagens, e desligado caso contrário."),
     IT("Se i pixel mascherati vengono ignorati o addestrati come spazio vuoto. "
-       "Disattivato li ignora, ed è così che si nascondono gli elementi di disturbo: "
-       "passanti, automobili o l'area nera fuori dal cerchio fisheye. Attivato "
-       "li addestra come vuoti, il che rimuove lo sfondo e lascia solo il soggetto."),
-    NL("Of gemaskeerde pixels worden genegeerd of als lege ruimte getraind. Uit "
-       "negeert ze, waarmee je stoorelementen verbergt: voorbijgangers, auto's "
-       "of het zwarte gebied buiten de fisheye-cirkel. Aan traint ze als leeg, "
-       "waardoor de achtergrond verdwijnt en alleen het onderwerp overblijft."),
-    RU("Игнорировать закрытые маской пиксели или обучать их как пустоту. Выключено "
-       "— игнорирует; так скрывают помехи: прохожих, машины, чёрную область вне "
-       "круга фишая. Включено — обучает как пустоту, что убирает фон и оставляет "
-       "только объект."),
-    TR("Maskelenen piksellerin yok sayılması mı yoksa boş alan olarak eğitilmesi "
-       "mi. Kapalıyken yok sayılır; geçen insanlar, arabalar ya da balıkgözü "
-       "dairesinin dışındaki siyah alan gibi istenmeyenler böyle gizlenir. Açıkken "
-       "boş olarak eğitilir; arka plan kalkar ve yalnızca özne kalır."));
+       "Disattivato li ignora, ed è così che si nascondono gli elementi di "
+       "disturbo: passanti, automobili o l'area nera fuori dal cerchio "
+       "fisheye. Attivato li addestra come vuoti, il che rimuove lo sfondo e "
+       "lascia solo il soggetto. Se non impostato, è attivo quando le uniche "
+       "maschere sono il canale alfa delle immagini stesse, altrimenti è "
+       "disattivato."),
+    NL("Of gemaskeerde pixels worden genegeerd of als lege ruimte getraind. "
+       "Uit negeert ze, waarmee je stoorelementen verbergt: voorbijgangers, "
+       "auto's of het zwarte gebied buiten de fisheye-cirkel. Aan traint ze "
+       "als leeg, waardoor de achtergrond verdwijnt en alleen het onderwerp "
+       "overblijft. Niet ingesteld staat het aan als de enige maskers het "
+       "alfakanaal van de beelden zelf zijn, en anders uit."),
+    RU("Игнорировать закрытые маской пиксели или обучать их как пустоту. "
+       "Выключено — игнорирует; так скрывают помехи: прохожих, машины, чёрную "
+       "область вне круга фишая. Включено — обучает как пустоту, что убирает "
+       "фон и оставляет только объект. Если не задано, включено, когда "
+       "единственные маски — альфа-канал самих изображений, и выключено в "
+       "остальных случаях."),
+    TR("Maskelenen piksellerin yok sayılması mı yoksa boş alan olarak "
+       "eğitilmesi mi. Kapalıyken yok sayılır; geçen insanlar, arabalar ya da "
+       "balıkgözü dairesinin dışındaki siyah alan gibi istenmeyenler böyle "
+       "gizlenir. Açıkken boş olarak eğitilir; arka plan kalkar ve yalnızca "
+       "özne kalır. Ayarlanmazsa, tek maske görüntülerin kendi alfa kanalı "
+       "olduğunda açık, aksi hâlde kapalıdır."));
 
 SS_MSG(flip_mask,
     EN("Flip masks"), JA("マスクを反転"),
@@ -795,48 +832,64 @@ SS_MSG(flip_mask,
     NL("Maskers omkeren"), RU("Инвертировать маски"),
     TR("Maskeleri ters çevir"));
 SS_MSG(flip_mask_help,
-    EN("Swap what a mask keeps for what it hides. Masks here are white where the "
-       "image is kept; turn this on for masks that instead paint the region to "
-       "remove. Applied before the mask edge adjustment."),
-    JA("マスクが残す領域と隠す領域を入れ替えます。ここでのマスクは残す部分が白"
-       "です。取り除く領域を塗ったマスクではこれを有効にしてください。マスク境"
-       "界の調整より前に適用されます。"),
-    ZH_HANS("交换蒙版保留与隐藏的区域。这里的蒙版以白色表示保留的部分；若蒙版画"
-            "的是要去掉的区域，请打开此项。它在蒙版边缘调整之前生效。"),
-    ZH_HANT("交換遮罩保留與隱藏的區域。這裡的遮罩以白色表示保留的部分；若遮罩畫"
-            "的是要去掉的區域，請開啟此項。它在遮罩邊緣調整之前生效。"),
-    KO("마스크가 남기는 영역과 가리는 영역을 맞바꿉니다. 여기서 마스크는 남길 "
-       "부분이 흰색입니다. 지울 영역을 칠한 마스크라면 이 항목을 켜십시오. 마스크 "
-       "가장자리 조정보다 먼저 적용됩니다."),
-    DE("Vertauscht, was eine Maske behält, mit dem, was sie verbirgt. Masken sind "
-       "hier weiß, wo das Bild behalten wird; für Masken, die stattdessen den zu "
-       "entfernenden Bereich zeichnen, einschalten. Wirkt vor der "
-       "Maskenrand-Anpassung."),
+    EN("Swap what a mask keeps for what it hides. Masks here are white where "
+       "the image is kept; turn this on for masks that instead paint the "
+       "region to remove. Applied before the mask edge adjustment. Only mask "
+       "files are flipped, never an image's alpha channel."),
+    JA("マスクが残す領域と隠す領域を入れ替えます。ここでのマスクは残す部分が"
+       "白です。取り除く領域を塗ったマスクではこれを有効にしてください。マス"
+       "ク境界の調整より前に適用されます。反転するのはマスクファイルだけで、"
+       "画像のアルファチャンネルは反転しません。"),
+    ZH_HANS("交换蒙版保留与隐藏的区域。这里的蒙版以白色表示保留的部分；若蒙版"
+            "画的是要去掉的区域，请打开此项。它在蒙版边缘调整之前生效。只反转"
+            "蒙版文件，从不反转图像的 Alpha 通道。"),
+    ZH_HANT("交換遮罩保留與隱藏的區域。這裡的遮罩以白色表示保留的部分；若遮罩"
+            "畫的是要去掉的區域，請開啟此項。它在遮罩邊緣調整之前生效。只反轉"
+            "遮罩檔案，從不反轉影像的 Alpha 通道。"),
+    KO("마스크가 남기는 영역과 가리는 영역을 맞바꿉니다. 여기서 마스크는 남길"
+       " 부분이 흰색입니다. 지울 영역을 칠한 마스크라면 이 항목을 켜십시오. "
+       "마스크 가장자리 조정보다 먼저 적용됩니다. 반전하는 것은 마스크 파일뿐"
+       "이며, 이미지의 알파 채널은 반전하지 않습니다."),
+    DE("Vertauscht, was eine Maske behält, mit dem, was sie verbirgt. Masken "
+       "sind hier weiß, wo das Bild behalten wird; für Masken, die stattdessen "
+       "den zu entfernenden Bereich zeichnen, einschalten. Wirkt vor der "
+       "Maskenrand-Anpassung. Umgekehrt werden nur Maskendateien, nie der "
+       "Alphakanal eines Bildes."),
     FR("Échange ce qu'un masque garde et ce qu'il cache. Ici les masques sont "
        "blancs là où l'image est gardée ; activez ceci pour des masques qui "
-       "peignent au contraire la zone à retirer. Appliqué avant l'ajustement du "
-       "bord du masque."),
+       "peignent au contraire la zone à retirer. Appliqué avant l'ajustement "
+       "du bord du masque. Seuls les fichiers de masque sont inversés, jamais "
+       "le canal alpha d'une image."),
     ES("Intercambia lo que una máscara conserva con lo que oculta. Aquí las "
-       "máscaras son blancas donde se conserva la imagen; actívalo para máscaras "
-       "que en cambio pintan la zona a quitar. Se aplica antes del ajuste del "
-       "borde de la máscara."),
-    PT("Troca o que uma máscara mantém pelo que ela esconde. Aqui as máscaras são "
-       "brancas onde a imagem é mantida; ative isto para máscaras que pintam antes "
-       "a área a remover. Aplicado antes do ajuste da borda da máscara."),
+       "máscaras son blancas donde se conserva la imagen; actívalo para "
+       "máscaras que en cambio pintan la zona a quitar. Se aplica antes del "
+       "ajuste del borde de la máscara. Solo se invierten los archivos de "
+       "máscara, nunca el canal alfa de una imagen."),
+    PT("Troca o que uma máscara mantém pelo que ela esconde. Aqui as máscaras "
+       "são brancas onde a imagem é mantida; ative isto para máscaras que "
+       "pintam antes a área a remover. Aplicado antes do ajuste da borda da "
+       "máscara. Só os arquivos de máscara são invertidos, nunca o canal alfa "
+       "de uma imagem."),
     IT("Scambia ciò che una maschera conserva con ciò che nasconde. Qui le "
        "maschere sono bianche dove l'immagine viene conservata; attivalo per "
-       "maschere che dipingono invece l'area da togliere. Si applica prima della "
-       "regolazione del bordo della maschera."),
-    NL("Verwisselt wat een masker behoudt met wat het verbergt. Maskers zijn hier "
-       "wit waar het beeld behouden blijft; zet dit aan voor maskers die juist het "
-       "te verwijderen gebied inkleuren. Werkt vóór de aanpassing van de maskerrand."),
+       "maschere che dipingono invece l'area da togliere. Si applica prima "
+       "della regolazione del bordo della maschera. Si invertono solo i file "
+       "di maschera, mai il canale alfa di un'immagine."),
+    NL("Verwisselt wat een masker behoudt met wat het verbergt. Maskers zijn "
+       "hier wit waar het beeld behouden blijft; zet dit aan voor maskers die "
+       "juist het te verwijderen gebied inkleuren. Werkt vóór de aanpassing "
+       "van de maskerrand. Alleen maskerbestanden worden omgekeerd, nooit het "
+       "alfakanaal van een beeld."),
     RU("Меняет местами то, что маска сохраняет, и то, что она скрывает. Здесь "
        "маски белые там, где изображение сохраняется; включите это для масок, "
-       "которые вместо этого закрашивают удаляемую область. Действует до правки "
-       "края маски."),
-    TR("Bir maskenin koruduğu ile gizlediğini yer değiştirir. Buradaki maskeler "
-       "görüntünün korunduğu yerde beyazdır; bunun yerine kaldırılacak alanı "
-       "boyayan maskeler için açın. Maske kenarı ayarından önce uygulanır."));
+       "которые вместо этого закрашивают удаляемую область. Действует до "
+       "правки края маски. Инвертируются только файлы масок, но не альфа-канал "
+       "изображения."),
+    TR("Bir maskenin koruduğu ile gizlediğini yer değiştirir. Buradaki "
+       "maskeler görüntünün korunduğu yerde beyazdır; bunun yerine "
+       "kaldırılacak alanı boyayan maskeler için açın. Maske kenarı ayarından "
+       "önce uygulanır. Yalnızca maske dosyaları ters çevrilir, bir görüntünün "
+       "alfa kanalı asla."));
 
 SS_MSG(mask_boundary_offset,
     EN("Mask edge adjustment"), JA("マスク境界の調整"),
@@ -2514,99 +2567,161 @@ SS_MSG(background_mode,
     KO("배경"), DE("Hintergrund"), FR("Arrière-plan"), ES("Fondo"),
     PT("Fundo"), IT("Sfondo"), NL("Achtergrond"), RU("Фон"), TR("Arka plan"));
 SS_MSG(background_mode_help,
-    EN("What fills pixels no splat covers. `black` is the usual choice. "
-       "`noise` and `pseudorandom` both discourage half-transparent "
+    EN("What fills pixels no splat covers. `color` is the usual choice: one "
+       "colour you pick, and black costs nothing at all. `noise`, "
+       "`pseudorandom` and `random` all discourage half-transparent "
        "surfaces by making a pixel left uncovered land on a colour that "
-       "changes every step; pseudorandom draws vivid tiles rather than "
-       "per-pixel speckle, which the loss cannot average away, so it "
-       "presses harder. `sh` learns a skybox so distant background is "
-       "represented instead of ignored."),
-    JA("スプラットが覆わない画素を何で埋めるかです。`black"
-       "` が通常の選択です。`noise` と `"
-       "pseudorandom` はどちらも、覆われていない画"
+       "changes every step; they differ in how big the patches are, from "
+       "one pixel to vivid tiles to the whole frame, and the bigger ones "
+       "the loss cannot average away press harder. `sh` learns a skybox so "
+       "distant background is represented instead of ignored."),
+    JA("スプラットが覆わない画素を何で埋めるかです。`color"
+       "` が通常の選択で、選んだ一つの色を使います。黒なら何"
+       "の処理もしません。`noise` と `pseudorandom` と "
+       "`random` はどれも、覆われていない画"
        "素の色が毎ステップ変わるようにして半透明な面を抑えます。"
-       "`pseudorandom` は画素ごとの細かいノイズで"
-       "はなく鮮やかなタイルを使うため、損失に平均化されず効き目"
-       "が強くなります。`sh` は空を学習し、遠くの背景を無視"
+       "色のまとまりの大きさが違い、画素ごと、鮮やかなタイル、画"
+       "面全体と大きくなります。大きいほど損失に平均化されず効き"
+       "目が強くなります。`sh` は空を学習し、遠くの背景を無視"
        "せず表現します。"),
-    ZH_HANS("用什么填充没有泼溅覆盖的像素。`black` 是通常的选"
-            "择。`noise` 和 `pseudorandom` 都"
-            "通过让未覆盖像素的颜色每步都变来抑制半透明表面；`"
-            "pseudorandom` 用的是鲜艳的色块而不是逐像素"
-            "的细噪点，损失无法把它平均掉，所以压得更狠。`sh` 会"
+    ZH_HANS("用什么填充没有泼溅覆盖的像素。`color` 是通常的选"
+            "择，用你指定的一种颜色；黑色则完全不做处理。`noise`、"
+            "`pseudorandom` 和 `random` "
+            "都通过让未覆盖像素的颜色每步都变来抑制半透明表面；区别"
+            "在于色块的大小，从逐像素到鲜艳的色块再到整帧一色，越大"
+            "损失越难把它平均掉，压得也越狠。`sh` 会"
             "学习一个天空盒，让远处背景被表示而不是被忽略。"),
-    ZH_HANT("用什麼填充沒有潑濺覆蓋的像素。`black` 是通常的選"
-            "擇。`noise` 和 `pseudorandom` 都"
-            "透過讓未覆蓋像素的顏色每步都變來抑制半透明表面；`"
-            "pseudorandom` 用的是鮮豔的色塊而不是逐像素"
-            "的細雜訊，損失無法把它平均掉，所以壓得更狠。`sh` 會"
+    ZH_HANT("用什麼填充沒有潑濺覆蓋的像素。`color` 是通常的選"
+            "擇，用你指定的一種顏色；黑色則完全不做處理。`noise`、"
+            "`pseudorandom` 和 `random` "
+            "都透過讓未覆蓋像素的顏色每步都變來抑制半透明表面；區別"
+            "在於色塊的大小，從逐像素到鮮豔的色塊再到整幀一色，越大"
+            "損失越難把它平均掉，壓得也越狠。`sh` 會"
             "學習一個天空盒，讓遠處背景被表示而不是被忽略。"),
     KO("스플랫이 덮지 않은 픽셀을 무엇으로 채울지입니다. "
-       "`black`이 보통의 선택입니다. `noise`와"
-       " `pseudorandom`은 덮이지 않은 픽셀의 "
-       "색이 매 스텝 바뀌게 해서 반투명한 표면을 억제합니"
-       "다. `pseudorandom`은 픽셀 단위의 잔 "
-       "노이즈 대신 선명한 타일을 쓰므로 손실이 평균으로 "
-       "지워 버리지 못해 더 세게 누릅니다. `sh`는 스"
+       "`color`가 보통의 선택으로, 직접 고른 한 가지 "
+       "색을 씁니다. 검정이면 아무 처리도 하지 않습니다. "
+       "`noise`와 `pseudorandom`과 `random`은 "
+       "모두 덮이지 않은 픽셀의 색이 매 스텝 바뀌게 해서 "
+       "반투명한 표면을 억제합니다. 색 덩어리의 크기가 다"
+       "른데, 픽셀 단위에서 선명한 타일, 화면 전체 한 색"
+       "으로 커집니다. 클수록 손실이 평균으로 지워 버리지 "
+       "못해 더 세게 누릅니다. `sh`는 스"
        "카이박스를 학습해 먼 배경을 무시하지 않고 표현합니"
        "다."),
-    DE("Was Pixel füllt, die kein Splat bedeckt. `black` ist die übliche "
-       "Wahl. `noise` und `pseudorandom` entmutigen beide "
+    DE("Was Pixel füllt, die kein Splat bedeckt. `color` ist die übliche "
+       "Wahl: eine Farbe nach Wahl, und Schwarz kostet gar nichts. `noise`, "
+       "`pseudorandom` und `random` entmutigen alle "
        "halbdurchsichtige Flächen, indem ein unbedecktes Pixel auf einer "
-       "Farbe landet, die sich jeden Schritt ändert; pseudorandom zeichnet "
-       "kräftige Kacheln statt Sprenkel pro Pixel, die der Verlust nicht "
-       "wegmitteln kann, und drückt deshalb stärker. `sh` lernt eine "
+       "Farbe landet, die sich jeden Schritt ändert; sie unterscheiden sich "
+       "in der Fleckengröße -- pro Pixel, kräftige Kacheln oder eine Farbe "
+       "für das ganze Bild -- und je größer, desto weniger kann der Verlust "
+       "sie wegmitteln. `sh` lernt eine "
        "Skybox, damit ferner Hintergrund dargestellt statt ignoriert wird."),
-    FR("Ce qui remplit les pixels qu'aucun splat ne couvre. `black` est le "
-       "choix habituel. `noise` et `pseudorandom` découragent tous deux "
+    FR("Ce qui remplit les pixels qu'aucun splat ne couvre. `color` est le "
+       "choix habituel : une couleur de votre choix, et le noir ne coûte "
+       "rien. `noise`, `pseudorandom` et `random` découragent tous "
        "les surfaces à demi transparentes en faisant tomber un pixel non "
-       "couvert sur une couleur qui change à chaque étape ; pseudorandom "
-       "dessine des tuiles vives plutôt qu'un grain par pixel, que la "
-       "perte ne peut pas moyenner, et appuie donc plus fort. `sh` apprend "
+       "couvert sur une couleur qui change à chaque étape ; ils diffèrent "
+       "par la taille des taches -- par pixel, tuiles vives, ou une seule "
+       "couleur pour toute l'image -- et plus elles sont grandes, moins la "
+       "perte peut les moyenner. `sh` apprend "
        "une skybox pour que l'arrière-plan lointain soit représenté au "
        "lieu d'être ignoré."),
-    ES("Qué rellena los píxeles que ningún splat cubre. `black` es la "
-       "elección habitual. `noise` y `pseudorandom` desincentivan las "
+    ES("Qué rellena los píxeles que ningún splat cubre. `color` es la "
+       "elección habitual: un color que eliges, y el negro no cuesta nada. "
+       "`noise`, `pseudorandom` y `random` desincentivan las "
        "superficies semitransparentes haciendo que un píxel sin cubrir "
-       "caiga sobre un color que cambia en cada paso; pseudorandom dibuja "
-       "baldosas vivas en vez de grano por píxel, que la pérdida no puede "
-       "promediar, así que aprieta más. `sh` aprende un cielo para que el "
+       "caiga sobre un color que cambia en cada paso; se diferencian en el "
+       "tamaño de las manchas -- por píxel, baldosas vivas o un solo color "
+       "para todo el fotograma -- y cuanto mayores, menos puede "
+       "promediarlas la pérdida. `sh` aprende un cielo para que el "
        "fondo lejano quede representado en vez de ignorado."),
-    PT("O que preenche os pixels que nenhum splat cobre. `black` é a "
-       "escolha habitual. `noise` e `pseudorandom` desencorajam "
+    PT("O que preenche os pixels que nenhum splat cobre. `color` é a "
+       "escolha habitual: uma cor à sua escolha, e o preto não custa nada. "
+       "`noise`, `pseudorandom` e `random` desencorajam "
        "superfícies semitransparentes fazendo um pixel descoberto cair "
-       "sobre uma cor que muda a cada passo; pseudorandom desenha "
-       "ladrilhos vivos em vez de grão por pixel, que a perda não consegue "
-       "mediar, então aperta mais. `sh` aprende um céu para que o fundo "
+       "sobre uma cor que muda a cada passo; diferem no tamanho das manchas "
+       "-- por pixel, ladrilhos vivos ou uma só cor para o quadro inteiro "
+       "-- e quanto maiores, menos a perda consegue "
+       "mediá-las. `sh` aprende um céu para que o fundo "
        "distante seja representado em vez de ignorado."),
-    IT("Che cosa riempie i pixel che nessuno splat copre. `black` è la "
-       "scelta abituale. `noise` e `pseudorandom` scoraggiano entrambi le "
+    IT("Che cosa riempie i pixel che nessuno splat copre. `color` è la "
+       "scelta abituale: un colore a tua scelta, e il nero non costa nulla. "
+       "`noise`, `pseudorandom` e `random` scoraggiano le "
        "superfici semitrasparenti facendo cadere un pixel scoperto su un "
-       "colore che cambia a ogni passo; pseudorandom disegna piastrelle "
-       "vivaci invece di grana per pixel, che la perdita non può mediare, "
-       "e quindi preme di più. `sh` impara un cielo perché lo sfondo "
+       "colore che cambia a ogni passo; differiscono per la dimensione "
+       "delle chiazze -- per pixel, piastrelle vivaci o un solo colore per "
+       "l'intero fotogramma -- e più sono grandi, meno la perdita può "
+       "mediarle. `sh` impara un cielo perché lo sfondo "
        "lontano sia rappresentato invece che ignorato."),
-    NL("Wat pixels vult die geen splat bedekt. `black` is de gebruikelijke "
-       "keuze. `noise` en `pseudorandom` ontmoedigen allebei "
+    NL("Wat pixels vult die geen splat bedekt. `color` is de gebruikelijke "
+       "keuze: een kleur naar keuze, en zwart kost helemaal niets. `noise`, "
+       "`pseudorandom` en `random` ontmoedigen allemaal "
        "halfdoorzichtige oppervlakken doordat een onbedekte pixel op een "
-       "kleur valt die elke stap verandert; pseudorandom tekent felle "
-       "tegels in plaats van korrel per pixel, die het verlies niet kan "
-       "wegmiddelen, en drukt dus harder. `sh` leert een skybox zodat "
+       "kleur valt die elke stap verandert; ze verschillen in de grootte "
+       "van de vlekken -- per pixel, felle tegels of één kleur voor het "
+       "hele beeld -- en hoe groter, hoe minder het verlies ze kan "
+       "wegmiddelen. `sh` leert een skybox zodat "
        "verre achtergrond wordt weergegeven in plaats van genegeerd."),
-    RU("Чем заполняются пиксели, которые не покрыл ни один сплат. `black` "
-       "— обычный выбор. `noise` и `pseudorandom` оба мешают "
+    RU("Чем заполняются пиксели, которые не покрыл ни один сплат. `color` "
+       "— обычный выбор: любой заданный вами цвет, а чёрный не стоит "
+       "ничего. `noise`, `pseudorandom` и `random` мешают "
        "полупрозрачным поверхностям: непокрытый пиксель попадает на цвет, "
-       "меняющийся каждый шаг; pseudorandom рисует яркие плитки, а не "
-       "зерно на каждый пиксель, и функция потерь не может их усреднить, "
-       "поэтому давит сильнее. `sh` обучает скайбокс, чтобы дальний фон "
+       "меняющийся каждый шаг; они отличаются размером пятен — на пиксель, "
+       "яркие плитки или один цвет на весь кадр — и чем крупнее, тем хуже "
+       "функция потерь их усредняет. `sh` обучает скайбокс, чтобы дальний фон "
        "был представлен, а не проигнорирован."),
-    TR("Hiçbir splat'ın kaplamadığı pikselleri neyin dolduracağı. `black` "
-       "alışılmış seçimdir. `noise` ve `pseudorandom` yarı saydam "
+    TR("Hiçbir splat'ın kaplamadığı pikselleri neyin dolduracağı. `color` "
+       "alışılmış seçimdir: seçtiğiniz bir renk, siyah ise hiçbir şeye mal "
+       "olmaz. `noise`, `pseudorandom` ve `random` yarı saydam "
        "yüzeyleri caydırır: kaplanmamış bir piksel her adımda değişen bir "
-       "renge düşer; pseudorandom piksel başına tanecik yerine canlı "
-       "karolar çizer, kayıp bunları ortalamayla silemez, bu yüzden daha "
-       "çok bastırır. `sh` bir gökyüzü öğrenir, böylece uzak arka plan yok "
+       "renge düşer; benek boyutlarıyla ayrılırlar -- piksel başına, canlı "
+       "karolar ya da tüm kare için tek renk -- ve büyüdükçe kayıp bunları "
+       "ortalamayla silemez. `sh` bir gökyüzü öğrenir, böylece uzak arka plan yok "
        "sayılmak yerine temsil edilir."));
+
+SS_MSG(background_color,
+    EN("Background color"), JA("背景色"), ZH_HANS("背景颜色"),
+    ZH_HANT("背景顏色"), KO("배경색"), DE("Hintergrundfarbe"),
+    FR("Couleur de l'arrière-plan"), ES("Color del fondo"),
+    PT("Cor do fundo"), IT("Colore dello sfondo"), NL("Achtergrondkleur"),
+    RU("Цвет фона"), TR("Arka plan rengi"));
+SS_MSG(background_color_help,
+    EN("The color that fills pixels no splat covers. Black is free -- it skips "
+       "the blend entirely. Only used with the `color` background."),
+    JA("スプラットが覆わない画素を埋める色です。黒なら合成そのものを省くので費"
+       "用はかかりません。背景が `color` のときだけ使われます。"),
+    ZH_HANS("用来填充没有泼溅覆盖的像素的颜色。黑色是免费的，会整个跳过混合。"
+            "仅在背景为 `color` 时使用。"),
+    ZH_HANT("用來填充沒有潑濺覆蓋的像素的顏色。黑色是免費的，會整個跳過混合。"
+            "僅在背景為 `color` 時使用。"),
+    KO("스플랫이 덮지 않은 픽셀을 채우는 색입니다. 검정은 합성 자체를 건너뛰므"
+       "로 비용이 없습니다. 배경이 `color`일 때만 쓰입니다."),
+    DE("Die Farbe, die Pixel füllt, die kein Splat bedeckt. Schwarz ist "
+       "kostenlos -- es überspringt die Überblendung ganz. Wird nur mit dem "
+       "Hintergrund `color` verwendet."),
+    FR("La couleur qui remplit les pixels qu'aucun splat ne couvre. Le noir "
+       "est gratuit : il saute entièrement le mélange. Utilisée "
+       "uniquement avec l'arrière-plan `color`."),
+    ES("El color que rellena los píxeles que ningún splat cubre. El negro es "
+       "gratis: se salta la mezcla por completo. Solo se usa "
+       "con el fondo `color`."),
+    PT("A cor que preenche os pixels que nenhum splat cobre. O preto é de "
+       "graça: ignora a mistura por completo. Só é usada com o "
+       "fundo `color`."),
+    IT("Il colore che riempie i pixel che nessuno splat copre. Il nero è "
+       "gratis: salta del tutto la fusione. Usato solo con "
+       "lo sfondo `color`."),
+    NL("De kleur die pixels vult die geen splat bedekt. Zwart is gratis: het "
+       "slaat het mengen helemaal over. Wordt alleen bij "
+       "achtergrond `color` gebruikt."),
+    RU("Цвет, которым заполняются пиксели, не покрытые ни одним сплатом. "
+       "Чёрный бесплатен: смешивание пропускается целиком. "
+       "Используется только с фоном `color`."),
+    TR("Hiçbir splat'ın kaplamadığı pikselleri dolduran renk. Siyah "
+       "bedavadır: harmanlamayı tümüyle atlar. Yalnızca "
+       "`color` arka planıyla kullanılır."));
 
 SS_MSG(background_sh_degree,
     EN("Skybox detail"), JA("スカイボックスの細かさ"), ZH_HANS("天空盒细节"),
@@ -2654,30 +2769,98 @@ SS_MSG(background_noise_warmup,
     TR("Arka plan gürültüsü ısınması"));
 SS_MSG(background_noise_warmup_help,
     EN("How many steps the background noise takes to reach full strength. Only "
-       "used with the `noise` background."),
-    JA("背景ノイズが最大の強さになるまでのステップ数です。背景が `noise` のと"
-       "きだけ使われます。"),
-    ZH_HANS("背景噪声达到最大强度所需的步数。仅在背景为 `noise` 时使用。"),
-    ZH_HANT("背景雜訊達到最大強度所需的步數。僅在背景為 `noise` 時使用。"),
-    KO("배경 노이즈가 최대 세기에 이르기까지의 스텝 수입니다. 배경이 `noise`일"
-       " 때만 쓰입니다."),
+       "used with the `noise` / `pseudorandom` / `random` backgrounds."),
+    JA("背景ノイズが最大の強さになるまでのステップ数です。背景が `noise` / "
+       "`pseudorandom` / `random` のときだけ使われます。"),
+    ZH_HANS("背景噪声达到最大强度所需的步数。仅在背景为 `noise` / "
+            "`pseudorandom` / `random` 时使用。"),
+    ZH_HANT("背景雜訊達到最大強度所需的步數。僅在背景為 `noise` / "
+            "`pseudorandom` / `random` 時使用。"),
+    KO("배경 노이즈가 최대 세기에 이르기까지의 스텝 수입니다. 배경이 `noise` /"
+       " `pseudorandom` / `random`일 때만 쓰입니다."),
     DE("Wie viele Schritte das Hintergrundrauschen braucht, um volle Stärke zu "
-       "erreichen. Wird nur mit dem Hintergrund `noise` verwendet."),
+       "erreichen. Wird nur mit den Hintergründen `noise` / `pseudorandom` / "
+       "`random` verwendet."),
     FR("Combien d'étapes le bruit de fond met à atteindre sa pleine force. Utilisé "
-       "uniquement avec l'arrière-plan `noise`."),
+       "uniquement avec les arrière-plans `noise` / `pseudorandom` / `random`."),
     ES("Cuántos pasos tarda el ruido de fondo en alcanzar toda su fuerza. Solo "
-       "se usa con el fondo `noise`."),
+       "se usa con los fondos `noise` / `pseudorandom` / `random`."),
     PT("Quantos passos o ruído de fundo leva para atingir força total. Só é usado "
-       "com o fundo `noise`."),
+       "com os fundos `noise` / `pseudorandom` / `random`."),
     IT("Quanti passi impiega il rumore di fondo a raggiungere la piena forza. "
-       "Usato solo con lo sfondo `noise`."),
+       "Usato solo con gli sfondi `noise` / `pseudorandom` / `random`."),
     NL("Hoeveel stappen de achtergrondruis nodig heeft om op volle sterkte te "
-       "komen. Wordt alleen bij achtergrond `noise` gebruikt."),
+       "komen. Wordt alleen bij de achtergronden `noise` / `pseudorandom` / "
+       "`random` gebruikt."),
     RU("За сколько шагов фоновый шум набирает полную силу. Используется только "
-       "с фоном `noise`."),
+       "с фонами `noise` / `pseudorandom` / `random`."),
     TR("Arka plan gürültüsünün tam güce ulaşması için gereken adım sayısı. Yalnızca "
-       "`noise` arka planıyla kullanılır."));
+       "`noise` / `pseudorandom` / `random` arka planlarıyla kullanılır."));
 
+SS_MSG(background_match_luminance,
+    EN("Match background to image brightness"), JA("背景を画像の明るさに合わせる"),
+    ZH_HANS("背景亮度匹配图像"), ZH_HANT("背景亮度匹配圖像"),
+    KO("배경을 이미지 밝기에 맞춤"), DE("Hintergrund an Bildhelligkeit anpassen"),
+    FR("Adapter le fond à la luminosité de l'image"),
+    ES("Ajustar el fondo al brillo de la imagen"),
+    PT("Ajustar o fundo ao brilho da imagem"),
+    IT("Adatta lo sfondo alla luminosità dell'immagine"),
+    NL("Achtergrond aan beeldhelderheid aanpassen"),
+    RU("Подогнать фон под яркость снимка"),
+    TR("Arka planı görüntü parlaklığına uydur"));
+SS_MSG(background_match_luminance_help,
+    EN("Raises the randomized background to a power so its typical brightness lands "
+       "on each photo's mean brightness, corrected for that photo's exposure. Keeps "
+       "dark scenes from being plugged with haze to hide a bright background. Only "
+       "used with the `noise` / `pseudorandom` / `random` backgrounds."),
+    JA("ランダム背景をべき乗して、その典型的な明るさが各写真の平均の明るさ（露出補正済み）"
+       "になるようにします。暗いシーンで明るい背景を隠すためにもやが詰め込まれるのを防ぎ"
+       "ます。背景が `noise` / `pseudorandom` / `random` のときだけ使われます。"),
+    ZH_HANS("对随机背景做幂运算，使其典型亮度落在每张照片的平均亮度上（已按该照片的曝光"
+            "校正）。避免暗场景为了遮住明亮背景而被雾状泼溅填满。仅在背景为 `noise` / "
+            "`pseudorandom` / `random` 时使用。"),
+    ZH_HANT("對隨機背景做冪運算，使其典型亮度落在每張照片的平均亮度上（已按該照片的曝光"
+            "校正）。避免暗場景為了遮住明亮背景而被霧狀潑濺填滿。僅在背景為 `noise` / "
+            "`pseudorandom` / `random` 時使用。"),
+    KO("무작위 배경을 거듭제곱하여 그 전형적인 밝기가 각 사진의 평균 밝기(노출 보정 후)에 "
+       "오도록 합니다. 어두운 장면이 밝은 배경을 가리려고 안개로 채워지는 것을 막습니다. "
+       "배경이 `noise` / `pseudorandom` / `random`일 때만 쓰입니다."),
+    DE("Potenziert den zufälligen Hintergrund, sodass seine typische Helligkeit auf "
+       "der mittleren Helligkeit jedes Fotos landet, um dessen Belichtung korrigiert. "
+       "Verhindert, dass dunkle Szenen mit Dunst zugesetzt werden, um einen hellen "
+       "Hintergrund zu verbergen. Wird nur mit den Hintergründen `noise` / "
+       "`pseudorandom` / `random` verwendet."),
+    FR("Élève le fond aléatoire à une puissance pour que sa luminosité typique tombe "
+       "sur la luminosité moyenne de chaque photo, corrigée de son exposition. Évite "
+       "que les scènes sombres se remplissent de brume pour cacher un fond clair. "
+       "Utilisé uniquement avec les arrière-plans `noise` / `pseudorandom` / `random`."),
+    ES("Eleva el fondo aleatorio a una potencia para que su brillo típico coincida con "
+       "el brillo medio de cada foto, corregido por su exposición. Evita que las "
+       "escenas oscuras se rellenen de neblina para ocultar un fondo claro. Solo se "
+       "usa con los fondos `noise` / `pseudorandom` / `random`."),
+    PT("Eleva o fundo aleatório a uma potência para que o seu brilho típico caia no "
+       "brilho médio de cada foto, corrigido pela exposição dela. Evita que cenas "
+       "escuras sejam preenchidas com névoa para esconder um fundo claro. Só é usado "
+       "com os fundos `noise` / `pseudorandom` / `random`."),
+    IT("Eleva lo sfondo casuale a una potenza così che la sua luminosità tipica "
+       "coincida con la luminosità media di ogni foto, corretta per la sua "
+       "esposizione. Evita che le scene scure si riempiano di foschia per nascondere "
+       "uno sfondo chiaro. Usato solo con gli sfondi `noise` / `pseudorandom` / "
+       "`random`."),
+    NL("Verheft de willekeurige achtergrond tot een macht zodat zijn typische "
+       "helderheid op de gemiddelde helderheid van elke foto valt, gecorrigeerd voor "
+       "de belichting ervan. Voorkomt dat donkere scènes met waas worden dichtgezet om "
+       "een lichte achtergrond te verbergen. Wordt alleen bij de achtergronden "
+       "`noise` / `pseudorandom` / `random` gebruikt."),
+    RU("Возводит случайный фон в степень, чтобы его типичная яркость совпала со "
+       "средней яркостью каждого снимка с поправкой на его экспозицию. Не даёт тёмным "
+       "сценам забиваться дымкой, скрывающей яркий фон. Используется только с фонами "
+       "`noise` / `pseudorandom` / `random`."),
+    TR("Rastgele arka planı bir kuvvete yükselterek tipik parlaklığının her "
+       "fotoğrafın pozlamasına göre düzeltilmiş ortalama parlaklığına denk gelmesini "
+       "sağlar. Karanlık sahnelerin parlak bir arka planı gizlemek için pusla "
+       "dolmasını önler. Yalnızca `noise` / `pseudorandom` / `random` arka "
+       "planlarıyla kullanılır."));
 SS_MSG(background_noise_pre_warmup,
     EN("Initial background noise"), JA("最初の背景ノイズの強さ"),
     ZH_HANS("初始背景噪声强度"), ZH_HANT("初始背景雜訊強度"),
@@ -2835,6 +3018,406 @@ SS_MSG(suppress_initial_scales_help,
        "им раздуваться в крупные «летающие» артефакты над пустотой."),
     TR("Nokta bulutunun seyrek olduğu yerlerde splat'ları küçük başlatır. Boşluğun "
        "üstünde büyük uçuşan artıklara şişmelerini önler."));
+
+SS_MSG(random_init,
+    EN("Random seed points"),
+    JA("ランダムな初期点"),
+    ZH_HANS("随机初始点"),
+    ZH_HANT("隨機初始點"),
+    KO("무작위 초기 점"),
+    DE("Zufällige Startpunkte"),
+    FR("Points de départ aléatoires"),
+    ES("Puntos iniciales aleatorios"),
+    PT("Pontos iniciais aleatórios"),
+    IT("Punti iniziali casuali"),
+    NL("Willekeurige beginpunten"),
+    RU("Случайные начальные точки"),
+    TR("Rastgele başlangıç noktaları"));
+
+SS_MSG(random_init_help,
+    EN("Whether the splats start from points drawn at random around the "
+       "cameras instead of the dataset's point cloud. `auto` draws them only "
+       "when the dataset has no point cloud, or an empty one; `always` draws "
+       "them even when it has one; `never` stops with an error instead."),
+    JA("スプラットの初期位置を、データセットの点群ではなくカメラの周りにラン"
+       "ダムに置いた点にするかどうかです。`auto` はデータセットに点群がないか"
+       "空のときだけ置き、`always` は点群があっても置き、`never` は置かずにエ"
+       "ラーで止まります。"),
+    ZH_HANS("泼溅是否从相机周围随机抽取的点开始，而不是从数据集的点云开始。`a"
+            "uto` 只在数据集没有点云或点云为空时抽取；`always` 即使有点云也抽"
+            "取；`never` 则报错停止。"),
+    ZH_HANT("潑濺是否從相機周圍隨機抽取的點開始，而不是從資料集的點雲開始。`a"
+            "uto` 只在資料集沒有點雲或點雲為空時抽取；`always` 即使有點雲也抽"
+            "取；`never` 則報錯停止。"),
+    KO("스플랫을 데이터셋의 점군 대신 카메라 주변에 무작위로 뽑은 점에서 시작"
+       "할지 정합니다. `auto`는 데이터셋에 점군이 없거나 비어 있을 때만 뽑고,"
+       " `always`는 점군이 있어도 뽑으며, `never`는 뽑지 않고 오류로 멈춥니다"
+       "."),
+    DE("Ob die Splats statt von der Punktwolke des Datensatzes von zufällig um "
+       "die Kameras gezogenen Punkten ausgehen. `auto` zieht sie nur, wenn der "
+       "Datensatz keine oder eine leere Punktwolke hat; `always` auch dann, "
+       "wenn er eine hat; `never` bricht stattdessen mit einem Fehler ab."),
+    FR("Les splats partent-ils de points tirés au hasard autour des caméras "
+       "plutôt que du nuage de points du jeu de données. `auto` ne les tire "
+       "que si le jeu n'a pas de nuage de points, ou un nuage vide ; `always` "
+       "les tire même s'il en a un ; `never` s'arrête sur une erreur à la "
+       "place."),
+    ES("Si los splats parten de puntos sorteados al azar alrededor de las "
+       "cámaras en lugar de la nube de puntos del conjunto. `auto` solo los "
+       "sortea cuando el conjunto no tiene nube de puntos o la tiene vacía; "
+       "`always` los sortea aunque la tenga; `never` se detiene con un error."),
+    PT("Se os splats partem de pontos sorteados ao redor das câmeras em vez da "
+       "nuvem de pontos do conjunto. `auto` só os sorteia quando o conjunto "
+       "não tem nuvem de pontos ou a tem vazia; `always` sorteia mesmo quando "
+       "tem; `never` para com um erro."),
+    IT("Se gli splat partono da punti estratti a caso attorno alle camere "
+       "invece che dalla nuvola di punti del set di dati. `auto` li estrae "
+       "solo quando il set non ha una nuvola di punti o ce l'ha vuota; "
+       "`always` li estrae anche quando ce l'ha; `never` si ferma con un "
+       "errore."),
+    NL("Of de splats beginnen bij punten die willekeurig rond de camera's "
+       "worden getrokken in plaats van bij de puntenwolk van de dataset. "
+       "`auto` trekt ze alleen als de dataset geen of een lege puntenwolk "
+       "heeft; `always` ook als hij er een heeft; `never` stopt in plaats "
+       "daarvan met een fout."),
+    RU("Начинать ли сплаты со случайных точек вокруг камер вместо облака точек "
+       "набора. `auto` создаёт их, только если облака точек нет или оно "
+       "пустое; `always` — даже если оно есть; `never` вместо этого "
+       "останавливается с ошибкой."),
+    TR("Splatların veri kümesinin nokta bulutu yerine kameraların çevresinde "
+       "rastgele çekilen noktalardan başlayıp başlamayacağı. `auto` yalnızca "
+       "veri kümesinde nokta bulutu yoksa ya da boşsa çeker; `always` olsa "
+       "bile çeker; `never` bunun yerine hatayla durur."));
+
+SS_MSG(random_init_fraction,
+    EN("Random seed count"),
+    JA("ランダム初期点の数"),
+    ZH_HANS("随机初始点数量"),
+    ZH_HANT("隨機初始點數量"),
+    KO("무작위 초기 점 수"),
+    DE("Anzahl zufälliger Startpunkte"),
+    FR("Nombre de points de départ aléatoires"),
+    ES("Número de puntos iniciales aleatorios"),
+    PT("Número de pontos iniciais aleatórios"),
+    IT("Numero di punti iniziali casuali"),
+    NL("Aantal willekeurige beginpunten"),
+    RU("Число случайных начальных точек"),
+    TR("Rastgele başlangıç noktası sayısı"));
+
+SS_MSG(random_init_fraction_help,
+    EN("How many points random_init draws, as a share of cap_max: 0.1 of a "
+       "million is a hundred thousand."),
+    JA("random_init が置く点の数を cap_max に対する割合で指定します。100 万の"
+       " 0.1 なら 10 万点です。"),
+    ZH_HANS("random_init 抽取的点数，按 cap_max 的比例计：一百万的 0.1 就是十"
+            "万个。"),
+    ZH_HANT("random_init 抽取的點數，按 cap_max 的比例計：一百萬的 0.1 就是十"
+            "萬個。"),
+    KO("random_init이 뽑는 점의 수를 cap_max에 대한 비율로 정합니다. 100만의 "
+       "0.1이면 10만 개입니다."),
+    DE("Wie viele Punkte random_init zieht, als Anteil von cap_max: 0.1 von "
+       "einer Million sind hunderttausend."),
+    FR("Nombre de points que tire random_init, en part de cap_max : 0.1 d'un "
+       "million font cent mille."),
+    ES("Cuántos puntos sortea random_init, como fracción de cap_max: 0.1 de un "
+       "millón son cien mil."),
+    PT("Quantos pontos random_init sorteia, como fração de cap_max: 0.1 de um "
+       "milhão são cem mil."),
+    IT("Quanti punti estrae random_init, come quota di cap_max: 0.1 di un "
+       "milione fa centomila."),
+    NL("Hoeveel punten random_init trekt, als aandeel van cap_max: 0.1 van een "
+       "miljoen is honderdduizend."),
+    RU("Сколько точек создаёт random_init, в долях cap_max: 0.1 от миллиона — "
+       "сто тысяч."),
+    TR("random_init'in çektiği nokta sayısı, cap_max'in payı olarak: bir "
+       "milyonun 0.1'i yüz bindir."));
+
+SS_MSG(random_init_distribution,
+    EN("Random seed distribution"),
+    JA("ランダム初期点の分布"),
+    ZH_HANS("随机初始点分布"),
+    ZH_HANT("隨機初始點分布"),
+    KO("무작위 초기 점 분포"),
+    DE("Verteilung der zufälligen Startpunkte"),
+    FR("Répartition des points de départ aléatoires"),
+    ES("Distribución de los puntos iniciales aleatorios"),
+    PT("Distribuição dos pontos iniciais aleatórios"),
+    IT("Distribuzione dei punti iniziali casuali"),
+    NL("Verdeling van de willekeurige beginpunten"),
+    RU("Распределение случайных начальных точек"),
+    TR("Rastgele başlangıç noktalarının dağılımı"));
+
+SS_MSG(random_init_distribution_help,
+    EN("What the random seed points are drawn from. isotropic-gaussian is "
+       "round; anisotropic-gaussian follows the cameras' spread along each of "
+       "its principal axes; ellipsoid and box fill a solid ellipsoid or an "
+       "oriented box evenly, sized to the same spread. Cameras all at one "
+       "height have no vertical spread, which flattens every shape but the "
+       "isotropic one."),
+    JA("ランダム初期点をどの分布から取るかです。isotropic-gaussian は等方的な"
+       "球状、anisotropic-gaussian はカメラの広がりの主軸ごとの大きさに従いま"
+       "す。ellipsoid と box は同じ広がりに合わせた楕円体または向き付きの箱の"
+       "中に一様に置きます。カメラがすべて同じ高さにあると上下の広がりがなく、"
+       "等方的なもの以外は平たくなります。"),
+    ZH_HANS("随机初始点从什么分布中抽取。isotropic-gaussian 是各向同性的圆形"
+            "分布；anisotropic-gaussian 沿相机分布的各个主轴跟随其范围；ellip"
+            "soid 和 box 在按同样范围确定大小的实心椭球或定向长方体内均匀填充。"
+            "相机都在同一高度时没有竖直方向的范围，除各向同性以外的形状都会被"
+            "压扁。"),
+    ZH_HANT("隨機初始點從什麼分布中抽取。isotropic-gaussian 是各向同性的圓形"
+            "分布；anisotropic-gaussian 沿相機分布的各個主軸跟隨其範圍；ellip"
+            "soid 和 box 在按同樣範圍決定大小的實心橢球或定向長方體內均勻填充。"
+            "相機都在同一高度時沒有垂直方向的範圍，除各向同性以外的形狀都會被"
+            "壓扁。"),
+    KO("무작위 초기 점을 어떤 분포에서 뽑을지 정합니다. isotropic-gaussian은 "
+       "둥근 분포이고, anisotropic-gaussian은 카메라 분포의 주축마다 그 퍼짐"
+       "을 따릅니다. ellipsoid와 box는 같은 퍼짐에 맞춘 속이 찬 타원체나 방향"
+       "이 있는 상자를 고르게 채웁니다. 카메라가 모두 같은 높이에 있으면 수직"
+       " 퍼짐이 없어 등방성 분포 말고는 모두 납작해집니다."),
+    DE("Woraus die zufälligen Startpunkte gezogen werden. isotropic-gaussian "
+       "ist rund; anisotropic-gaussian folgt der Streuung der Kameras entlang "
+       "jeder ihrer Hauptachsen; ellipsoid und box füllen gleichmäßig ein "
+       "volles Ellipsoid oder einen ausgerichteten Quader, auf dieselbe "
+       "Streuung bemessen. Stehen alle Kameras auf einer Höhe, fehlt die "
+       "senkrechte Streuung, und jede Form außer der isotropen wird flach."),
+    FR("La loi d'où sont tirés les points de départ aléatoires. "
+       "isotropic-gaussian est ronde ; anisotropic-gaussian suit l'étalement "
+       "des caméras le long de chacun de ses axes principaux ; ellipsoid et "
+       "box remplissent uniformément un ellipsoïde plein ou une boîte "
+       "orientée, dimensionnés sur le même étalement. Des caméras toutes à la "
+       "même hauteur n'ont aucun étalement vertical, ce qui aplatit toutes les "
+       "formes sauf l'isotrope."),
+    ES("De qué se sortean los puntos iniciales aleatorios. isotropic-gaussian "
+       "es redonda; anisotropic-gaussian sigue la dispersión de las cámaras a "
+       "lo largo de cada uno de sus ejes principales; ellipsoid y box llenan "
+       "de manera uniforme un elipsoide macizo o una caja orientada, "
+       "dimensionados con esa misma dispersión. Unas cámaras todas a la misma "
+       "altura no tienen dispersión vertical, lo que aplana toda forma salvo "
+       "la isótropa."),
+    PT("De onde os pontos iniciais aleatórios são sorteados. "
+       "isotropic-gaussian é redonda; anisotropic-gaussian segue a dispersão "
+       "das câmeras ao longo de cada um dos seus eixos principais; ellipsoid e "
+       "box preenchem por igual um elipsoide sólido ou uma caixa orientada, "
+       "dimensionados com a mesma dispersão. Câmeras todas na mesma altura não "
+       "têm dispersão vertical, o que achata toda forma exceto a isotrópica."),
+    IT("Da che cosa si estraggono i punti iniziali casuali. isotropic-gaussian "
+       "è rotonda; anisotropic-gaussian segue la dispersione delle camere "
+       "lungo ciascuno dei suoi assi principali; ellipsoid e box riempiono in "
+       "modo uniforme un ellissoide pieno o una scatola orientata, "
+       "dimensionati sulla stessa dispersione. Camere tutte alla stessa "
+       "altezza non hanno dispersione verticale, il che appiattisce ogni forma "
+       "tranne quella isotropa."),
+    NL("Waaruit de willekeurige beginpunten worden getrokken. "
+       "isotropic-gaussian is rond; anisotropic-gaussian volgt de spreiding "
+       "van de camera's langs elk van haar hoofdassen; ellipsoid en box vullen "
+       "gelijkmatig een massieve ellipsoïde of een gerichte doos, op dezelfde "
+       "spreiding afgemeten. Camera's die allemaal op één hoogte staan hebben "
+       "geen verticale spreiding, en dan wordt elke vorm behalve de isotrope "
+       "plat."),
+    RU("Из какого распределения берутся случайные начальные точки. "
+       "isotropic-gaussian — круглое; anisotropic-gaussian следует разбросу "
+       "камер вдоль каждой из его главных осей; ellipsoid и box равномерно "
+       "заполняют сплошной эллипсоид или ориентированный параллелепипед того "
+       "же разброса. Если все камеры на одной высоте, вертикального разброса "
+       "нет, и все формы, кроме изотропной, становятся плоскими."),
+    TR("Rastgele başlangıç noktalarının hangi dağılımdan çekileceği. "
+       "isotropic-gaussian yuvarlaktır; anisotropic-gaussian kameraların "
+       "yayılımını her bir ana ekseni boyunca izler; ellipsoid ve box aynı "
+       "yayılıma göre boyutlanan dolu bir elipsoidi ya da yönlü bir kutuyu "
+       "eşit biçimde doldurur. Kameraların hepsi aynı yükseklikteyse dikey "
+       "yayılım olmaz ve izotropik olan dışında her şekil yassılaşır."));
+
+SS_MSG(random_init_center,
+    EN("Random seed center"),
+    JA("ランダム初期点の中心"),
+    ZH_HANS("随机初始点中心"),
+    ZH_HANT("隨機初始點中心"),
+    KO("무작위 초기 점 중심"),
+    DE("Mitte der zufälligen Startpunkte"),
+    FR("Centre des points de départ aléatoires"),
+    ES("Centro de los puntos iniciales aleatorios"),
+    PT("Centro dos pontos iniciais aleatórios"),
+    IT("Centro dei punti iniziali casuali"),
+    NL("Midden van de willekeurige beginpunten"),
+    RU("Центр случайных начальных точек"),
+    TR("Rastgele başlangıç noktalarının merkezi"));
+
+SS_MSG(random_init_center_help,
+    EN("Where the random seed points are centred: the median, the mean or the "
+       "focus of the camera positions (the point their optical axes converge "
+       "on), or the origin of the dataset's own frame. camera-focus suits a "
+       "capture that circles an object."),
+    JA("ランダム初期点の中心です。カメラ位置の中央値・平均・注視点（光軸が集"
+       "まる点）、またはデータセット自身の座標の原点から選びます。物体の周り"
+       "を回る撮影には camera-focus が向きます。"),
+    ZH_HANS("随机初始点的中心：相机位置的中位数、平均或注视点（各光轴汇聚的点），"
+            "或数据集自身坐标系的原点。绕物体一周的拍摄适合 camera-focus。"),
+    ZH_HANT("隨機初始點的中心：相機位置的中位數、平均或注視點（各光軸匯聚的點），"
+            "或資料集自身座標系的原點。繞物體一周的拍攝適合 camera-focus。"),
+    KO("무작위 초기 점의 중심입니다. 카메라 위치의 중앙값, 평균, 주시점(광축"
+       "이 모이는 점) 또는 데이터셋 자체 좌표계의 원점 중에서 고릅니다. 물체 "
+       "주위를 도는 촬영에는 camera-focus가 맞습니다."),
+    DE("Wo die zufälligen Startpunkte zentriert werden: Median, Mittelwert "
+       "oder Fokus der Kamerapositionen (der Punkt, auf den ihre optischen "
+       "Achsen zulaufen), oder der Ursprung des eigenen Koordinatensystems des "
+       "Datensatzes. camera-focus passt zu einer Aufnahme, die ein Objekt "
+       "umkreist."),
+    FR("Où sont centrés les points de départ aléatoires : médiane, moyenne ou "
+       "point de convergence des positions de caméra (là où leurs axes "
+       "optiques se rejoignent), ou origine du repère propre au jeu de "
+       "données. camera-focus convient à une prise qui tourne autour d'un "
+       "objet."),
+    ES("Dónde se centran los puntos iniciales aleatorios: la mediana, la media "
+       "o el foco de las posiciones de cámara (el punto al que convergen sus "
+       "ejes ópticos), o el origen del sistema propio del conjunto. "
+       "camera-focus conviene a una captura que rodea un objeto."),
+    PT("Onde os pontos iniciais aleatórios são centrados: a mediana, a média "
+       "ou o foco das posições das câmeras (o ponto para onde convergem os "
+       "seus eixos ópticos), ou a origem do sistema próprio do conjunto. "
+       "camera-focus serve a uma captura que circunda um objeto."),
+    IT("Dove sono centrati i punti iniziali casuali: mediana, media o fuoco "
+       "delle posizioni delle camere (il punto verso cui convergono i loro "
+       "assi ottici), oppure l'origine del sistema proprio del set di dati. "
+       "camera-focus si addice a una ripresa che gira attorno a un oggetto."),
+    NL("Waar de willekeurige beginpunten gecentreerd worden: de mediaan, het "
+       "gemiddelde of het focuspunt van de cameraposities (waar hun optische "
+       "assen samenkomen), of de oorsprong van het eigen assenstelsel van de "
+       "dataset. camera-focus past bij een opname die rond een object draait."),
+    RU("Где центрируются случайные начальные точки: медиана, среднее или фокус "
+       "положений камер (точка, где сходятся их оптические оси), либо начало "
+       "собственной системы координат набора. Для съёмки по кругу вокруг "
+       "объекта подходит camera-focus."),
+    TR("Rastgele başlangıç noktalarının nereye ortalanacağı: kamera "
+       "konumlarının ortancası, ortalaması ya da odağı (optik eksenlerinin "
+       "buluştuğu nokta) veya veri kümesinin kendi koordinat sisteminin "
+       "başlangıcı. Bir nesnenin çevresinde dönen çekime camera-focus uyar."));
+
+SS_MSG(random_init_spread,
+    EN("Random seed spread measure"),
+    JA("ランダム初期点の広がりの測り方"),
+    ZH_HANS("随机初始点范围的度量"),
+    ZH_HANT("隨機初始點範圍的度量"),
+    KO("무작위 초기 점 퍼짐 측정"),
+    DE("Maß der Streuung der Startpunkte"),
+    FR("Mesure de l'étalement des points de départ"),
+    ES("Medida de la dispersión de los puntos iniciales"),
+    PT("Medida da dispersão dos pontos iniciais"),
+    IT("Misura della dispersione dei punti iniziali"),
+    NL("Maat voor de spreiding van de beginpunten"),
+    RU("Мера разброса начальных точек"),
+    TR("Başlangıç noktası yayılımının ölçüsü"));
+
+SS_MSG(random_init_spread_help,
+    EN("How the cameras' spread about the centre is measured: the median or "
+       "the mean of their squared distances along each axis. The median "
+       "ignores a few cameras far from the rest."),
+    JA("中心からのカメラの広がりの測り方です。各軸に沿った距離の 2 乗の中央値"
+       "か平均を使います。中央値は他から離れた少数のカメラを無視します。"),
+    ZH_HANS("如何度量相机相对于中心的范围：取沿各轴距离平方的中位数或平均值。"
+            "中位数会忽略少数远离其他相机的相机。"),
+    ZH_HANT("如何度量相機相對於中心的範圍：取沿各軸距離平方的中位數或平均值。"
+            "中位數會忽略少數遠離其他相機的相機。"),
+    KO("중심에 대한 카메라의 퍼짐을 재는 방법입니다. 각 축을 따른 거리 제곱의"
+       " 중앙값이나 평균을 씁니다. 중앙값은 나머지와 멀리 떨어진 몇몇 카메라"
+       "를 무시합니다."),
+    DE("Wie die Streuung der Kameras um die Mitte gemessen wird: Median oder "
+       "Mittelwert ihrer quadrierten Abstände entlang jeder Achse. Der Median "
+       "übergeht ein paar Kameras, die weit von den übrigen entfernt sind."),
+    FR("Comment se mesure l'étalement des caméras autour du centre : médiane "
+       "ou moyenne de leurs distances au carré le long de chaque axe. La "
+       "médiane ignore quelques caméras éloignées des autres."),
+    ES("Cómo se mide la dispersión de las cámaras respecto al centro: la "
+       "mediana o la media de sus distancias al cuadrado a lo largo de cada "
+       "eje. La mediana ignora unas pocas cámaras alejadas del resto."),
+    PT("Como se mede a dispersão das câmeras em torno do centro: a mediana ou "
+       "a média das suas distâncias ao quadrado ao longo de cada eixo. A "
+       "mediana ignora umas poucas câmeras longe das demais."),
+    IT("Come si misura la dispersione delle camere attorno al centro: mediana "
+       "o media delle loro distanze al quadrato lungo ciascun asse. La mediana "
+       "ignora poche camere lontane dalle altre."),
+    NL("Hoe de spreiding van de camera's rond het midden wordt gemeten: de "
+       "mediaan of het gemiddelde van hun gekwadrateerde afstanden langs elke "
+       "as. De mediaan negeert een paar camera's die ver van de rest staan."),
+    RU("Как измеряется разброс камер вокруг центра: медиана или среднее "
+       "квадратов их расстояний вдоль каждой оси. Медиана не замечает "
+       "нескольких камер, далёких от остальных."),
+    TR("Kameraların merkez çevresindeki yayılımının nasıl ölçüleceği: her "
+       "eksen boyunca uzaklıklarının karelerinin ortancası ya da ortalaması. "
+       "Ortanca, diğerlerinden uzakta kalan birkaç kamerayı yok sayar."));
+
+SS_MSG(random_init_std,
+    EN("Random seed standard deviation"),
+    JA("ランダム初期点の標準偏差"),
+    ZH_HANS("随机初始点标准差"),
+    ZH_HANT("隨機初始點標準差"),
+    KO("무작위 초기 점 표준편차"),
+    DE("Standardabweichung der Startpunkte"),
+    FR("Écart type des points de départ aléatoires"),
+    ES("Desviación típica de los puntos iniciales aleatorios"),
+    PT("Desvio padrão dos pontos iniciais aleatórios"),
+    IT("Deviazione standard dei punti iniziali casuali"),
+    NL("Standaardafwijking van de willekeurige beginpunten"),
+    RU("Стандартное отклонение начальных точек"),
+    TR("Rastgele başlangıç noktalarının standart sapması"));
+
+SS_MSG(random_init_std_help,
+    EN("The standard deviation of the random seed points, in units of the "
+       "cameras' measured spread. Below 1 packs them inside the camera "
+       "positions, which suits an object the cameras circle; above 1 spreads "
+       "them past the cameras, which suits a scene the cameras stand inside."),
+    JA("ランダム初期点の標準偏差を、測ったカメラの広がりを単位として指定しま"
+       "す。1 未満ならカメラ位置の内側に集まり、カメラが周りを回る物体に向き"
+       "ます。1 を超えるとカメラより外まで広がり、カメラがその中に立つシーン"
+       "に向きます。"),
+    ZH_HANS("随机初始点的标准差，以测得的相机范围为单位。小于 1 时点集中在相"
+            "机位置以内，适合相机环绕的物体；大于 1 时点散到相机之外，适合相"
+            "机身处其中的场景。"),
+    ZH_HANT("隨機初始點的標準差，以測得的相機範圍為單位。小於 1 時點集中在相"
+            "機位置以內，適合相機環繞的物體；大於 1 時點散到相機之外，適合相"
+            "機身處其中的場景。"),
+    KO("무작위 초기 점의 표준편차를 측정한 카메라 퍼짐을 단위로 정합니다. 1보"
+       "다 작으면 카메라 위치 안쪽에 모여 카메라가 둘러싼 물체에 맞고, 1보다 "
+       "크면 카메라 너머까지 퍼져 카메라가 그 안에 서 있는 장면에 맞습니다."),
+    DE("Die Standardabweichung der zufälligen Startpunkte, in Einheiten der "
+       "gemessenen Streuung der Kameras. Unter 1 liegen sie innerhalb der "
+       "Kamerapositionen, passend für ein Objekt, das die Kameras umkreisen; "
+       "über 1 reichen sie über die Kameras hinaus, passend für eine Szene, in "
+       "der die Kameras stehen."),
+    FR("L'écart type des points de départ aléatoires, en unités de l'étalement "
+       "mesuré des caméras. En dessous de 1, ils se serrent à l'intérieur des "
+       "positions de caméra, ce qui convient à un objet autour duquel tournent "
+       "les caméras ; au-dessus de 1, ils s'étendent au-delà des caméras, ce "
+       "qui convient à une scène au milieu de laquelle elles se tiennent."),
+    ES("La desviación típica de los puntos iniciales aleatorios, en unidades "
+       "de la dispersión medida de las cámaras. Por debajo de 1 se concentran "
+       "dentro de las posiciones de cámara, lo que conviene a un objeto que "
+       "las cámaras rodean; por encima de 1 se extienden más allá de las "
+       "cámaras, lo que conviene a una escena dentro de la cual están."),
+    PT("O desvio padrão dos pontos iniciais aleatórios, em unidades da "
+       "dispersão medida das câmeras. Abaixo de 1 eles se concentram dentro "
+       "das posições das câmeras, o que serve a um objeto que as câmeras "
+       "circundam; acima de 1 se espalham além das câmeras, o que serve a uma "
+       "cena dentro da qual elas estão."),
+    IT("La deviazione standard dei punti iniziali casuali, in unità della "
+       "dispersione misurata delle camere. Sotto 1 si raccolgono dentro le "
+       "posizioni delle camere, adatto a un oggetto attorno a cui girano le "
+       "camere; sopra 1 si allargano oltre le camere, adatto a una scena in "
+       "cui le camere stanno dentro."),
+    NL("De standaardafwijking van de willekeurige beginpunten, in eenheden van "
+       "de gemeten spreiding van de camera's. Onder 1 liggen ze binnen de "
+       "cameraposities, wat past bij een object waar de camera's omheen "
+       "draaien; boven 1 reiken ze voorbij de camera's, wat past bij een scène "
+       "waar de camera's middenin staan."),
+    RU("Стандартное отклонение случайных начальных точек в единицах "
+       "измеренного разброса камер. Меньше 1 — точки собираются внутри "
+       "положений камер, что подходит для объекта, вокруг которого ходят "
+       "камеры; больше 1 — выходят за камеры, что подходит для сцены, внутри "
+       "которой они стоят."),
+    TR("Rastgele başlangıç noktalarının standart sapması, kameraların ölçülen "
+       "yayılımı biriminde. 1'in altında noktalar kamera konumlarının içinde "
+       "toplanır; bu, kameraların çevresinde döndüğü bir nesneye uyar. 1'in "
+       "üstünde kameraların ötesine yayılır; bu, kameraların içinde durduğu "
+       "bir sahneye uyar."));
 
 SS_MSG(use_camera_optimizer,
     EN("Refine camera poses"), JA("カメラ位置を微調整"),
@@ -5325,73 +5908,86 @@ SS_MSG(loss_saturation_threshold_help,
        "ikisi de kırpılmıştır, oradaki hata gerçek değildir. Negatif (varsayılan) "
        "her pikseli tutar."));
 
-SS_MSG(normalize_loss_by_luminance,
-    EN("Scale color error by brightness"), JA("明るさで色の誤差を調整"),
-    ZH_HANS("按亮度缩放颜色误差"), ZH_HANT("依亮度縮放顏色誤差"),
-    KO("밝기로 색 오차 조정"),
-    DE("Farbfehler nach Helligkeit skalieren"),
-    FR("Mettre l'erreur de couleur à l'échelle de la luminosité"),
-    ES("Escalar el error de color según el brillo"),
-    PT("Escalar o erro de cor pelo brilho"),
-    IT("Scalare l'errore di colore con la luminosità"),
-    NL("Kleurfout schalen met de helderheid"),
-    RU("Масштабировать ошибку цвета по яркости"),
-    TR("Renk hatasını parlaklığa göre ölçekle"));
-SS_MSG(normalize_loss_by_luminance_help,
-    EN("Scales the color-error weights (L1, L2 and SSIM) by twice the mean "
-       "brightness of the photo, measured in sRGB, so a dark capture counts for "
-       "as much as a bright one. It is meant for training in linear light, where "
+SS_MSG(loss_luminance_normalization,
+    EN("Brightness normalization of color error"), JA("色の誤差の明るさ正規化"),
+    ZH_HANS("颜色误差的亮度归一化"), ZH_HANT("顏色誤差的亮度正規化"),
+    KO("색 오차의 밝기 정규화"),
+    DE("Helligkeitsnormierung des Farbfehlers"),
+    FR("Normalisation de l'erreur de couleur par la luminosité"),
+    ES("Normalización del error de color por el brillo"),
+    PT("Normalização do erro de cor pelo brilho"),
+    IT("Normalizzazione dell'errore di colore per luminosità"),
+    NL("Helderheidsnormalisatie van de kleurfout"),
+    RU("Нормировка ошибки цвета по яркости"),
+    TR("Renk hatasının parlaklık normalizasyonu"));
+SS_MSG(loss_luminance_normalization_help,
+    EN("Divides the color-error weights (L1, L2 and SSIM) by twice the photo's "
+       "mean brightness, measured in sRGB, raised to this power: 0 leaves them "
+       "alone, 1 makes a dark capture count for as much as a bright one, and "
+       "values in between soften that. Meant for training in linear light, where "
        "the display curve already makes a dark pixel push harder."),
     JA("色の誤差の重み（L1, L2, SSIM）を, sRGB で測った写真の平均的な明るさの二"
-       "倍で調整します。暗い写真も明るい写真と同じだけ効くようになります。線形"
-       "の光での学習を想定しています。そこでは表示曲線のせいで暗い画素のほうが"
-       "強く効いてしまいます。"),
-    ZH_HANS("把颜色误差的权重（L1、L2 和 SSIM）乘以照片在 sRGB 下平均亮度的两"
-            "倍，让偏暗的照片和明亮的照片起同样的作用。它是为线性光下的训练准备"
-            "的：在那里显示曲线本来就让暗像素推得更用力。"),
-    ZH_HANT("把顏色誤差的權重（L1、L2 和 SSIM）乘以照片在 sRGB 下平均亮度的兩"
-            "倍，讓偏暗的照片和明亮的照片起同樣的作用。它是為線性光下的訓練準備"
-            "的：在那裡顯示曲線本來就讓暗像素推得更用力。"),
-    KO("색 오차 가중치(L1, L2, SSIM)에 sRGB로 잰 사진의 평균 밝기의 두 배를 곱"
-       "합니다. 어두운 사진도 밝은 사진만큼 힘을 냅니다. 선형 광에서 학습할 때"
-       "를 위한 것으로, 거기서는 표시 곡선 때문에 어두운 픽셀이 더 세게 밀어붙"
-       "입니다."),
-    DE("Skaliert die Gewichte des Farbfehlers (L1, L2 und SSIM) mit der "
-       "doppelten mittleren Helligkeit des Fotos, gemessen in sRGB, sodass eine "
-       "dunkle Aufnahme so viel zählt wie eine helle. Gedacht für das Training "
-       "in linearem Licht, wo die Anzeigekurve ein dunkles Pixel ohnehin stärker "
-       "drücken lässt."),
-    FR("Met les poids de l'erreur de couleur (L1, L2 et SSIM) à l'échelle du "
-       "double de la luminosité moyenne de la photo, mesurée en sRGB, pour qu'une "
-       "prise sombre compte autant qu'une prise claire. Prévu pour "
-       "l'entraînement en lumière linéaire, où la courbe d'affichage fait déjà "
-       "pousser un pixel sombre plus fort."),
-    ES("Escala los pesos del error de color (L1, L2 y SSIM) por el doble del "
-       "brillo medio de la foto, medido en sRGB, para que una toma oscura cuente "
-       "tanto como una clara. Está pensado para el entrenamiento en luz lineal, "
-       "donde la curva de pantalla ya hace que un píxel oscuro empuje más fuerte."),
-    PT("Escala os pesos do erro de cor (L1, L2 e SSIM) pelo dobro do brilho "
-       "médio da foto, medido em sRGB, para que uma captura escura conte tanto "
-       "quanto uma clara. Destina-se ao treino em luz linear, onde a curva de "
-       "exibição já faz um pixel escuro empurrar com mais força."),
-    IT("Scala i pesi dell'errore di colore (L1, L2 e SSIM) per il doppio della "
-       "luminosità media della foto, misurata in sRGB, così uno scatto scuro "
-       "conta quanto uno chiaro. È pensato per l'addestramento in luce lineare, "
-       "dove la curva di visualizzazione fa già spingere di più un pixel scuro."),
-    NL("Schaalt de gewichten van de kleurfout (L1, L2 en SSIM) met tweemaal de "
-       "gemiddelde helderheid van de foto, gemeten in sRGB, zodat een donkere "
-       "opname net zo zwaar telt als een lichte. Bedoeld voor training in "
-       "lineair licht, waar de weergavecurve een donkere pixel toch al harder "
+       "倍のこの値乗で割ります。0 では何もせず, 1 では暗い写真も明るい写真と同"
+       "じだけ効き, その間の値ではそれを弱めます。線形の光での学習を想定してい"
+       "ます。そこでは表示曲線のせいで暗い画素のほうが強く効いてしまいます。"),
+    ZH_HANS("把颜色误差的权重（L1、L2 和 SSIM）除以照片在 sRGB 下平均亮度两倍的"
+            "此值次幂：0 不做处理，1 让偏暗的照片和明亮的照片起同样的作用，中间"
+            "的值则减弱这种效果。它是为线性光下的训练准备的：在那里显示曲线本来"
+            "就让暗像素推得更用力。"),
+    ZH_HANT("把顏色誤差的權重（L1、L2 和 SSIM）除以照片在 sRGB 下平均亮度兩倍的"
+            "此值次冪：0 不做處理，1 讓偏暗的照片和明亮的照片起同樣的作用，中間"
+            "的值則減弱這種效果。它是為線性光下的訓練準備的：在那裡顯示曲線本來"
+            "就讓暗像素推得更用力。"),
+    KO("색 오차 가중치(L1, L2, SSIM)를 sRGB로 잰 사진의 평균 밝기의 두 배를 이 "
+       "값으로 거듭제곱한 수로 나눕니다. 0은 아무것도 하지 않고, 1은 어두운 사진"
+       "도 밝은 사진만큼 힘을 내게 하며, 그 사이 값은 이를 완화합니다. 선형 광에"
+       "서 학습할 때를 위한 것으로, 거기서는 표시 곡선 때문에 어두운 픽셀이 더 "
+       "세게 밀어붙입니다."),
+    DE("Teilt die Gewichte des Farbfehlers (L1, L2 und SSIM) durch die doppelte "
+       "mittlere Helligkeit des Fotos, gemessen in sRGB, hoch diesen Wert: 0 lässt "
+       "sie unverändert, 1 lässt eine dunkle Aufnahme so viel zählen wie eine "
+       "helle, Werte dazwischen mildern das. Gedacht für das Training in linearem "
+       "Licht, wo die Anzeigekurve ein dunkles Pixel ohnehin stärker drücken "
+       "lässt."),
+    FR("Divise les poids de l'erreur de couleur (L1, L2 et SSIM) par le double de "
+       "la luminosité moyenne de la photo, mesurée en sRGB, élevé à cette "
+       "puissance : 0 ne change rien, 1 fait compter une prise sombre autant "
+       "qu'une prise claire, et les valeurs intermédiaires adoucissent cela. Prévu "
+       "pour l'entraînement en lumière linéaire, où la courbe d'affichage fait "
+       "déjà pousser un pixel sombre plus fort."),
+    ES("Divide los pesos del error de color (L1, L2 y SSIM) por el doble del "
+       "brillo medio de la foto, medido en sRGB, elevado a esta potencia: 0 no "
+       "cambia nada, 1 hace que una toma oscura cuente tanto como una clara, y los "
+       "valores intermedios lo suavizan. Está pensado para el entrenamiento en luz "
+       "lineal, donde la curva de pantalla ya hace que un píxel oscuro empuje más "
+       "fuerte."),
+    PT("Divide os pesos do erro de cor (L1, L2 e SSIM) pelo dobro do brilho médio "
+       "da foto, medido em sRGB, elevado a esta potência: 0 não muda nada, 1 faz "
+       "uma captura escura contar tanto quanto uma clara, e valores intermédios "
+       "suavizam isso. Destina-se ao treino em luz linear, onde a curva de exibição "
+       "já faz um pixel escuro empurrar com mais força."),
+    IT("Divide i pesi dell'errore di colore (L1, L2 e SSIM) per il doppio della "
+       "luminosità media della foto, misurata in sRGB, elevato a questa potenza: 0 "
+       "non cambia nulla, 1 fa contare uno scatto scuro quanto uno chiaro, e i "
+       "valori intermedi lo attenuano. È pensato per l'addestramento in luce "
+       "lineare, dove la curva di visualizzazione fa già spingere di più un pixel "
+       "scuro."),
+    NL("Deelt de gewichten van de kleurfout (L1, L2 en SSIM) door tweemaal de "
+       "gemiddelde helderheid van de foto, gemeten in sRGB, tot deze macht "
+       "verheven: 0 verandert niets, 1 laat een donkere opname net zo zwaar tellen "
+       "als een lichte, en waarden ertussen verzachten dat. Bedoeld voor training "
+       "in lineair licht, waar de weergavecurve een donkere pixel toch al harder "
        "laat duwen."),
-    RU("Масштабирует веса ошибки цвета (L1, L2 и SSIM) на удвоенную среднюю "
-       "яркость снимка, измеренную в sRGB, чтобы тёмный кадр значил столько же, "
-       "сколько светлый. Предназначено для обучения в линейном свете, где кривая "
+    RU("Делит веса ошибки цвета (L1, L2 и SSIM) на удвоенную среднюю яркость "
+       "снимка, измеренную в sRGB, в этой степени: 0 ничего не меняет, 1 делает "
+       "тёмный кадр столь же весомым, как светлый, промежуточные значения "
+       "смягчают это. Предназначено для обучения в линейном свете, где кривая "
        "отображения и так заставляет тёмный пиксель давить сильнее."),
-    TR("Renk hatası ağırlıklarını, fotoğrafın sRGB'de ölçülen ortalama "
-       "parlaklığının iki katıyla ölçekler (L1, L2 ve SSIM); böylece karanlık bir "
-       "çekim aydınlık olan kadar sayılır. Doğrusal ışıkta eğitim için "
-       "düşünülmüştür; orada görüntüleme eğrisi karanlık pikseli zaten daha sert "
-       "ittirir."));
+    TR("Renk hatası ağırlıklarını (L1, L2 ve SSIM), fotoğrafın sRGB'de ölçülen "
+       "ortalama parlaklığının iki katının bu kuvvetine böler: 0 hiçbir şey "
+       "değiştirmez, 1 karanlık bir çekimi aydınlık olan kadar saydırır, aradaki "
+       "değerler bunu yumuşatır. Doğrusal ışıkta eğitim için düşünülmüştür; orada "
+       "görüntüleme eğrisi karanlık pikseli zaten daha sert ittirir."));
 
 
 // ===========================================================================
@@ -7539,6 +8135,80 @@ SS_MSG(ppisp_exposure_from_exif_help,
        "enstantane, diyafram ve ISO'dan, kümenin ortalamasına göre başlatır. Bu "
        "etiketleri olmayan fotoğraflar ortalamadan başlar. Pozlama çekim boyunca "
        "değişiyorsa yardımcı olur."));
+
+SS_MSG(ppisp_exposure_arithmetic_mean,
+    EN("Neutral exposure by average gain"), JA("平均の倍率で露出を中立に"),
+    ZH_HANS("按平均倍率保持曝光中性"), ZH_HANT("按平均倍率保持曝光中性"),
+    KO("평균 배율로 노출 중립"), DE("Neutrale Belichtung über mittleren Faktor"),
+    FR("Exposition neutre par gain moyen"),
+    ES("Exposición neutra por ganancia media"),
+    PT("Exposição neutra pelo ganho médio"),
+    IT("Esposizione neutra per guadagno medio"),
+    NL("Neutrale belichting via gemiddelde factor"),
+    RU("Нейтральная экспозиция по среднему множителю"),
+    TR("Ortalama çarpanla nötr pozlama"));
+SS_MSG(ppisp_exposure_arithmetic_mean_help,
+    EN("Center the per-photo exposure corrections so their brightness multipliers "
+       "average to 1, rather than their values in stops averaging to 0. Applies "
+       "to both the neutral exposure penalty and the EXIF start. When exposure "
+       "varies widely, this keeps the splats at the photos' average brightness "
+       "instead of darker."),
+    JA("写真ごとの露出補正を、段数での値の平均が 0 になるようにではなく、明るさ"
+       "の倍率の平均が 1 になるように中心を合わせます。露出を中立に保つ強さと "
+       "EXIF による露出の初期化の両方に適用されます。露出の差が大きいとき、スプ"
+       "ラットが暗くならず、写真の平均的な明るさに保たれます。"),
+    ZH_HANS("让逐张照片的曝光校正以亮度倍率的平均值为 1 为中心，而不是以档数"
+            "的平均值为 0。同时作用于保持曝光中性的强度和用 EXIF 初始化曝光。"
+            "曝光差异很大时，这会让泼溅保持在照片的平均亮度，而不是更暗。"),
+    ZH_HANT("讓逐張照片的曝光校正以亮度倍率的平均值為 1 為中心，而不是以檔數"
+            "的平均值為 0。同時作用於保持曝光中性的強度和用 EXIF 初始化曝光。"
+            "曝光差異很大時，這會讓潑濺保持在照片的平均亮度，而不是更暗。"),
+    KO("사진별 노출 보정을, 스톱 단위 값의 평균이 0이 되도록이 아니라 밝기 배율"
+       "의 평균이 1이 되도록 맞춥니다. 노출을 중립으로 유지하는 강도와 EXIF로 노"
+       "출 초기화에 모두 적용됩니다. 노출 차이가 클 때 스플랫이 더 어두워지지 않"
+       "고 사진의 평균 밝기에 맞춰집니다."),
+    DE("Die Belichtungskorrekturen pro Foto so zentrieren, dass ihre "
+       "Helligkeitsfaktoren im Mittel 1 ergeben, statt dass ihre Werte in "
+       "Blendenstufen im Mittel 0 ergeben. Gilt für die Strafe für nicht neutrale "
+       "Belichtung und den Belichtungsstart aus EXIF. Bei stark schwankender "
+       "Belichtung bleiben die Splats so bei der mittleren Helligkeit der Fotos "
+       "statt dunkler."),
+    FR("Centrer les corrections d'exposition par photo pour que leurs facteurs de "
+       "luminosité aient une moyenne de 1, plutôt que leurs valeurs en stops une "
+       "moyenne de 0. S'applique à la pénalité d'exposition non neutre et à "
+       "l'exposition initiale depuis l'EXIF. Quand l'exposition varie fortement, "
+       "les splats restent ainsi à la luminosité moyenne des photos au lieu "
+       "d'être plus sombres."),
+    ES("Centrar las correcciones de exposición por foto para que sus factores de "
+       "brillo promedien 1, en lugar de que sus valores en pasos promedien 0. Se "
+       "aplica a la penalización de exposición no neutra y a la exposición inicial "
+       "desde EXIF. Cuando la exposición varía mucho, así los splats quedan con el "
+       "brillo medio de las fotos en vez de más oscuros."),
+    PT("Centralizar as correções de exposição por foto para que seus fatores de "
+       "brilho tenham média 1, em vez de seus valores em stops terem média 0. Vale "
+       "para a penalidade de exposição não neutra e para a exposição inicial do "
+       "EXIF. Quando a exposição varia muito, os splats ficam assim no brilho "
+       "médio das fotos em vez de mais escuros."),
+    IT("Centrare le correzioni di esposizione di ogni foto in modo che i loro "
+       "fattori di luminosità abbiano media 1, invece che i loro valori in stop "
+       "abbiano media 0. Vale per la penalità di esposizione non neutra e per "
+       "l'esposizione iniziale da EXIF. Quando l'esposizione varia molto, gli "
+       "splat restano così alla luminosità media delle foto invece che più scuri."),
+    NL("De belichtingscorrecties per foto zo centreren dat hun helderheidsfactoren "
+       "gemiddeld 1 zijn, in plaats van dat hun waarden in stops gemiddeld 0 zijn. "
+       "Geldt voor de straf voor niet-neutrale belichting en voor het starten van "
+       "de belichting vanuit EXIF. Bij sterk wisselende belichting blijven de "
+       "splats zo op de gemiddelde helderheid van de foto's in plaats van donkerder."),
+    RU("Центрировать коррекции экспозиции каждого фото так, чтобы в среднем 1 "
+       "давали их множители яркости, а не 0 — их значения в ступенях. Действует и "
+       "на штраф за смещение экспозиции, и на начальную экспозицию из EXIF. При "
+       "сильно различающейся экспозиции сплаты так остаются на средней яркости "
+       "фотографий, а не темнее."),
+    TR("Fotoğraf başına pozlama düzeltmelerini, durak cinsinden değerlerinin "
+       "ortalaması 0 olacak şekilde değil, parlaklık çarpanlarının ortalaması 1 "
+       "olacak şekilde ortalar. Hem nötr olmayan pozlama cezasına hem de EXIF'ten "
+       "pozlama başlangıcına uygulanır. Pozlama çok değiştiğinde splat'lar böylece "
+       "daha karanlık kalmak yerine fotoğrafların ortalama parlaklığında kalır."));
 
 SS_MSG(apply_ppisp_before_bilagrid,
     EN("Camera correction first"), JA("カメラ補正を先に適用"),
@@ -10369,6 +11039,126 @@ SS_MSG(choice_same_as_input,
     ES("igual que la entrada"), PT("igual à entrada"), IT("come l'ingresso"),
     NL("zoals de invoer"),  RU("как у входа"),  TR("girdiyle aynı"));
 
+SS_MSG(choice_never,
+    EN("never"),
+    JA("しない"),
+    ZH_HANS("从不"),
+    ZH_HANT("從不"),
+    KO("안 함"),
+    DE("nie"),
+    FR("jamais"),
+    ES("nunca"),
+    PT("nunca"),
+    IT("mai"),
+    NL("nooit"),
+    RU("никогда"),
+    TR("asla"));
+
+SS_MSG(choice_without_points,
+    EN("when the dataset has no points"),
+    JA("点群がないとき"),
+    ZH_HANS("数据集无点云时"),
+    ZH_HANT("資料集無點雲時"),
+    KO("점군이 없을 때"),
+    DE("wenn der Datensatz keine Punkte hat"),
+    FR("si le jeu n'a pas de points"),
+    ES("si el conjunto no tiene puntos"),
+    PT("se o conjunto não tiver pontos"),
+    IT("se il set non ha punti"),
+    NL("als de dataset geen punten heeft"),
+    RU("если в наборе нет точек"),
+    TR("veri kümesinde nokta yoksa"));
+
+SS_MSG(choice_always,
+    EN("always"),
+    JA("常に"),
+    ZH_HANS("总是"),
+    ZH_HANT("總是"),
+    KO("항상"),
+    DE("immer"),
+    FR("toujours"),
+    ES("siempre"),
+    PT("sempre"),
+    IT("sempre"),
+    NL("altijd"),
+    RU("всегда"),
+    TR("her zaman"));
+
+SS_MSG(choice_isotropic_gaussian,
+    EN("isotropic Gaussian"),
+    JA("等方ガウス分布"),
+    ZH_HANS("各向同性高斯"),
+    ZH_HANT("各向同性高斯"),
+    KO("등방성 가우시안"),
+    DE("isotrope Gauß-Verteilung"),
+    FR("gaussienne isotrope"),
+    ES("gaussiana isótropa"),
+    PT("gaussiana isotrópica"),
+    IT("gaussiana isotropa"),
+    NL("isotrope gaussverdeling"),
+    RU("изотропное гауссово"),
+    TR("izotropik Gauss"));
+
+SS_MSG(choice_anisotropic_gaussian,
+    EN("anisotropic Gaussian"),
+    JA("異方ガウス分布"),
+    ZH_HANS("各向异性高斯"),
+    ZH_HANT("各向異性高斯"),
+    KO("비등방성 가우시안"),
+    DE("anisotrope Gauß-Verteilung"),
+    FR("gaussienne anisotrope"),
+    ES("gaussiana anisótropa"),
+    PT("gaussiana anisotrópica"),
+    IT("gaussiana anisotropa"),
+    NL("anisotrope gaussverdeling"),
+    RU("анизотропное гауссово"),
+    TR("anizotropik Gauss"));
+
+SS_MSG(choice_solid_ellipsoid,
+    EN("uniform solid ellipsoid"),
+    JA("一様な中実楕円体"),
+    ZH_HANS("均匀实心椭球"),
+    ZH_HANT("均勻實心橢球"),
+    KO("균일한 속이 찬 타원체"),
+    DE("gleichmäßig gefülltes Ellipsoid"),
+    FR("ellipsoïde plein uniforme"),
+    ES("elipsoide macizo uniforme"),
+    PT("elipsoide sólido uniforme"),
+    IT("ellissoide pieno uniforme"),
+    NL("gelijkmatig gevulde ellipsoïde"),
+    RU("равномерный сплошной эллипсоид"),
+    TR("düzgün dolu elipsoid"));
+
+SS_MSG(choice_oriented_box,
+    EN("uniform oriented box"),
+    JA("一様な向き付きの箱"),
+    ZH_HANS("均匀定向长方体"),
+    ZH_HANT("均勻定向長方體"),
+    KO("균일한 방향 상자"),
+    DE("gleichmäßig gefüllter ausgerichteter Quader"),
+    FR("boîte orientée uniforme"),
+    ES("caja orientada uniforme"),
+    PT("caixa orientada uniforme"),
+    IT("scatola orientata uniforme"),
+    NL("gelijkmatig gevulde gerichte doos"),
+    RU("равномерный ориентированный параллелепипед"),
+    TR("düzgün yönlü kutu"));
+
+SS_MSG(choice_world_origin,
+    EN("world origin"),
+    JA("ワールド原点"),
+    ZH_HANS("世界原点"),
+    ZH_HANT("世界原點"),
+    KO("월드 원점"),
+    DE("Koordinatenursprung"),
+    FR("origine du repère"),
+    ES("origen de coordenadas"),
+    PT("origem das coordenadas"),
+    IT("origine delle coordinate"),
+    NL("oorsprong"),
+    RU("начало координат"),
+    TR("koordinat başlangıcı"));
+
 // ---------------------------------------------------------------------------
 // flag + value -> label. Null for anything not listed, which is most of them.
 // ---------------------------------------------------------------------------
@@ -10432,6 +11222,23 @@ inline constexpr ChoiceText kChoiceText[] = {
     {"splat_color_gamut", "none", &choice_same_as_input},
     {"image_color_transfer", "none", &choice_srgb_default},
     {"splat_color_transfer", "none", &choice_same_as_input},
+
+    {"random_init", "never",  &choice_never},
+    {"random_init", "auto",   &choice_without_points},
+    {"random_init", "always", &choice_always},
+
+    {"random_init_distribution", "isotropic-gaussian",   &choice_isotropic_gaussian},
+    {"random_init_distribution", "anisotropic-gaussian", &choice_anisotropic_gaussian},
+    {"random_init_distribution", "ellipsoid",            &choice_solid_ellipsoid},
+    {"random_init_distribution", "box",                  &choice_oriented_box},
+
+    {"random_init_center", "camera-median", &choice_camera_median},
+    {"random_init_center", "camera-focus",  &choice_camera_focus},
+    {"random_init_center", "camera-mean",   &choice_camera_mean},
+    {"random_init_center", "origin",        &choice_world_origin},
+
+    {"random_init_spread", "median", &choice_median},
+    {"random_init_spread", "mean",   &choice_mean},
 };
 inline constexpr size_t kNumChoiceText =
     sizeof(kChoiceText) / sizeof(kChoiceText[0]);

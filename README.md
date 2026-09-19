@@ -51,7 +51,7 @@ Spirula Studio trains 3D Gaussian Splatting models &ndash; from raw photo/video 
 
 - **August 8, 2026: Multilingual support** &ndash; Multilingual support has been added, available to both GUI and CLI. Supported languages: English, 日本語, 简体中文, 繁體中文, 한국어, Deutsch, Français, Español, Português, Italiano, Nederlands, Русский, Türkçe.
 
-- **August 8, 2026: End-to-end workflow** &ndash; The Vulkan backend now has components to extract frames from video, AI masking, native SfM, meshing, and batch training, accessible from both GUI and CLI.
+- **August 8, 2026: End-to-end workflow** &ndash; The Vulkan backend now has components to extract frames from video, AI masking, native SfM, meshing, and batch processing, accessible from both GUI and CLI.
 
 - **July 22, 2026: Cross-vendor support** &ndash; A Vulkan backend has been added, which works on NVIDIA, AMD, and Intel GPUs.
 
@@ -93,19 +93,19 @@ cd spirula-studio\
 .\build_develop.bat -DSS_BACKEND=vulkan -DSS_ENABLE_PATENTED=ON
 ```
 
-If it builds successfully, you get `build\spirula.exe`.
+If it builds successfully, you get `build_vulkan\spirula.exe`.
 
 ### Windows with GCC/Clang:
 
 ```bat
 cd spirula-studio\
-cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release -DSS_BACKEND=vulkan -DSS_ENABLE_PATENTED=ON -DCMAKE_MAKE_PROGRAM=Ninja
-cmake --build build -j
+cmake -G Ninja -B build_vulkan -DCMAKE_BUILD_TYPE=Release -DSS_BACKEND=vulkan -DSS_ENABLE_PATENTED=ON -DCMAKE_MAKE_PROGRAM=Ninja
+cmake --build build_vulkan -j
 ```
 
 Pass `-DCMAKE_C_COMPILER` and `-DCMAKE_CXX_COMPILER` to the first `cmake` command if needed.
 
-If it builds successfully, you get `build\spirula.exe`.
+If it builds successfully, you get `build_vulkan\spirula.exe`.
 
 ### Linux:
 
@@ -114,7 +114,7 @@ cd spirula-studio/
 bash build_develop.bash -DSS_BACKEND=vulkan -DSS_ENABLE_PATENTED=ON
 ```
 
-If it builds successfully, you get `build/spirula` binary.
+If it builds successfully, you get `build_vulkan/spirula` binary.
 
 ### macOS:
 
@@ -125,7 +125,7 @@ cmake --build build --target macos_app
 cmake --build build --target macos_dmg
 ```
 
-If it builds successfully, you get `build/spirula` binary similar to Linux. Additionally, it wraps that binary in a double-clickable `build/Spirula Studio.app`, as well as disk image `build/Spirula Studio.dmg`. MoltenVK is statically linked by default and will run on a Mac without dependency installed.
+macOS has only the one backend, so it builds into `build/` rather than into a per-backend tree. If it builds successfully, you get `build/spirula` binary similar to Linux. Additionally, it wraps that binary in a double-clickable `build/Spirula Studio.app`, as well as disk image `build/Spirula Studio.dmg`. MoltenVK is statically linked by default and will run on a Mac without dependency installed.
 
 ### Notes regarding third-party licensing
 
@@ -150,7 +150,7 @@ cd spirula-studio\
 .\build_develop.bat -DSS_BACKEND=cuda
 ```
 
-If it builds successfully, you get `build\spirula.exe`.
+If it builds successfully, you get `build_cuda\spirula.exe`.
 
 ### Linux:
 
@@ -159,7 +159,7 @@ cd spirula-studio/
 bash build_develop.bash -DSS_BACKEND=cuda
 ```
 
-If it builds successfully, you get `build/spirula` binary.
+If it builds successfully, you get `build_cuda/spirula` binary.
 
 </details>
 
