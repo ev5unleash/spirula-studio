@@ -3,8 +3,7 @@
 ## Status and scope
 
 **Closed.** The GUI state fixes and all in-scope Vulkan desktop acceptance are
-complete. This handoff is historical evidence; the authoritative closure record
-is [the reconciled continuation plan](docs/notes/device-job-scheduling-upstream-merge-plan.md).
+complete. This handoff is the retained closure record.
 
 Branch: `continue/device-job-scheduling-headless`. Original review baseline:
 `d76f7318` (`fix(gui): restore scheduled dataset previews`), following
@@ -12,7 +11,7 @@ Branch: `continue/device-job-scheduling-headless`. Original review baseline:
 
 ## Closure
 
-No next-session work remains from this handoff. The reconciled plan superseded
+No next-session work remains from this handoff. The accepted scope superseded
 the unchecked exhaustive UI scenarios below rather than claiming each one was
 replayed. Production seams, retained regressions, supported-device execution,
 and the required visible desktop behavior now provide the accepted evidence.
@@ -87,7 +86,7 @@ Desktop verification on the final binary:
 
 The localized controls, recovery flow, scheduled previews, mask handling, logs,
 retargeting, linked workflow, terminal outcomes, non-training force-stop, and
-final-publish notification are accepted in the reconciled continuation plan.
+final-publish notification are accepted under this handoff's reconciled scope.
 The older matching-view, live-inverted-overlay, every-log-transition, and
 busy-training confirmation scenarios were not individually replayed; they are
 not remaining gates under the reconciled scope.

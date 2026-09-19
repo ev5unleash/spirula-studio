@@ -2,8 +2,8 @@
 
 Status: the deferred investigation resumed on 2026-09-18 on two supported AMD
 GPUs. The bounded byte-conversion, PPISP, finite-training, dual-device, and
-desktop checks below are now closed out in the primary plan. This document
-retains the earlier failure analysis and reproduction record.
+desktop checks below are closed in [the root handoff](../../HANDOFF.md). This
+document retains the earlier failure analysis and reproduction record.
 
 The [backend support policy](../../AGENTS.md#backend-support-policy) excludes
 NVIDIA implementation and validation, including Vulkan on NVIDIA. Do not restart
@@ -21,8 +21,8 @@ The real CLI/scheduler lifecycle passed direct training, resume, stop/save,
 forced interruption, and physical A→B retarget with child-reported UUIDs.
 Desktop submission, finite progress, stop/save, restart, Later/Retry recovery,
 device controls, patent-disabled ffmpeg fallback, and normal close were
-observed. Remaining UI and parity boundaries are recorded in the
-[primary plan](device-job-scheduling-upstream-merge-plan.md).
+observed. The later UI acceptance is recorded in
+[the root handoff](../../HANDOFF.md).
 
 
 ## Historical handoff evidence and boundaries
@@ -41,10 +41,9 @@ observed. Remaining UI and parity boundaries are recorded in the
   render was not an AMD-specific acceptance check.
 
 See [the implementation plan](headless-testing-plan.md),
-[testing instructions](../testing.md), and the
-[reconciled primary plan](device-job-scheduling-upstream-merge-plan.md). The
-primary plan is the current acceptance ledger; the detailed observations below
-remain historical debugging evidence.
+[testing instructions](../testing.md), and
+[the root handoff](../../HANDOFF.md). The handoff is the current acceptance
+ledger; the detailed observations below remain historical debugging evidence.
 
 ## Local evidence inventory
 

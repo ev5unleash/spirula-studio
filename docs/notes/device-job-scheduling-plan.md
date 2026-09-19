@@ -1,8 +1,8 @@
 # Explicit-device process scheduling
 
 Status: Historical implementation plan. Local implementation and acceptance are
-closed in the
-[reconciled continuation plan](device-job-scheduling-upstream-merge-plan.md).
+closed; [the root handoff](../../HANDOFF.md) retains the accepted evidence and
+final disposition.
 
 Original target branch: `feature/device-job-scheduling`, based on
 `feature/native-gpu-selection`.
@@ -475,10 +475,10 @@ evidence for this run.
 The later continuation completed the supported-device scheduler, recovery,
 retargeting, preparation, SfM, geometry, bounded training, checkpoint, desktop,
 and notification acceptance. The original desktop checklist in
-[the handoff](../../handoff.md) is closed under the reconciled scope rather than
+[the handoff](../../HANDOFF.md) is closed under the reconciled scope rather than
 claiming every historical exhaustive scenario was replayed.
 
 CUDA/NVIDIA work, speculative fault-window expansion, patented native-video
 coverage, and throughput work without a measured regression are outside the
-closed continuation. The authoritative evidence and disposition are in the
-[reconciled continuation plan](device-job-scheduling-upstream-merge-plan.md).
+closed continuation. The authoritative evidence and disposition are retained
+in [the root handoff](../../HANDOFF.md).

@@ -1,11 +1,11 @@
 # Headless behavior testing and desktop smoke
 
-Status: **Headless implementation verified; later GPU and desktop acceptance closed in the primary continuation plan.**
+Status: **Headless implementation verified; later GPU and desktop acceptance closed in the root handoff.**
 
-For the current committed baseline and upstream-integration acceptance mapping,
-use the [primary continuation plan](device-job-scheduling-upstream-merge-plan.md).
-The implementation sections below retain the original specification; their
-paused-merge and proposed-command wording is historical, not a new work queue.
+For the current committed baseline and acceptance disposition, use
+[the root handoff](../../HANDOFF.md). The implementation sections below retain
+the original specification; their paused-merge and proposed-command wording is
+historical, not a new work queue.
 
 The NVIDIA lanes in this original plan are superseded by the current
 [backend support policy](../../AGENTS.md#backend-support-policy). NVIDIA-specific
@@ -23,7 +23,7 @@ Original paused snapshot on Windows:
   satisfy the new policy.
 - The desktop first frame rendered and normal close exited zero. Submit/cancel
   was unverified because canvas input did not activate the controls. The later
-  primary plan closes the desktop acceptance.
+  closure handoff records the accepted desktop evidence.
 - GUI-OFF-to-ON rebuild took 72.73 s, separate from test runtime; this was not a
   clean-build measurement.
 
@@ -71,10 +71,9 @@ integration of that work. Independent new-file work may proceed only when its
 source dependencies are available in its isolated checkout.
 
 At the time of this plan, the desktop checks in
-[the handoff](../../handoff.md) and the
+[the handoff](../../HANDOFF.md) and the
 [device scheduling plan](device-job-scheduling-plan.md) were not waived by
-headless coverage. They were later reconciled and closed by the
-[primary continuation plan](device-job-scheduling-upstream-merge-plan.md).
+headless coverage. They were later reconciled and closed in the root handoff.
 
 ## 2. Existing seams and actual gaps
 
