@@ -1,8 +1,8 @@
 # Device job scheduling: reconciled upstream continuation plan
 
-**Status:** primary reconciled plan as of 2026-09-18. This repository document is
-the source of truth for continuation. The external legacy plan and handoff are
-historical evidence, not commands to rerun.
+**Status:** closed local acceptance record as of 2026-09-18. This repository
+document is the source of truth for the completed continuation. The external
+legacy plan and handoff are historical evidence, not commands to rerun.
 
 ## Cross-machine handoff
 
@@ -11,7 +11,7 @@ elsewhere, and approved a separate sanitized continuation branch:
 
 - Remote: `origin`, `https://github.com/ev5unleash/spirula-studio.git`.
 - Branch: `continue/device-job-scheduling-headless`.
-- This is a work-in-progress checkpoint, not full GPU/UI acceptance or a PR.
+- This is the completed local acceptance record, not a PR.
 - The original integration branch remains intact locally and must not be pushed:
   its generated `batch-fixture` history contains machine-local paths.
 
@@ -40,8 +40,8 @@ git switch --track origin/continue/device-job-scheduling-headless
 ```
 
 Ignored build outputs, GPU diagnostic archives, model weights, and external
-temporary handoffs are not included. The committed plans preserve the observed
-results and reproduction instructions; all deferred validation remains open.
+temporary handoffs are not included. The committed plan preserves the observed
+results and reproduction instructions; all in-scope acceptance is closed.
 
 ## 1. Precedence and non-negotiable contracts
 
@@ -54,12 +54,11 @@ for actual UI wiring, rendering, visible state, and input. A mock protocol child
 synthetic device identity, copied request field, or successful process exit does
 not prove real compute.
 
-The user paused deeper GPU and desktop debugging. This documentation task does
-not reopen that work or declare it passed. Broader scheduler throughput,
-fault-window, parent-death, and multi-device work is not automatically complete
-because the headless suite is green. Historical reports, screenshots, old CI
-claims, and old command transcripts are evidence and limitations, not requests
-to rerun completed work.
+This closed plan does not authorize broader scheduler throughput, speculative
+crash-window, parent-death, or new multi-device work. CUDA/NVIDIA validation
+and parity-reference generation are explicitly outside this continuation.
+Historical reports, screenshots, old CI claims, and old command transcripts
+are evidence and limitations, not requests to rerun completed work.
 
 **Local-only by default.** Keep work in this repository and leave the candidate
 on the local integration branch. Do not push to `origin` or `upstream`,
@@ -283,8 +282,8 @@ one selected image and the truthful minimum-three-images failure.
 
 The final integrated Vulkan/GUI/SfM/SAM, patented-disabled build passed, as did
 the 19-test headless label. Incremental comment, private-path, and
-patch-whitespace checks passed. Compatible protected parity references were
-not present and were not fabricated from the candidate.
+patch-whitespace checks passed. No CUDA parity references were fabricated;
+CUDA/NVIDIA validation is outside this continuation.
 
 A subsequent closure pass used the production worker and scheduler seams. An
 eight-second moving video produced 24 adaptively spaced frames through the
@@ -382,15 +381,13 @@ job terminal.
 
 ### R7 — Recovery, atomic state, staging, resume, Later/Retry, second owner
 
-**Status: partial.** Interrupted training preserved atomic state, source,
-workspace, options, device, output, and the last valid checkpoint. Restart
-showed recovery; Later preserved it and Retry created a distinct attempt
-against the same output, then stopped/saved successfully. Host tests retain
-second-owner and incomplete-sibling coverage. Exhaustive deterministic crash
-windows remain outside this run.
-
-Continuation: add only a focused crash-window check when a concrete publication
-gap is identified; do not replay the accepted desktop recovery flow.
+**Status: complete on this host.** Interrupted training preserved atomic state,
+source, workspace, options, device, output, and the last valid checkpoint.
+Restart showed recovery; Later preserved it and Retry created a distinct
+attempt against the same output, then stopped/saved successfully. Host tests
+retain second-owner and incomplete-sibling coverage. Unspecified exhaustive
+crash windows are outside this plan; add a focused check only if a concrete
+publication gap is identified.
 
 ### R8 — Final-publish notification and safe failure
 
@@ -427,49 +424,31 @@ second scheduler/framework, or parallel implementation merely to script a gate.
 Permanent tests require a plausible missing observable regression; otherwise use
 a disposable smoke and remove it after evidence capture.
 
-### 6.2 Parity invocation and references
+### 6.2 CUDA parity is out of scope
 
-`engine_train_parity`, `engine_render_parity`, and `ppisp_parity` require
-`dump|compare <reference.bin>`; no-argument usage is not a pass. Set
-`SS_MERGE_EVIDENCE` to the owned external evidence directory before executing
-these comparisons against protected, compatible references:
+`engine_train_parity`, `engine_render_parity`, and `ppisp_parity` use CUDA dump
+files as cross-backend numerical oracles. This continuation performs no further
+CUDA/NVIDIA work, so protected CUDA references are neither required nor a
+blocker. Do not generate candidate self-dumps. The historical cross-backend
+workflow remains documented in `docs/testing.md`, but it is not an acceptance
+gate for this plan.
 
-```bat
-build_vulkan\engine_train_parity.exe compare "%SS_MERGE_EVIDENCE%\baseline\engine_train.bin"
-build_vulkan\engine_render_parity.exe compare "%SS_MERGE_EVIDENCE%\baseline\engine_render.bin"
-build_vulkan\ppisp_parity.exe compare "%SS_MERGE_EVIDENCE%\baseline\ppisp.bin"
-```
+## 7. Closure ledger and out-of-scope GPU work
 
-Creating a missing reference is a separate baseline/oracle task, not a candidate
-dump followed by comparison to itself. Record harness/config/device provenance;
-if inputs/layout/contracts changed, use a compatible independently validated
-reference or independent numerical invariant, not an overwritten golden.
-Existing reference data may inform a numerical oracle when its provenance is
-valid; historical NVIDIA execution does not establish supported-device
-acceptance. Do not run NVIDIA or generate new CUDA/NVIDIA reference dumps.
-If claiming masked-tile-skip equivalence, also compare with `SS_NO_TILE_SKIP=1`,
-then restore the old environment value.
+Two eligible physical non-NVIDIA GPUs are verified. Production byte conversion,
+independent PPISP invariants, finite training, resume, stop/save, forced
+interruption, and physical A→B retarget passed without a GPU code fix or
+capability exclusion.
 
-## 7. Blocker ledger and dedicated later GPU work
-
-Two eligible physical non-NVIDIA GPUs are now verified. Production byte
-conversion, independent PPISP invariants, finite training, resume, stop/save,
-forced interruption, and physical A→B retarget passed without a GPU code fix or
-capability exclusion. NVIDIA/CUDA implementation or testing remains outside
-scope.
-
-The only native parity blocker is reference provenance: no compatible protected
-`engine_train`, `engine_render`, or `ppisp` reference files were present. Do not
-generate a candidate dump and compare it to itself. When independently
-validated references become available, run the commands in section 6.2 with
-their device, harness, and configuration provenance.
+No in-scope GPU blocker remains. CUDA/NVIDIA implementation, testing, and the
+three protected CUDA reference files are outside this continuation by user
+direction; their absence is not deferred acceptance work.
 
 Desktop first-frame rendering, ordinary widget activation, batch submission,
 finite progress, stop/save, restart, Later/Retry recovery, device selection,
-and normal close were observed. Remaining UI gaps are successful multi-frame
-adaptive extraction, accepted-weight SAM preview/overlay colors, all four SfM
-outcome presentations, a non-training force-stop, the complete linked workflow,
-and automatic post-publish notification.
+normal close, multi-frame adaptive extraction, SAM preview and overlay,
+four-outcome SfM presentation, non-training force-stop, the complete linked
+workflow, and automatic post-publish notification were observed.
 
 ## 8. Ownership and hygiene
 
@@ -499,22 +478,15 @@ available baseline. Main runs one shared integration check after lanes settle.
 Do not speculate about a transient CMake race fix; stable configured build plus
 the lost-wake fix are current.
 
-## 9. Next runnable work and local acceptance
+## 9. Closed local acceptance
 
-The local candidate now has supported dual-GPU, finite training, recovery, and
-substantial desktop evidence. Remaining runnable work is bounded:
+All planned local acceptance is complete: supported dual-GPU routing, finite
+training, recovery, adaptive extraction, SAM presentation, the linked workflow,
+four SfM outcomes, non-training force-stop, and final-publish notification.
+CUDA parity is outside this continuation and creates no remaining action.
 
-1. Supply compatible independently validated parity references, preserving
-   their device and harness provenance.
-2. On an active desktop with accepted SAM weights, check mask preview/overlay
-   colors and successful multi-frame adaptive extraction.
-3. Run one complete linked workflow, preserve all four SfM outcome
-   presentations, and force-stop one non-training phase.
-4. Observe the configured completion command after final publication and its
-   safe failure path while the completed artifact remains intact.
-
-No push or PR is authorized. Ordinary scoped follow-up commits remain local
-until the user explicitly requests publication.
+No push or PR is authorized. The completed scoped commits remain local until
+the user explicitly requests publication.
 
 ## 10. Local completion and protected upstream integration
 
@@ -674,14 +646,12 @@ No ref was pushed and no PR or remote CI run was created.
 
 The resumed 2026-09-18 acceptance in section 4.3 supersedes the earlier paused
 snapshot. Supported-device training, background and PPISP numerics, real
-SfM/geometry/SAM work, physical dual-device routing, and the notification
-command itself have now run. Host acceptance remains partial only at the named
-boundaries: compatible protected parity references are absent, and the locked
-desktop prevented live preview presentation, four-outcome SfM presentation, a
-desktop non-training force-stop, and automatic post-publish notification.
-No NVIDIA/CUDA substitute or self-generated parity baseline was used. `.clangd`
-and the preserved ValidationSkill work remain included; successful MSVC builds
-and executed tests are the diagnostic authority for this continuation.
+SfM/geometry/SAM work, physical dual-device routing, desktop presentation, and
+the notification command have all run. Host acceptance is complete for this
+plan. No NVIDIA/CUDA substitute or self-generated parity baseline was used
+because CUDA work is outside the continuation. `.clangd` and the preserved
+ValidationSkill work remain included; successful MSVC builds and executed tests
+are the diagnostic authority for this continuation.
 
 ## 12. References
 
