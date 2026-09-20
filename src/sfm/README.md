@@ -282,6 +282,54 @@ spirula sfm ba      problem.txt --real df       # solver benchmark on a BAL prob
 spirula sfm ba      sparse/0 --real cpu        # ... the same solve, on the host
 ```
 
+### Distributed feature extraction
+
+Feature extraction can be split across machines without a coordinator daemon:
+
+```bash
+spirula sfm plan images/ -o feature-plan/ --shards 4 --quality high
+
+spirula sfm extract /worker/images/ -o worker-0/ \
+  --feature-request feature-plan/request-shard-0000-attempt-0001.json \
+  --device uuid:WORKER_GPU_UUID
+
+spirula sfm collect feature-plan/plan.json worker-0/ worker-1/ worker-2/ worker-3/ \
+  -o workspace/ --requests feature-plan/
+spirula sfm auto images/ -o workspace/ --feature-plan feature-plan/plan.json
+```
+
+`plan` freezes the image, mask and extraction identities and writes one request
+per shard. It and `collect` are GPU-free. Copy `plan.json` with each request to
+a worker, preserve their relative paths, bind that worker's local image, mask
+and model paths, and copy back the whole result directory. Workers inherit the
+recipe from the plan; extraction flags only need repeating for machine-local
+paths. `collect` verifies every request, receipt, payload and digest before it
+publishes `workspace/features/index.json`. Matching cannot start until that
+index covers every planned image.
+
+A retry is a new `request` with `--supersedes`; `extract --adopt-from DIR`
+reuses compatible receipts from an interrupted attempt. After replanning,
+`collect --adopt-from OLD_FEATURES` rebinds compatible immutable artifacts even
+if shard ownership changed. A cancellation record rejects a late remote result;
+stopping the remote process is still the operator's responsibility.
+
+`plan --chunk-window SIZE --chunk-overlap COUNT` makes ordered overlapping
+pairing chunks. `--chunk-memberships FILE` supplies explicit chunks instead.
+Every image still has one extraction owner and central matching deduplicates
+cross-chunk pairs before the ordinary mapper runs.
+
+Spirula Studio exposes the shard count under **Advanced**. Values above one use
+the scheduler for bounded fan-out, show validated image and shard counts, seal
+the collection as a barrier, then run the existing central matching, mapping
+and training handoff. Cancellation addresses every job owned by the
+coordinator, and scheduler records recover the workflow after an application
+restart.
+
+Only extraction is distributed. Matching, bundle adjustment, dataset assembly
+and training remain central; there is no remote-worker service or network
+transport.
+
+
 `spirula sfm --help` lists the commands, `spirula sfm <command> --help` (or
 `spirula sfm help <command>`) prints that command's usage, its options with
 their defaults and worked examples, and `spirula sfm --version` prints the

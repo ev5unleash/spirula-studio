@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <climits>
 
 namespace video {
 
@@ -155,8 +156,16 @@ bool Mp4Demuxer::open(const std::string& path, std::string& error) {
 
     infos_.clear();
     for (size_t i = 0; i < tracks_.size(); ++i) {
-        tracks_[i].info.index = (int)i;
-        infos_.push_back(tracks_[i].info);
+        Track& tk = tracks_[i];
+        tk.info.index = (int)i;
+        tk.info.stream_index = (uint32_t)i;
+        if (tk.track_id == 0) tk.track_id = (uint32_t)i + 1;
+        tk.info.stream_id = "mp4:track:" + std::to_string(tk.track_id);
+        if (tk.timescale > 0 && tk.timescale <= INT32_MAX) {
+            tk.info.time_base_num = 1;
+            tk.info.time_base_den = (int32_t)tk.timescale;
+        }
+        infos_.push_back(tk.info);
     }
     return selectTrack(0, error);
 }
@@ -188,9 +197,12 @@ bool Mp4Demuxer::parseTrak(const uint8_t* data, size_t size) {
         // reserved/layer/group/volume (16), then the 3x3 matrix.
         Box tkhd;
         if (find_box(data, size, fourcc("tkhd"), tkhd) && tkhd.payload_size >= 4) {
-            const size_t off = 4 + (tkhd.payload[0] == 1 ? 32 : 20) + 16;
-            if (tkhd.payload_size >= off + 36)
-                parse_display_matrix(tkhd.payload + off, tk.info);
+            const bool v1 = tkhd.payload[0] == 1;
+            const size_t id_off = v1 ? 20 : 12;
+            const size_t matrix_off = 4 + (v1 ? 32 : 20) + 16;
+            if (tkhd.payload_size >= id_off + 4) tk.track_id = rd32(tkhd.payload + id_off);
+            if (tkhd.payload_size >= matrix_off + 36)
+                parse_display_matrix(tkhd.payload + matrix_off, tk.info);
         }
     }
     {
@@ -255,8 +267,8 @@ bool Mp4Demuxer::parseTrak(const uint8_t* data, size_t size) {
     std::vector<uint32_t> stsz_sizes;
     std::vector<uint64_t> chunk_offsets;
     struct StscEntry { uint32_t first_chunk, samples_per_chunk; };
+    struct SttsEntry { uint32_t count; int64_t delta; };
     std::vector<StscEntry> stsc_entries;
-    struct SttsEntry { uint32_t count; int32_t delta; };
     std::vector<SttsEntry> stts_entries, ctts_entries;
     std::vector<uint32_t> sync_samples;
     bool has_stss = false;
@@ -296,8 +308,10 @@ bool Mp4Demuxer::parseTrak(const uint8_t* data, size_t size) {
         b.payload_size >= 8) {
         const uint32_t n = rd32(b.payload + 4);
         const uint8_t* e = b.payload + 8;
+        tk.has_stts = n != 0;
         for (uint32_t i = 0; i < n && 8 + 8 * (size_t)i + 8 <= b.payload_size; ++i)
-            stts_entries.push_back({rd32(e + 8 * (size_t)i), (int32_t)rd32(e + 8 * (size_t)i + 4)});
+            stts_entries.push_back({rd32(e + 8 * (size_t)i),
+                                    (int64_t)rd32(e + 8 * (size_t)i + 4)});
     }
     // Composition offsets: without these, PTS == DTS and a stream with B-frames
     // comes out in the wrong order.
@@ -305,6 +319,7 @@ bool Mp4Demuxer::parseTrak(const uint8_t* data, size_t size) {
         b.payload_size >= 8) {
         const uint32_t n = rd32(b.payload + 4);
         const uint8_t* e = b.payload + 8;
+        tk.has_ctts = n != 0;
         for (uint32_t i = 0; i < n && 8 + 8 * (size_t)i + 8 <= b.payload_size; ++i)
             ctts_entries.push_back({rd32(e + 8 * (size_t)i), (int32_t)rd32(e + 8 * (size_t)i + 4)});
     }
@@ -348,6 +363,7 @@ bool Mp4Demuxer::parseTrak(const uint8_t* data, size_t size) {
         for (uint32_t i = 0; i < e.count && idx < n_samples; ++i, ++idx) {
             tk.samples[idx].dts = dts;
             tk.samples[idx].pts = dts;
+            tk.samples[idx].duration = e.delta;
             dts += e.delta;
         }
     idx = 0;
@@ -418,6 +434,7 @@ bool Mp4Demuxer::next(Packet& out, std::string& error) {
     if (next_sample_ >= tk.samples.size()) return false;  // end of stream
     const Sample& s = tk.samples[next_sample_];
 
+    out = Packet{};
     out.data.resize(s.size);
     file_.clear();
     file_.seekg((std::streamoff)s.offset, std::ios::beg);
@@ -426,13 +443,24 @@ bool Mp4Demuxer::next(Packet& out, std::string& error) {
         error = "truncated sample data at sample " + std::to_string(next_sample_);
         return false;
     }
-    const double ts = tk.timescale ? (double)tk.timescale : 1.0;
-    out.index = (int64_t)next_sample_;
-    out.display_index = next_sample_ < tk.pts_rank.size()
-                            ? (int64_t)tk.pts_rank[next_sample_]
-                            : (int64_t)next_sample_;
-    out.dts = (double)s.dts / ts;
-    out.pts = (double)s.pts / ts;
+
+    FrameTiming& timing = out.timing;
+    timing.stream_index = tk.info.stream_index;
+    timing.decode_ordinal = (uint64_t)next_sample_;
+    timing.presentation_ordinal = next_sample_ < tk.pts_rank.size()
+                                     ? (uint64_t)tk.pts_rank[next_sample_]
+                                     : (uint64_t)next_sample_;
+    if (tk.has_stts && tk.timescale > 0 && tk.timescale <= INT32_MAX) {
+        timing.kind = TimingKind::SourceExact;
+        timing.time_base_num = 1;
+        timing.time_base_den = (int32_t)tk.timescale;
+        timing.pts = s.pts;
+        timing.dts = s.dts;
+        timing.duration = s.duration;
+        timing.has_pts = true;
+        timing.has_dts = true;
+        timing.has_duration = true;
+    }
     out.is_sync = s.is_sync;
     ++next_sample_;
     return true;

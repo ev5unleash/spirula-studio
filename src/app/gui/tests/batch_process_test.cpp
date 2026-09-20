@@ -1,6 +1,8 @@
 #include "app/gui/BatchProcess.h"
+#include "app/DatasetPrep.h"
 #include "app/AppPaths.h"
 #include "app/JobScheduler.h"
+#include "data/ProjectManifest.h"
 #include "app/gui/TrainPreset.h"
 #include "i18n/catalog/Gui.h"
 #include <algorithm>
@@ -104,6 +106,121 @@ int main(int argc, char** argv) {
         check(std::any_of(conflicts.begin(), conflicts.end(), [](const auto& issue) {
                   return issue.fatal && issue.text == &spirula::i18n::msg::gui::chk_dataset_collision;
               }), "competing dataset writers are rejected before launch");
+        const fs::path provenance_root = root / "provenance";
+        fs::create_directories(provenance_root / "images" / "cam");
+        const fs::path original = provenance_root / "capture.bin";
+        const fs::path exact_output =
+            provenance_root / "images" / "cam" / "exact.jpg";
+        const fs::path fallback_output =
+            provenance_root / "images" / "cam" / "fallback.jpg";
+        std::ofstream(original, std::ios::binary) << "original";
+        std::ofstream(exact_output, std::ios::binary) << "exact";
+        std::ofstream(fallback_output, std::ios::binary) << "fallback";
+
+        app::PrepCapture capture;
+        capture.subdir = "cam";
+        capture.path = original.u8string();
+        capture.source_id =
+            spirula::project::make_source_record(original).source_id;
+        app::PrepFrameSource exact;
+        exact.output_name = "cam/exact.jpg";
+        exact.output_source_id =
+            spirula::project::make_source_record(exact_output).source_id;
+        exact.export_ordinal = 9007199254740993ULL;
+        exact.timing.kind = video::TimingKind::SourceExact;
+        exact.timing.presentation_ordinal = 9007199254740993ULL;
+        exact.timing.decode_ordinal = 9007199254740994ULL;
+        exact.timing.pts = 9007199254740993LL;
+        exact.timing.has_pts = true;
+        exact.timing.time_base_num = 1;
+        exact.timing.time_base_den = 90000;
+        app::PrepFrameSource fallback;
+        fallback.output_name = "cam/fallback.jpg";
+        fallback.output_source_id =
+            spirula::project::make_source_record(fallback_output).source_id;
+        fallback.export_ordinal = 7;
+        fallback.timing.kind = video::TimingKind::ExportDerived;
+        capture.frames = {exact, fallback};
+
+        std::string provenance_error;
+        check(app::write_prep_provenance(
+                  provenance_root.u8string(), {capture}, provenance_error),
+              "publishes exact and fallback frame provenance");
+        std::vector<app::PrepCapture> loaded;
+        check(app::read_prep_provenance(
+                  app::prep_provenance_path(provenance_root.u8string()),
+                  loaded, provenance_error) &&
+                  loaded.size() == 1 && loaded[0].frames.size() == 2 &&
+                  loaded[0].frames[0].timing.presentation_ordinal ==
+                      9007199254740993ULL &&
+                  loaded[0].frames[1].timing.kind ==
+                      video::TimingKind::ExportDerived,
+              "round-trips exact integers and unsupported timing");
+        std::ofstream(exact_output, std::ios::binary | std::ios::trunc)
+            << "changed";
+        check(!app::read_prep_provenance(
+                  app::prep_provenance_path(provenance_root.u8string()),
+                  loaded, provenance_error),
+              "refuses provenance after an output changes");
+        const fs::path resume_root = root / "provenance-resume";
+        std::error_code resume_cleanup;
+        fs::remove_all(resume_root, resume_cleanup);
+        const auto make_resumed_capture =
+            [&](const char* name) {
+                app::PrepCapture resumed;
+                const fs::path source = resume_root / (std::string(name) + ".mp4");
+                const fs::path image_dir = resume_root / "images" / name;
+                fs::create_directories(image_dir);
+                std::ofstream(source, std::ios::binary) << name;
+                resumed.subdir = name;
+                resumed.path = source.u8string();
+                resumed.source_id =
+                    spirula::project::make_source_record(source).source_id;
+                for (int i = 0; i < 2; ++i) {
+                    const fs::path output =
+                        image_dir / (std::to_string(i) + ".jpg");
+                    std::ofstream(output, std::ios::binary)
+                        << name << i;
+                    app::PrepFrameSource frame;
+                    frame.output_name =
+                        std::string(name) + "/" + std::to_string(i) + ".jpg";
+                    frame.output_source_id =
+                        spirula::project::make_source_record(output).source_id;
+                    frame.export_ordinal = static_cast<std::uint64_t>(i + 1);
+                    frame.timing.kind = video::TimingKind::ExportDerived;
+                    resumed.frames.push_back(std::move(frame));
+                }
+                return resumed;
+            };
+        const app::PrepCapture resumed_one = make_resumed_capture("one");
+        const app::PrepCapture resumed_two = make_resumed_capture("two");
+        check(app::write_prep_provenance(
+                  resume_root.u8string(), {resumed_one, resumed_two},
+                  provenance_error),
+              "writes a multi-video resume sidecar");
+        app::PrepJob resume_job;
+        resume_job.workspace = resume_root.u8string();
+        resume_job.force_external_decode = true;
+        app::PrepInput resume_input_one;
+        resume_input_one.path = resumed_one.path;
+        resume_input_one.is_video = true;
+        resume_input_one.subdir = resumed_one.subdir;
+        app::PrepInput resume_input_two;
+        resume_input_two.path = resumed_two.path;
+        resume_input_two.is_video = true;
+        resume_input_two.subdir = resumed_two.subdir;
+        resume_job.inputs = {resume_input_one, resume_input_two};
+        std::atomic<bool> prep_cancel{false};
+        app::DatasetPrep prep(prep_cancel, {});
+        app::PrepResult resumed_result;
+        std::string resumed_error;
+        check(prep.run(resume_job, resumed_result, resumed_error),
+              "resumes multiple videos from one verified sidecar");
+        check(resumed_result.captures.size() == 2 &&
+                  resumed_result.captures[0].path == resumed_one.path &&
+                  resumed_result.captures[1].path == resumed_two.path,
+              "multiple resumed videos reuse verified provenance");
+
         scheduler.shutdown();
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FAIL batch scenario: %s\n", e.what());

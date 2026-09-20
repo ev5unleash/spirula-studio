@@ -69,10 +69,16 @@ double laplacian_variance(std::vector<float>& gray, int S) {
     return sum2 / n - mu * mu;
 }
 
+struct Candidate {
+    fs::path path;
+    uint64_t export_ordinal = 0;
+};
+
 struct Analysis {
     double score = -1.0;
     std::vector<uint8_t> grey;   // empty unless the motion pass wants it
 };
+
 
 // `mw`/`mh` <= 0 asks for the sharpness only. `top_rows` limits what the grey
 // covers, for an EAC canvas whose bottom row is a different half of the sphere.
@@ -116,10 +122,13 @@ int select_sharpest_frames(const std::string& cand_dir,
                            const std::function<void(const std::string&)>& log,
                            const std::atomic<bool>& cancel) {
     std::error_code ec;
-    std::vector<fs::path> files;
+    std::vector<Candidate> files;
     for (fs::directory_iterator it(cand_dir, ec), end; !ec && it != end; it.increment(ec))
-        if (it->is_regular_file(ec)) files.push_back(it->path());
-    std::sort(files.begin(), files.end());
+        if (it->is_regular_file(ec)) files.push_back({it->path(), 0});
+    std::sort(files.begin(), files.end(),
+              [](const Candidate& a, const Candidate& b) { return a.path < b.path; });
+    for (size_t i = 0; i < files.size(); i++)
+        files[i].export_ordinal = (uint64_t)i;
     if (files.empty()) return -1;
 
     int group = std::max(options.group, 1);
@@ -149,7 +158,7 @@ int select_sharpest_frames(const std::string& cand_dir,
             src_h = mo.eac.track_h;
         } else {
             int w = 0, h = 0, c = 0;
-            if (stbi_info(files[0].string().c_str(), &w, &h, &c)) {
+            if (stbi_info(files[0].path.string().c_str(), &w, &h, &c)) {
                 src_w = w;
                 src_h = h;
             }
@@ -180,7 +189,7 @@ int select_sharpest_frames(const std::string& cand_dir,
                         // A decode that throws would be std::terminate off a
                         // worker thread. An unscored frame loses its group.
                         try {
-                            analyze(files[i].string(), tracker ? mo.width : 0,
+                            analyze(files[i].path.string(), tracker ? mo.width : 0,
                                     tracker ? mo.height : 0,
                                     options.eac.valid() && !options.eac.sphere(),
                                     got[i - base]);
@@ -243,25 +252,36 @@ int select_sharpest_frames(const std::string& cand_dir,
     std::vector<bool> kept_flag(files.size(), false);
     int kept = 0;
     for (size_t best : keep) {
-        const std::string ext = files[best].extension().string();
+        const std::string ext = files[best].path.extension().string();
         char name[64];
-        // Numbered by the candidate it is, not by how many were kept: the stem
-        // is what times a frame against the video's IMU, and an adaptive plan
-        // leaves nothing evenly spaced for a rate to recover it from.
-        std::snprintf(name, sizeof name, "%s%05d%s", prefix.c_str(), (int)best,
+        // Numbered by the candidate locator, never by an original source-frame
+        // identity; the fallback cannot prove one from ffmpeg's output.
+        std::snprintf(name, sizeof name, "%s%05llu%s", prefix.c_str(),
+                      (unsigned long long)files[best].export_ordinal,
                       ext.empty() ? ".jpg" : ext.c_str());
-        fs::rename(files[best], fs::path(out_dir) / name, ec);
-        if (ec) {   // cross-device fallback
-            fs::copy_file(files[best], fs::path(out_dir) / name,
+        const fs::path output = fs::path(out_dir) / name;
+        bool moved = false;
+        fs::rename(files[best].path, output, ec);
+        if (!ec) {
+            moved = true;
+        } else {
+            ec.clear();
+            fs::copy_file(files[best].path, output,
                           fs::copy_options::overwrite_existing, ec);
-            fs::remove(files[best], ec);
+            if (!ec) {
+                fs::remove(files[best].path, ec);
+                moved = !ec;
+            }
         }
+        if (!moved) return -1;
+        if (options.selected)
+            options.selected({output.string(), files[best].export_ordinal});
         kept_flag[best] = true;
         kept++;
         if (cancel.load()) return -1;
     }
     for (size_t i = 0; i < files.size(); i++)
-        if (!kept_flag[i]) fs::remove(files[i], ec);
+        if (!kept_flag[i]) fs::remove(files[i].path, ec);
     return kept;
 }
 

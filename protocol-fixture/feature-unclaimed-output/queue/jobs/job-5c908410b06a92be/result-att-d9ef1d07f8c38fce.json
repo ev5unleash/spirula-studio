@@ -1,0 +1,19 @@
+{
+  "schema_version": 2,
+  "job_id": "job-5c908410b06a92be",
+  "attempt_id": "att-d9ef1d07f8c38fce",
+  "phase": "sfm-extract",
+  "outcome": "success",
+  "exit_code": 0,
+  "message": "",
+  "partial": false,
+  "metric": true,
+  "registered": 0,
+  "images": 0,
+  "points": 0,
+  "models": 0,
+  "mean_reprojection": 0,
+  "median_reprojection": 0,
+  "sparse_path": "",
+  "outputs": ["C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\feature-unclaimed-output\\unclaimed"]
+}

@@ -13,7 +13,7 @@ endfunction()
 
 foreach(SS_TEST IN ITEMS source_path frame_motion_test mesh_format_roundtrip
         delaunay_degenerate worker_request_test checkpoint_resolution_test
-        dataset_parser_test step_config_test)
+        dataset_parser_test project_manifest_test step_config_test)
     ss_register_test(${SS_TEST} "headless;fast" 60)
 endforeach()
 
@@ -42,4 +42,8 @@ if(SS_BUILD_GUI)
     message(STATUS "Headless tests: core plus GUI-adjacent data tests (no window)")
 else()
     message(STATUS "Headless tests: core subset; batch/preset/stamp/argv tests require SS_BUILD_GUI")
+
+endif()
+if(SS_BUILD_SFM)
+    ss_register_test(sfm_feature_work_test "headless;fast" 60)
 endif()

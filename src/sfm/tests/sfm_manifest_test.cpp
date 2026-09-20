@@ -105,6 +105,9 @@ static int cmdManifestTest(int, char**) {
                "  - prefix: cam0\n"
                "    telemetry: clip.insv\n"
                "    fps: 24\n"
+               "    source_export_mapping: mapping-a\n"
+               "    timing_estimate: estimate-a\n"
+               "    synchronization_decision: decision-a\n"
                "rigs:\n"
                "  - name: dual\n"
                "    captures: [clip1, clip2]\n"
@@ -127,8 +130,11 @@ static int cmdManifestTest(int, char**) {
           "a member's known extrinsic");
     check(m.rigs[1].members.size() == 2 && m.rigs[1].members[1].prefix == "right",
           "a rig of bare prefixes");
-    check(m.captures.size() == 1 && m.captures[0].prefix == "cam0" && m.captures[0].fps == 24,
-          "a capture's telemetry and frame rate");
+    check(m.captures.size() == 1 && m.captures[0].prefix == "cam0" && m.captures[0].fps == 24 &&
+              m.captures[0].source_export_mapping == "mapping-a" &&
+              m.captures[0].timing_estimate == "estimate-a" &&
+              m.captures[0].synchronization_decision == "decision-a",
+          "a capture carries only timing record references");
     check(m.image_dir == "pics", "image_dir is kept as the file spells it");
     check(m.base_dir == dir, "and the manifest's own directory with it");
     check(m.camera_mode == "single", "camera_mode");
@@ -158,8 +164,11 @@ static int cmdManifestTest(int, char**) {
     check(cfg.camera.overrides[0].has_focal && cfg.camera.overrides[0].focal == 350.5,
           "with its focal");
     check(cfg.telemetry_inputs.size() == 1 &&
-              cfg.telemetry_inputs[0].path == (std::filesystem::path(dir) / "clip.insv").string(),
-          "a capture's telemetry resolves against the manifest");
+              cfg.telemetry_inputs[0].path == (std::filesystem::path(dir) / "clip.insv").string() &&
+              cfg.telemetry_inputs[0].source_export_mapping == "mapping-a" &&
+              cfg.telemetry_inputs[0].timing_estimate == "estimate-a" &&
+              cfg.telemetry_inputs[0].synchronization_decision == "decision-a",
+          "capture references reach config without copied timing values");
     check(cfg.rigs.size() == 2 && cfg.rigs[0].captures[1] == "clip2", "the rigs reach the config");
     {
         // The definitions against a tree: captures key frames apart, the bare

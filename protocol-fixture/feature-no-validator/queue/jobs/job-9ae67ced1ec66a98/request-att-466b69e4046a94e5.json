@@ -1,0 +1,13 @@
+{
+  "schema_version": 2,
+  "job_id": "job-9ae67ced1ec66a98",
+  "attempt_id": "att-466b69e4046a94e5",
+  "phase": "sfm-extract",
+  "device": "feature-device",
+  "device_name": "",
+  "work_dir": "C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\feature-no-validator",
+  "workspace": "C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\feature-no-validator",
+  "result_path": "C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\feature-no-validator\\queue\\jobs\\job-9ae67ced1ec66a98\\result-att-466b69e4046a94e5.json",
+  "args": ["feature-no-validator"],
+  "payload": "{}"
+}

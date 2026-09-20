@@ -1,0 +1,13 @@
+{
+  "schema_version": 2,
+  "job_id": "job-2ea8c0afb266c735",
+  "attempt_id": "att-344f0ad65297535d",
+  "phase": "geometry",
+  "device": "protocol-device",
+  "device_name": "",
+  "work_dir": "C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\missing-output",
+  "workspace": "C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\missing-output",
+  "result_path": "C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\missing-output\\queue\\jobs\\job-2ea8c0afb266c735\\result-att-344f0ad65297535d.json",
+  "args": ["missing-output"],
+  "payload": "{}"
+}

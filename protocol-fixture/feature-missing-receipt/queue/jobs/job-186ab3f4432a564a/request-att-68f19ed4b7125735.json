@@ -1,0 +1,13 @@
+{
+  "schema_version": 2,
+  "job_id": "job-186ab3f4432a564a",
+  "attempt_id": "att-68f19ed4b7125735",
+  "phase": "sfm-extract",
+  "device": "feature-device",
+  "device_name": "",
+  "work_dir": "C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\feature-missing-receipt",
+  "workspace": "C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\feature-missing-receipt",
+  "result_path": "C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\feature-missing-receipt\\queue\\jobs\\job-186ab3f4432a564a\\result-att-68f19ed4b7125735.json",
+  "args": ["feature-missing-receipt"],
+  "payload": "{}"
+}

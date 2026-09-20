@@ -2,7 +2,9 @@
 // Tiny RGBA inputs exercise prep; reconstruction/training stop before GPU work.
 
 #include "app/JobScheduler.h"
+#include "app/DatasetPrep.h"
 #include "app/OutputLease.h"
+#include "data/ProjectManifest.h"
 #include "external/stb_image.h"
 
 #include <chrono>
@@ -143,8 +145,73 @@ int main(int argc, char** argv) {
         std::ifstream in(state, std::ios::binary);
         std::ostringstream text;
         text << in.rdbuf();
-        check(text.str().find("\"schema_version\": 2") != std::string::npos,
-              "migration writes schema 2 only");
+        check(text.str().find("\"schema_version\": 3") != std::string::npos,
+              "migration writes schema 3 with legacy rows readable");
+    }
+    {
+        const fs::path project = root / "reference-project";
+        const fs::path queue = root / "reference-queue";
+        fs::create_directories(project);
+        std::ofstream(project / "artifact.bin", std::ios::binary) << "artifact";
+        spirula::project::ProjectRevision revision;
+        revision.name = "revision-a";
+        revision.artifacts = {{"artifact.bin", "test", "identity"}};
+        spirula::project::publish_revision(project, revision);
+        const app::worker::ProjectReference reference =
+            app::worker::make_project_reference(project.u8string(), revision.name);
+        std::string job_id;
+        {
+            sched::JobScheduler scheduler(queue.u8string(), exe);
+            scheduler.pause_dispatch(true);
+            sched::WorkflowSubmitOpts workflow;
+            workflow.project_root = reference.project_root;
+            workflow.project_revision = reference.project_revision;
+            workflow.project_revision_digest = reference.project_revision_digest;
+            workflow.metadata_paths = reference.metadata_paths;
+            workflow.artifact_paths = reference.artifact_paths;
+            workflow.work_dir = queue.u8string();
+            workflow.workspace = (queue / "workspace").u8string();
+            workflow.path_claims.push_back({workflow.workspace, true});
+            workflow.add_scheduler_publish = false;
+            sched::Phase phase;
+            phase.phase = "train";
+            phase.planned_device = "gpu-reference";
+            phase.args = {"--help"};
+            workflow.phases.push_back(std::move(phase));
+            job_id = scheduler.submit(workflow);
+            const auto rows = scheduler.list();
+            check(!job_id.empty() && rows.size() == 1 &&
+                      rows[0].project_root == reference.project_root &&
+                      rows[0].project_revision == reference.project_revision &&
+                      rows[0].project_revision_digest ==
+                          reference.project_revision_digest,
+                  "scheduler persists the immutable project reference digest");
+            check(rows[0].path_claims.size() >= 3,
+                  "scheduler adds revision and artifact read claims");
+            check(scheduler.save(), "scheduler saves project reference state");
+        }
+        spirula::project::ProjectRevision later = revision;
+        later.name = "revision-b";
+        spirula::project::publish_revision(project, later);
+        sched::JobScheduler recovered(queue.u8string(), exe);
+        recovered.pause_dispatch(true);
+        recovered.load();
+        const auto rows = recovered.list();
+        check(rows.size() == 1 && rows[0].job_id == job_id &&
+                  rows[0].project_revision == reference.project_revision &&
+                  rows[0].project_revision_digest ==
+                      reference.project_revision_digest &&
+                  rows[0].metadata_paths == reference.metadata_paths &&
+                  rows[0].artifact_paths == reference.artifact_paths,
+              "scheduler reload keeps the exact revision digest after current changes");
+        recovered.cancel(job_id);
+        recovered.retry(job_id);
+        const auto retried = recovered.list();
+        check(retried.size() == 1 && retried[0].state == sched::JobState::Queued &&
+                  retried[0].project_revision == reference.project_revision &&
+                  retried[0].project_revision_digest ==
+                      reference.project_revision_digest,
+              "scheduler retry preserves the exact revision digest");
     }
     {
         const fs::path migration = root / "publish-order-migration";
@@ -231,6 +298,19 @@ int main(int argc, char** argv) {
                   rows[0].phases[0].error == rows[0].error,
               "malformed persisted path records the phase error");
     }
+    {
+        app::PrepResult planned;
+        planned.mask_dir = (root / "planned-masks").u8string();
+        const app::PrepResult actual = app::resolve_prep_outputs(
+            planned,
+            {(root / "images").u8string(),
+             (root / ".spirula" / "prep-provenance.json").u8string()});
+        check(actual.image_dir == (root / "images").u8string() &&
+                  actual.mask_dir.empty() &&
+                  actual.provenance_sidecar ==
+                      (root / ".spirula" / "prep-provenance.json").u8string(),
+              "prep provenance sidecar is not bound as a mask");
+    }
     check(!sched::path_claims_conflict({(root / "dataset").u8string(), false},
                                        {(root / "dataset-copy").u8string(), true}),
           "non-overlapping path claims stay independent");
@@ -250,7 +330,7 @@ int main(int argc, char** argv) {
         sched::WorkflowSubmitOpts workflow;
         workflow.work_dir = order_root.u8string();
         workflow.workspace = workspace.u8string();
-        for (const char* name : {"prep", "sfm", "geometry", "train"}) {
+        for (const char* name : {"prep", "sfm-extract", "sfm", "geometry", "train"}) {
             sched::Phase phase;
             phase.phase = name;
             phase.planned_device = "gpu-order";
@@ -264,12 +344,13 @@ int main(int argc, char** argv) {
         check(!workflow_id.empty() && workflow_rows.size() == 1 &&
                   workflow_rows[0].state == sched::JobState::Queued,
               "linked training workflow submits without nested claim conflict");
-        check(workflow_rows.size() == 1 && workflow_rows[0].phases.size() == 5 &&
+        check(workflow_rows.size() == 1 && workflow_rows[0].phases.size() == 6 &&
                   workflow_rows[0].phases[0].phase == "prep" &&
-                  workflow_rows[0].phases[1].phase == "sfm" &&
-                  workflow_rows[0].phases[2].phase == "geometry" &&
-                  workflow_rows[0].phases[3].phase == "train" &&
-                  workflow_rows[0].phases[4].phase == "publish",
+                  workflow_rows[0].phases[1].phase == "sfm-extract" &&
+                  workflow_rows[0].phases[2].phase == "sfm" &&
+                  workflow_rows[0].phases[3].phase == "geometry" &&
+                  workflow_rows[0].phases[4].phase == "train" &&
+                  workflow_rows[0].phases[5].phase == "publish",
               "scheduler publishes only after linked training");
 
         const fs::path dataset = order_root / "dataset";
@@ -298,6 +379,25 @@ int main(int argc, char** argv) {
         check(first_job && second_job &&
                   first_job->output_dir != second_job->output_dir,
               "independent runs claim unique job output directories");
+    }
+
+    {
+        const fs::path order_root = root / "phase-order";
+        sched::JobScheduler recovered(order_root.u8string(), exe);
+        recovered.pause_dispatch(true);
+        recovered.load();
+        bool persisted = false;
+        for (const auto& job : recovered.list()) {
+            if (job.phases.size() != 6 || job.phases[1].phase != "sfm-extract")
+                continue;
+            persisted = job.state == sched::JobState::Queued &&
+                        job.completed_prefix == 0 &&
+                        job.current_phase == 0 &&
+                        job.phases[0].phase == "prep" &&
+                        job.phases[2].phase == "sfm" &&
+                        job.phases[5].phase == "publish";
+        }
+        check(persisted, "sfm-extract phase order survives scheduler reload");
     }
 
     {

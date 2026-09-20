@@ -1,0 +1,6 @@
+{
+  "schema_version": 2,
+  "jobs": [
+    {"order":0,"job_id":"job-aa3b42cae537de7b","phase":"sfm-extract","device":"feature-device","device_name":"","work_dir":"C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\feature-extra-output","run_dir":"C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\feature-extra-output\\queue\\jobs\\job-aa3b42cae537de7b","output_dir":"","workspace":"C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\feature-extra-output","source_paths":[],"options_payload":"","created_at":"2026-09-20T00:49:02Z","state":"Failed","attempt_id":"att-2fe342b397c2c053","error":"SfM extraction worker produced no unique result directory","pending_resume":false,"last_exit_code":0,"completed_prefix":0,"current_phase":0,"args":["feature-extra-output"],"path_claims":[{"path":"C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\feature-extra-output\\queue\\jobs\\job-aa3b42cae537de7b","write":true}],"phases":[{"phase":"sfm-extract","optional":false,"planned_device":"feature-device","planned_device_name":"","actual_device":"feature-device","actual_device_name":"","output":"","outputs":[],"args":["feature-extra-output"],"payload":"{}","outcome":"failed","completed":false,"exit_code":0,"error":"SfM extraction worker produced no unique result directory"}]}
+  ]
+}

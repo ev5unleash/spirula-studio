@@ -27,12 +27,16 @@ private:
         uint32_t size = 0;
         int64_t  dts = 0;      // timescale units
         int64_t  pts = 0;
+        int64_t  duration = 0;
         bool     is_sync = false;
     };
     struct Track {
         TrackInfo info;
+        uint32_t  track_id = 0;
         uint32_t  timescale = 0;
         uint64_t  duration = 0;
+        bool      has_stts = false;
+        bool      has_ctts = false;
         std::vector<Sample> samples;
         // Each sample's rank in composition-time order; a stream with
         // B-frames decodes them out of that order.

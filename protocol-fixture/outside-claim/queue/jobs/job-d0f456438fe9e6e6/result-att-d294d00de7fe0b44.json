@@ -1,0 +1,19 @@
+{
+  "schema_version": 2,
+  "job_id": "job-d0f456438fe9e6e6",
+  "attempt_id": "att-d294d00de7fe0b44",
+  "phase": "geometry",
+  "outcome": "success",
+  "exit_code": 0,
+  "message": "",
+  "partial": false,
+  "metric": true,
+  "registered": 0,
+  "images": 0,
+  "points": 0,
+  "models": 0,
+  "mean_reprojection": 0,
+  "median_reprojection": 0,
+  "sparse_path": "",
+  "outputs": ["C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\outside-claim"]
+}

@@ -10,8 +10,8 @@
 //
 // Verification is the one stage worth resuming part way through: it is the
 // longest, and it is a long list of independent pairs. MatchJournal is the
-// append-only record of every pair it finished, kept ONLY until matches.bin is
-// written.
+// append-only record of every pair it finished, and also records the immutable
+// dependency identity needed when a final cache is remapped.
 
 #include "sfm/core/Matches.h"
 
@@ -55,9 +55,24 @@ inline uint64_t pairKey(uint32_t a, uint32_t b) {
     return a < b ? ((uint64_t)a << 32) | b : ((uint64_t)b << 32) | a;
 }
 
-// Every pair verification finished, kept or not: one the journal names is never
-// verified twice, one absent from it was never reached (or went with the tail
-// the writer had not flushed). Appended from the workers, hence the lock.
+// A pair's current locators are disposable; the feature products and recipe
+// are the reusable identity.
+struct PairDependency {
+    uint32_t image1 = 0, image2 = 0;
+    std::string image_name1, image_name2;
+    std::string feature_key1, feature_digest1;
+    std::string feature_key2, feature_digest2;
+    std::string recipe_digest;
+    std::string dependency_key;
+};
+
+std::string pairDependencyKey(const PairDependency& dependency);
+std::string pairPayloadDigest(const PairDependency& dependency,
+                              const TwoViewMatches& pair);
+
+// Every pair verification finished, kept or not: the journal names it, so a
+// pair absent from it was never reached (or went with the tail the writer had
+// not flushed). Appended from the workers, hence the lock.
 class MatchJournal {
 public:
     ~MatchJournal() { close(); }
@@ -65,7 +80,8 @@ public:
     // Open for appending after `resume` read it, or fresh. False leaves the
     // journal disarmed and every call below a no-op.
     bool open(const std::filesystem::path& file, const std::string& signature,
-              bool append);
+              bool append,
+              const std::vector<PairDependency>& dependencies);
     // `putative` is what the matcher offered before verification, which only
     // this record can say afterwards -- the summary counts it.
     void record(uint32_t a, uint32_t b, int32_t config, uint32_t putative,
@@ -81,14 +97,16 @@ private:
     std::mutex _mu;
     std::ofstream _f;
     std::string _buf;
+    std::unordered_map<uint64_t, PairDependency> _dependencies;
     double _flushed_at = 0;
     bool _armed = false;
 };
 
 // What a journal holds: the pairs it finished, and the matches of the ones it
-// kept. False (leaving both untouched) when the file is absent, was written for
-// other settings, or names other images.
+// kept. False (leaving both untouched) when the file is absent, has another
+// recipe, or uses an older record version.
 bool readJournal(const std::filesystem::path& file, const std::string& signature,
+                 const std::vector<PairDependency>& dependencies,
                  const std::vector<ImageEntry>& images,
                  std::unordered_map<uint64_t, TwoViewMatches>& kept,
                  std::vector<uint64_t>& done, uint64_t& putative);

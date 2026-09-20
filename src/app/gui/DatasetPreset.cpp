@@ -82,6 +82,7 @@ namespace {
     X("sfm_distortion_refine",      sfm.distortion_refine)                    \
     X("sfm_final_per_image_intrinsics", sfm.final_per_image_intrinsics)       \
     X("sfm_final_free_rig",         sfm.final_free_rig)                       \
+    X("sfm_feature_shards",         sfm.feature_shards)                       \
     X("sfm_max_features",           sfm.max_features)                         \
     X("sfm_max_image_size",         sfm.max_image_size)                       \
     X("sfm_mapper",                 sfm.mapper)                               \
@@ -231,6 +232,7 @@ void sanitize_dataset_settings(DatasetSettings& s) {
     clamp_to(j.matcher, 0, 1);
     clamp_to(j.metric_gps, 0, 2);
     clamp_to(j.sensor_gauge, 0, 2);
+    clamp_to(j.feature_shards, 1, 256);
     clamp_to(j.max_features, 0, 1000000);
     clamp_to(j.max_image_size, 0, 32768);
     j.init_focal_px = std::max(0.0f, j.init_focal_px);

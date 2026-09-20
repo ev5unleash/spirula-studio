@@ -1,0 +1,19 @@
+{
+  "schema_version": 2,
+  "job_id": "job-2ea8c0afb266c735",
+  "attempt_id": "att-344f0ad65297535d",
+  "phase": "geometry",
+  "outcome": "success",
+  "exit_code": 0,
+  "message": "",
+  "partial": false,
+  "metric": true,
+  "registered": 0,
+  "images": 0,
+  "points": 0,
+  "models": 0,
+  "mean_reprojection": 0,
+  "median_reprojection": 0,
+  "sparse_path": "",
+  "outputs": ["C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\missing-output\\queue\\jobs\\job-2ea8c0afb266c735\\absent"]
+}

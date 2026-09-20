@@ -1,0 +1,19 @@
+{
+  "schema_version": 2,
+  "job_id": "job-186ab3f4432a564a",
+  "attempt_id": "att-68f19ed4b7125735",
+  "phase": "sfm-extract",
+  "outcome": "success",
+  "exit_code": 0,
+  "message": "",
+  "partial": false,
+  "metric": true,
+  "registered": 0,
+  "images": 0,
+  "points": 0,
+  "models": 0,
+  "mean_reprojection": 0,
+  "median_reprojection": 0,
+  "sparse_path": "",
+  "outputs": ["C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\feature-missing-receipt\\queue\\jobs\\job-186ab3f4432a564a"]
+}

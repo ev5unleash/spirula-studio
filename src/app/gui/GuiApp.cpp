@@ -7,9 +7,11 @@
 
 #include "checkpoint/SplatPly.h"
 #include "data/Json.h"
+#include "data/ProjectManifest.h"
 #include "app/AppPaths.h"
 #include "app/CrashLog.h"
 #include "app/DatasetPrep.h"
+#include "app/ReconStamp.h"
 #include "app/gui/MaskPrompt.h"
 #include "app/gui/Subprocess.h"
 #include "mesh/MeshImport.h"
@@ -43,8 +45,12 @@
 #elif defined(SS_TOOL_SFM)
 #include "sfm/vk/VkContext.h"
 #endif
+#ifdef SS_TOOL_SFM
+#include "sfm/Pipeline.h"
+#endif
 
 #include <algorithm>
+#include <cctype>
 #include <cfloat>
 #include <chrono>
 #include <cmath>
@@ -53,6 +59,8 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
+#include <sstream>
 #include <stdexcept>
 
 namespace fs = std::filesystem;
@@ -131,6 +139,78 @@ const Msg& scheduler_state_label(app::sched::JobState state) {
         case app::sched::JobState::Failed: return msg::scheduler_state_failed;
     }
     return msg::scheduler_state_failed;
+}
+
+void append_unique_path(std::vector<fs::path>& paths, fs::path path) {
+    if (path.empty()) return;
+    std::error_code ec;
+    const fs::path normalized = fs::weakly_canonical(path, ec);
+    const fs::path value = ec ? path.lexically_normal() : normalized;
+    const std::string key = value.generic_u8string();
+    for (const fs::path& existing : paths)
+        if (existing.generic_u8string() == key) return;
+    paths.push_back(value);
+}
+
+std::vector<fs::path> prep_source_roots(
+    const std::vector<app::PrepInput>& inputs) {
+    std::vector<fs::path> roots;
+    for (const app::PrepInput& input : inputs) {
+        append_unique_path(roots, fs::u8path(input.path));
+        append_unique_path(roots, fs::u8path(input.mask_dir));
+        append_unique_path(roots, fs::u8path(input.stencil.mask.image));
+    }
+    return roots;
+}
+
+void append_existing_artifact(std::vector<fs::path>& artifacts,
+                              const fs::path& path) {
+    std::error_code ec;
+    if (fs::exists(path, ec) && !ec)
+        append_unique_path(artifacts, path);
+}
+
+std::vector<fs::path> project_consumed_artifacts(
+    const std::string& workspace,
+    const std::vector<app::PrepInput>& inputs) {
+    std::vector<fs::path> artifacts;
+    for (const std::string& artifact : app::workspace_artifacts(workspace, inputs))
+        append_existing_artifact(artifacts, fs::u8path(artifact));
+    const fs::path root = fs::u8path(workspace);
+    append_existing_artifact(artifacts, root / "transforms.json");
+    append_existing_artifact(artifacts, fs::u8path(
+        app::prep_provenance_path(workspace)));
+    std::error_code ec;
+    for (fs::recursive_directory_iterator it(root,
+             fs::directory_options::skip_permission_denied, ec), end;
+         !ec && it != end; it.increment(ec)) {
+        if (!it->is_regular_file(ec)) continue;
+        std::string extension = it->path().extension().string();
+        for (char& c : extension)
+            c = static_cast<char>(std::tolower((unsigned char)c));
+        if (extension == ".xml" || extension == ".ply" ||
+            extension == ".psx")
+            append_existing_artifact(artifacts, it->path());
+    }
+    return artifacts;
+}
+
+bool bind_project_reference(app::worker::ProjectReference& reference,
+                            const std::string& project_root,
+                            const std::vector<fs::path>& source_roots,
+                            const std::vector<fs::path>& artifacts,
+                            std::string& error) {
+    try {
+        const spirula::project::ProjectRevision revision =
+            spirula::project::migrate_legacy_workspace(
+                fs::u8path(project_root), source_roots, artifacts);
+        reference = app::worker::make_project_reference(project_root,
+                                                        revision.name);
+        return true;
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    }
 }
 
 std::string format_gib(uint64_t bytes) {
@@ -212,6 +292,247 @@ std::vector<std::string> video_dialog_filters() {
                                     kVideoExtensions + kNumVideoExtensions);
 }
 
+#ifdef SS_TOOL_SFM
+bool validate_sfm_feature_output(const app::sched::Job& job,
+                                 const app::sched::Phase& phase,
+                                 const std::string& output,
+                                 std::string& error) {
+    try {
+        std::string request;
+        for (size_t i = 0; i < phase.args.size(); ++i) {
+            if (phase.args[i] == "--feature-request" &&
+                i + 1 < phase.args.size()) {
+                request = phase.args[i + 1];
+                break;
+            }
+            constexpr const char prefix[] = "--feature-request=";
+            if (phase.args[i].compare(0, sizeof(prefix) - 1, prefix) == 0) {
+                request = phase.args[i].substr(sizeof(prefix) - 1);
+                break;
+            }
+        }
+        if (request.empty())
+            throw std::runtime_error("SfM extraction request path missing");
+        fs::path path = fs::u8path(request);
+        if (path.is_relative()) path = fs::u8path(job.work_dir) / path;
+        sfm::validateFeatureResult(path.string(), fs::u8path(output));
+        return true;
+    } catch (const std::exception& exception) {
+        error = exception.what();
+        return false;
+    }
+}
+#endif
+bool scheduler_state_live(app::sched::JobState state) {
+    return state == app::sched::JobState::Queued ||
+           state == app::sched::JobState::Starting ||
+           state == app::sched::JobState::Running ||
+           state == app::sched::JobState::Stopping;
+}
+
+bool scheduler_state_failed(app::sched::JobState state) {
+    return state == app::sched::JobState::Stopped ||
+           state == app::sched::JobState::Failed ||
+           state == app::sched::JobState::Interrupted ||
+           state == app::sched::JobState::Blocked;
+}
+
+std::string feature_scheduler_payload(const char* role,
+                                       const std::string& key,
+                                       const std::string& plan_dir,
+                                       const std::string& plan_path,
+                                       const std::string& workspace,
+                                       int shard, int count,
+                                       int batch_row = -1) {
+    return std::string("gui:feature-shard:v1\nrole=") + role +
+           "\nkey=" + key + "\nplan_dir=" + plan_dir +
+           "\nplan=" + plan_path + "\nworkspace=" + workspace +
+           "\nshard=" + std::to_string(shard) +
+           "\ncount=" + std::to_string(count) +
+           "\nbatch=" + std::to_string(batch_row);
+}
+
+std::string phase_arg(const app::sched::Phase& phase, const char* name) {
+    for (size_t i = 0; i + 1 < phase.args.size(); ++i)
+        if (phase.args[i] == name) return phase.args[i + 1];
+    return {};
+}
+
+std::string scheduler_payload_field(const std::string& payload,
+                                    const char* name) {
+    const std::string prefix = std::string("\n") + name + "=";
+    const size_t start = payload.find(prefix);
+    if (start == std::string::npos) return {};
+    const size_t value = start + prefix.size();
+    const size_t end = payload.find('\n', value);
+    return payload.substr(value, end == std::string::npos
+                                   ? std::string::npos : end - value);
+}
+
+bool write_feature_central_args(
+    const std::string& path, const std::vector<std::string>& args,
+    const std::string& payload, const std::vector<std::string>& plan_args,
+    const std::vector<app::sched::Phase>& tail, std::string& error) {
+    const fs::path target = fs::u8path(path);
+    const fs::path temp = fs::u8path(path + ".tmp");
+    std::error_code ec;
+    fs::create_directories(target.parent_path(), ec);
+    if (ec) {
+        error = "cannot create " + target.parent_path().u8string();
+        return false;
+    }
+    std::ofstream file(temp, std::ios::binary | std::ios::trunc);
+    if (!file) {
+        error = "cannot write " + temp.u8string();
+        return false;
+    }
+    auto write = [&](const std::string& value) {
+        file << static_cast<uint64_t>(value.size()) << '\n';
+        file.write(value.data(), static_cast<std::streamsize>(value.size()));
+        file.put('\n');
+    };
+    file << static_cast<uint64_t>(args.size()) << '\n';
+    for (const std::string& arg : args) write(arg);
+    write(payload);
+    file << static_cast<uint64_t>(plan_args.size()) << '\n';
+    for (const std::string& arg : plan_args) write(arg);
+    file << static_cast<uint64_t>(tail.size()) << '\n';
+    for (const app::sched::Phase& phase : tail) {
+        write(phase.phase);
+        write(phase.optional ? "1" : "0");
+        write(phase.planned_device);
+        write(phase.planned_device_name);
+        write(phase.output);
+        file << static_cast<uint64_t>(phase.args.size()) << '\n';
+        for (const std::string& arg : phase.args) write(arg);
+        write(phase.payload);
+    }
+    file.close();
+    if (!file) {
+        fs::remove(temp, ec);
+        error = "cannot write " + temp.u8string();
+        return false;
+    }
+    fs::rename(temp, target, ec);
+    if (ec) {
+        fs::remove(temp, ec);
+        error = "cannot publish " + target.u8string();
+        return false;
+    }
+    return true;
+}
+
+bool read_feature_central_args(
+    const std::string& path, std::vector<std::string>& args,
+    std::string& payload, std::vector<std::string>& plan_args,
+    std::vector<app::sched::Phase>* tail = nullptr) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return false;
+    auto read_count = [&](uint64_t limit, uint64_t& count) {
+        std::string line;
+        if (!std::getline(file, line)) return false;
+        try {
+            size_t used = 0;
+            count = std::stoull(line, &used);
+            return used == line.size() && count <= limit;
+        } catch (...) {
+            return false;
+        }
+    };
+    auto read = [&](std::string& value) {
+        uint64_t size = 0;
+        if (!read_count(16u << 20, size)) return false;
+        value.resize(static_cast<size_t>(size));
+        file.read(value.data(), static_cast<std::streamsize>(size));
+        return file && file.get() == '\n';
+    };
+    uint64_t count = 0;
+    if (!read_count(4096, count)) return false;
+    args.clear();
+    args.reserve(static_cast<size_t>(count));
+    for (uint64_t i = 0; i < count; ++i) {
+        std::string value;
+        if (!read(value)) return false;
+        args.push_back(std::move(value));
+    }
+    if (!read(payload)) return false;
+    if (!read_count(4096, count)) return false;
+    plan_args.clear();
+    plan_args.reserve(static_cast<size_t>(count));
+    for (uint64_t i = 0; i < count; ++i) {
+        std::string value;
+        if (!read(value)) return false;
+        plan_args.push_back(std::move(value));
+    }
+    if (!tail) return true;
+    tail->clear();
+    uint64_t phase_count = 0;
+    if (!read_count(4, phase_count)) return false;
+    for (uint64_t i = 0; i < phase_count; ++i) {
+        app::sched::Phase phase;
+        std::string optional;
+        if (!read(phase.phase) || !read(optional) ||
+            (optional != "0" && optional != "1") ||
+            !read(phase.planned_device) ||
+            !read(phase.planned_device_name) || !read(phase.output))
+            return false;
+        phase.optional = optional == "1";
+        uint64_t arg_count = 0;
+        if (!read_count(4096, arg_count)) return false;
+        phase.args.reserve(static_cast<size_t>(arg_count));
+        for (uint64_t j = 0; j < arg_count; ++j) {
+            std::string value;
+            if (!read(value)) return false;
+            phase.args.push_back(std::move(value));
+        }
+        if (!read(phase.payload)) return false;
+        tail->push_back(std::move(phase));
+    }
+    return file.peek() == std::char_traits<char>::eof();
+}
+
+bool feature_coordinator_closed(const std::string& plan_dir) {
+    std::error_code ec;
+    return !plan_dir.empty() &&
+           fs::is_directory(fs::u8path(plan_dir) / ".closed", ec);
+}
+
+bool reuse_sfm_model(const SfmJob& job,
+                     const std::vector<std::string>& model_args) {
+    const app::WorkspaceState prior =
+        app::probe_workspace(job.prep.workspace, job.prep.inputs);
+    if (!prior.model || job.redo_model || job.prep.redo_frames) return false;
+    if (!app::recon_stamp_change(
+             app::read_recon_stamp(job.prep.workspace,
+                                   app::kFramesStampFile),
+             app::frames_stamp(job.prep)).empty())
+        return false;
+    if (!job.settings_built_model) return true;
+    app::ReconStamp requested;
+    requested.present = true;
+    requested.engine = "builtin";
+    requested.args = model_args;
+    return app::recon_stamp_change(
+               app::read_recon_stamp(job.prep.workspace), requested).empty();
+}
+
+bool close_feature_coordinator(const std::string& plan_dir,
+                               std::string& error) {
+    std::error_code ec;
+    const fs::path root = fs::u8path(plan_dir);
+    fs::create_directories(root, ec);
+    if (!ec) fs::create_directory(root / ".closed", ec);
+    if (!ec) return true;
+    error = "cannot close feature coordinator " + root.u8string();
+    return false;
+}
+
+bool feature_scheduler_job_closed(const app::sched::Job& job) {
+    return job.options_payload.rfind("gui:feature-shard:v1", 0) == 0 &&
+           feature_coordinator_closed(
+               scheduler_payload_field(job.options_payload, "plan_dir"));
+}
+
 }  // namespace
 
 
@@ -237,6 +558,9 @@ GuiApp::GuiApp()
             log("[" + e.job_id + "] " + e.error);
         }
     });
+#ifdef SS_TOOL_SFM
+    _scheduler.set_feature_result_validator(validate_sfm_feature_output);
+#endif
     _scheduler.set_device_validator(
         [this](const std::string& device, std::string& error) {
             return validate_scheduled_device(device, error);
@@ -252,6 +576,223 @@ GuiApp::GuiApp()
         }
     }
     apply_preset("3dgs");
+    {
+        std::map<std::string, size_t> by_key;
+        bool recovered_batch_ids = false;
+        for (const app::sched::Job& job : _scheduler.list()) {
+            if (job.options_payload.rfind("gui:feature-shard:v1", 0) != 0)
+                continue;
+            const std::string recovered_plan_dir =
+                scheduler_payload_field(job.options_payload, "plan_dir");
+            if (feature_coordinator_closed(recovered_plan_dir)) continue;
+            const std::string payload_key =
+                scheduler_payload_field(job.options_payload, "key");
+            const std::string key = payload_key.empty()
+                                        ? "invalid-" + job.job_id
+                                        : payload_key;
+            size_t index = 0;
+            const auto found = by_key.find(key);
+            if (found == by_key.end()) {
+                index = _feature_coordinators.size();
+                by_key.emplace(key, index);
+                FeatureShardCoordinator c;
+                c.key = key;
+                c.plan_dir = recovered_plan_dir;
+                c.plan_path =
+                    scheduler_payload_field(job.options_payload, "plan");
+                c.workspace =
+                    scheduler_payload_field(job.options_payload, "workspace");
+                if (payload_key.empty() || c.plan_dir.empty() ||
+                    c.plan_path.empty() || c.workspace.empty()) {
+                    c.failed = true;
+                    c.local_failure = true;
+                    c.error = "feature-shard scheduler metadata is invalid";
+                }
+                try {
+                    c.configured_shards = std::stoi(
+                        scheduler_payload_field(job.options_payload, "count"));
+                    if (c.configured_shards < 1 ||
+                        c.configured_shards > 256)
+                        throw std::out_of_range("feature shard count");
+                } catch (...) {
+                    c.configured_shards = 1;
+                    c.failed = true;
+                    c.local_failure = true;
+                    c.error = "feature-shard scheduler metadata is invalid";
+                }
+                const std::string batch_value =
+                    scheduler_payload_field(job.options_payload, "batch");
+                try {
+                    const int batch = std::stoi(batch_value);
+                    if (batch >= 0 && batch < (int)_batch.size())
+                        c.batch_row = batch;
+                    else if (batch != -1)
+                        throw std::out_of_range("feature batch row");
+                } catch (...) {
+                    c.failed = true;
+                    c.local_failure = true;
+                    c.error = "feature-shard scheduler metadata is invalid";
+                }
+                c.sfm = _sfm_job;
+                c.sfm.prep.workspace = c.workspace;
+                _feature_coordinators.push_back(std::move(c));
+            } else {
+                index = found->second;
+            }
+            FeatureShardCoordinator& c = _feature_coordinators[index];
+            const std::string& plan_dir = recovered_plan_dir;
+            const std::string plan_path =
+                scheduler_payload_field(job.options_payload, "plan");
+            const std::string workspace =
+                scheduler_payload_field(job.options_payload, "workspace");
+            if (!plan_dir.empty()) c.plan_dir = plan_dir;
+            if (!plan_path.empty()) c.plan_path = plan_path;
+            if (!workspace.empty()) c.workspace = workspace;
+            if (c.batch_row >= 0) {
+                BatchRow& row = _batch[(size_t)c.batch_row];
+                row.scheduler_active = true;
+                if (std::find(row.scheduler_ids.begin(), row.scheduler_ids.end(),
+                              job.job_id) == row.scheduler_ids.end()) {
+                    row.scheduler_ids.push_back(job.job_id);
+                    recovered_batch_ids = true;
+                }
+                _batch_active = true;
+            }
+            const std::string role =
+                scheduler_payload_field(job.options_payload, "role");
+            if (role != "prep" && role != "central" && role != "shard") {
+                c.failed = true;
+                c.local_failure = true;
+                c.error = "feature-shard scheduler metadata is invalid";
+                continue;
+            }
+            if (role != "prep") {
+                try {
+                    const int count = std::stoi(
+                        scheduler_payload_field(job.options_payload, "count"));
+                    if (count < 1 || count > 256)
+                        throw std::out_of_range("feature shard count");
+                    c.effective_shards = count;
+                } catch (...) {
+                    c.failed = true;
+                    c.local_failure = true;
+                    c.error = "feature-shard scheduler metadata is invalid";
+                }
+            }
+            if (role == "prep") {
+                c.prep_job_id = job.job_id;
+                if (job.phases.empty()) {
+                    c.failed = true;
+                    c.local_failure = true;
+                    c.error = "feature-shard preparation metadata is invalid";
+                    continue;
+                }
+                const app::sched::Phase& prep = job.phases.front();
+                if (c.device.empty()) c.device = prep.planned_device;
+                if (c.device_name.empty())
+                    c.device_name = prep.planned_device_name;
+                try {
+                    const PrepJob frozen =
+                        app::worker::deserialize_prep_job(prep.payload);
+                    const PrepResult planned = app::planned_prep(frozen);
+                    const PrepResult actual =
+                        app::resolve_prep_outputs(planned, prep.outputs);
+                    c.sfm.prep = frozen;
+                    c.workspace = frozen.workspace;
+                    c.image_dir = actual.image_dir;
+                    c.mask_dir = actual.mask_dir;
+                } catch (const std::exception& e) {
+                    c.failed = true;
+                    c.local_failure = true;
+                    c.error =
+                        std::string("feature-shard preparation metadata invalid: ") +
+                        e.what();
+                }
+            } else if (role == "central") {
+                c.central_job_id = job.job_id;
+            } else {
+                int shard = -1;
+                try {
+                    shard = std::stoi(
+                        scheduler_payload_field(job.options_payload, "shard"));
+                } catch (...) {
+                }
+                if (shard < 0 || shard >= c.effective_shards) {
+                    c.failed = true;
+                    c.local_failure = true;
+                    c.error = "feature-shard scheduler metadata is invalid";
+                    continue;
+                }
+                c.shard_job_ids.resize((size_t)c.effective_shards);
+                c.request_paths.resize((size_t)c.effective_shards);
+                c.shard_job_ids[(size_t)shard] = job.job_id;
+                if (job.phases.empty()) {
+                    c.failed = true;
+                    c.local_failure = true;
+                    c.error = "feature-shard extraction metadata is invalid";
+                    continue;
+                }
+                const app::sched::Phase& extract = job.phases.front();
+                const std::string request =
+                    phase_arg(extract, "--feature-request");
+                if (request.empty()) {
+                    c.failed = true;
+                    c.local_failure = true;
+                    c.error = "feature-shard extraction request is missing";
+                    continue;
+                }
+                c.request_paths[(size_t)shard] = request;
+                if (c.device.empty())
+                    c.device = extract.planned_device;
+                if (c.device_name.empty())
+                    c.device_name = extract.planned_device_name;
+            }
+        }
+        for (FeatureShardCoordinator& c : _feature_coordinators) {
+            if (c.plan_dir.empty() ||
+                !read_feature_central_args(
+                    (fs::path(c.plan_dir) / "central.args").u8string(),
+                    c.central_args, c.central_payload, c.plan_args,
+                    &c.central_tail)) {
+                c.central_args.clear();
+                c.central_payload.clear();
+                c.plan_args.clear();
+                c.central_tail.clear();
+                c.failed = true;
+                c.local_failure = true;
+                if (c.error.empty())
+                    c.error = "feature-shard coordinator metadata is unavailable";
+            }
+#ifdef SS_TOOL_SFM
+            c.shard_images.clear();
+            c.expected_images = 0;
+            for (const std::string& path : c.request_paths) {
+                try {
+                    if (path.empty())
+                        throw std::runtime_error("feature-shard request path missing");
+                    const auto request =
+                        sfm::feature_work::readRequestFile(path);
+                    const int images = (int)request.image_indices.size();
+                    c.shard_images.push_back(images);
+                    c.expected_images += images;
+                } catch (const std::exception& e) {
+                    c.shard_images.push_back(0);
+                    c.failed = true;
+                    c.local_failure = true;
+                    if (c.error.empty())
+                        c.error = std::string(
+                                      "feature-shard request metadata invalid: ") +
+                                  e.what();
+                }
+            }
+#endif
+            if (!c.finished && !c.prep_job_id.empty())
+                _scheduled_dataset_id = c.central_job_id.empty()
+                                            ? c.prep_job_id
+                                            : c.central_job_id;
+        }
+        if (recovered_batch_ids) save_batch_list(_batch);
+    }
     // Built-in when it is there, COLMAP when it is not; effective_engine()
     // overrides this anyway if the stored choice is unavailable.
     if (!builtin_sfm_available()) _engine = Engine::Colmap;
@@ -619,8 +1160,8 @@ void GuiApp::write_run_settings(std::ofstream& f) {
     line("init_focal_px", cfg_str(j.init_focal_px));
     if (!j.init_distortion.empty()) line("init_distortion", j.init_distortion);
     line("distortion_refine", std::to_string(j.distortion_refine));
-    line("final_per_image_intrinsics", cfg_str(j.final_per_image_intrinsics));
     line("final_free_rig", cfg_str(j.final_free_rig));
+    line("feature_shards", std::to_string(j.feature_shards));
     line("max_features", std::to_string(j.max_features));
     line("max_image_size", std::to_string(j.max_image_size));
     line("metric_gps", std::to_string(j.metric_gps));
@@ -1264,21 +1805,403 @@ const app::sched::Job* GuiApp::scheduler_job(const std::string& id) const {
     return nullptr;
 }
 
+bool GuiApp::submit_feature_shard_prep(
+    FeatureShardCoordinator& c, const PrepJob& frozen,
+    const std::string& work_dir, const std::string& device,
+    const std::string& device_name) {
+    app::sched::WorkflowSubmitOpts submit;
+    submit.work_dir = work_dir;
+    submit.workspace = frozen.workspace;
+    submit.options_payload = feature_scheduler_payload(
+        "prep", c.key, c.plan_dir, c.plan_path, frozen.workspace, -1,
+        c.configured_shards, c.batch_row);
+    const std::vector<fs::path> source_roots = prep_source_roots(frozen.inputs);
+    for (const fs::path& source : source_roots)
+        submit.source_paths.push_back(source.u8string());
+    if (!bind_project_reference(
+            static_cast<app::worker::ProjectReference&>(submit),
+            frozen.workspace, source_roots,
+            project_consumed_artifacts(frozen.workspace, frozen.inputs),
+            c.error))
+        return false;
+
+    app::sched::Phase prep;
+    prep.phase = "prep";
+    const app::PrepResult planned = app::planned_prep(frozen);
+    if (!app::reads_photos_in_place(frozen.inputs, frozen.photo_import))
+        prep.output = planned.image_dir;
+    prep.planned_device = device;
+    prep.planned_device_name = device_name;
+    prep.payload = app::worker::serialize_prep_job(frozen);
+    submit.phases.push_back(std::move(prep));
+    const std::string id = _scheduler.submit(submit);
+    if (id.empty()) {
+        c.error = _scheduler.state_error();
+        return false;
+    }
+    c.prep_job_id = id;
+    return true;
+}
+
+void GuiApp::advance_feature_shards() {
+    for (FeatureShardCoordinator& c : _feature_coordinators) {
+        if (c.finished) continue;
+        if (c.failed) {
+            if (c.local_failure) continue;
+            bool retryable = false;
+            bool still_failed = false;
+            for (const std::string& id : c.shard_job_ids) {
+                const app::sched::Job* job = scheduler_job(id);
+                retryable = retryable || job != nullptr;
+                still_failed = still_failed ||
+                                (job && scheduler_state_failed(job->state));
+            }
+            const app::sched::Job* prep = scheduler_job(c.prep_job_id);
+            retryable = retryable || prep != nullptr;
+            still_failed = still_failed ||
+                           (prep && scheduler_state_failed(prep->state));
+            const app::sched::Job* central = scheduler_job(c.central_job_id);
+            retryable = retryable || central != nullptr;
+            still_failed = still_failed ||
+                           (central && scheduler_state_failed(central->state));
+            if (!retryable || still_failed) continue;
+            c.failed = false;
+            c.error.clear();
+        }
+
+        const app::sched::Job* prep = scheduler_job(c.prep_job_id);
+        if (!prep) {
+            c.failed = true;
+            c.local_failure = true;
+            c.error = "feature-shard preparation job disappeared";
+            continue;
+        }
+        if (scheduler_state_live(prep->state)) continue;
+        if (scheduler_state_failed(prep->state)) {
+            c.failed = true;
+            c.error = prep->error.empty() ? "feature-shard preparation failed"
+                                          : prep->error;
+            continue;
+        }
+
+        const bool missing_shards =
+            c.shard_job_ids.size() != (size_t)c.effective_shards ||
+            std::find(c.shard_job_ids.begin(), c.shard_job_ids.end(),
+                      std::string{}) != c.shard_job_ids.end();
+        if (missing_shards) {
+            try {
+                if (prep->phases.empty())
+                    throw std::runtime_error("feature-shard preparation has no phase");
+                const app::sched::Phase& prep_phase = prep->phases.front();
+                const PrepJob frozen =
+                    app::worker::deserialize_prep_job(prep_phase.payload);
+                const PrepResult planned = app::planned_prep(frozen);
+                const PrepResult actual =
+                    app::resolve_prep_outputs(planned, prep_phase.outputs);
+                c.workspace = frozen.workspace;
+                c.image_dir = actual.image_dir;
+                c.mask_dir = actual.mask_dir;
+                c.sfm.prep = frozen;
+                c.sfm.device_selector = c.device;
+                c.sfm.geometry.device_uuid = c.device;
+
+                SfmFeaturePlanArtifacts artifacts;
+                std::string error;
+                if (!sfm_make_feature_plan(
+                        c.plan_args, c.device, actual,
+                        (uint32_t)c.configured_shards, c.plan_dir, artifacts,
+                        error))
+                    throw std::runtime_error(error);
+                c.plan_path = artifacts.plan_path;
+                c.request_paths = artifacts.request_paths;
+                c.effective_shards = (int)artifacts.shard_count;
+                c.expected_images = (int)artifacts.image_count;
+                c.shard_images.assign(artifacts.shard_image_counts.begin(),
+                                      artifacts.shard_image_counts.end());
+                if (c.effective_shards <= 1)
+                    throw std::runtime_error("feature plan produced one shard");
+
+                std::vector<std::pair<std::string, std::string>> devices;
+                load_native_devices();
+                for (const NativeDeviceRow& row : _native_devices)
+                    if (row.usable && !row.uuid.empty())
+                        devices.emplace_back(row.uuid, row.name);
+                if (devices.empty())
+                    devices.emplace_back(c.device, c.device_name);
+                const fs::path workers =
+                    fs::u8path(c.workspace) / ".feature-workers" /
+                    fs::u8path(c.plan_dir).filename();
+                c.shard_job_ids.resize((size_t)c.effective_shards);
+                for (int shard = 0; shard < c.effective_shards; ++shard) {
+                    if (!c.shard_job_ids[(size_t)shard].empty()) continue;
+                    char name[64];
+                    std::snprintf(name, sizeof(name), "shard-%04d", shard);
+                    const std::string result_root =
+                        (workers / name).u8string();
+                    app::sched::WorkflowSubmitOpts submit;
+                    submit.work_dir = prep->work_dir;
+                    submit.workspace = result_root;
+                    submit.options_payload = feature_scheduler_payload(
+                        "shard", c.key, c.plan_dir, c.plan_path, c.workspace,
+                        shard, c.effective_shards, c.batch_row);
+                    const std::vector<fs::path> source_roots = {
+                        fs::u8path(c.plan_path),
+                        fs::u8path(c.request_paths[(size_t)shard])};
+                    for (const fs::path& source : source_roots)
+                        submit.source_paths.push_back(source.u8string());
+                    std::string reference_error;
+                    if (!bind_project_reference(
+                            static_cast<app::worker::ProjectReference&>(submit),
+                            result_root, source_roots, {}, reference_error))
+                        throw std::runtime_error(reference_error);
+
+                    app::sched::Phase extract;
+                    extract.phase = "sfm-extract";
+                    extract.output = result_root;
+                    extract.planned_device =
+                        devices[(size_t)shard % devices.size()].first;
+                    extract.planned_device_name =
+                        devices[(size_t)shard % devices.size()].second;
+                    extract.args = {"extract", c.image_dir, "-o", result_root,
+                                    "--feature-request",
+                                    c.request_paths[(size_t)shard]};
+                    extract.args.insert(extract.args.end(),
+                                       artifacts.extract_args.begin(),
+                                       artifacts.extract_args.end());
+                    submit.phases.push_back(std::move(extract));
+                    submit.add_scheduler_publish = false;
+                    const std::string id = _scheduler.submit(submit);
+                    if (id.empty())
+                        throw std::runtime_error(_scheduler.state_error());
+                    c.shard_job_ids[(size_t)shard] = id;
+                    if (c.batch_row >= 0)
+                        _batch[(size_t)c.batch_row].scheduler_ids.push_back(id);
+                }
+                if (c.batch_row >= 0) save_batch_list(_batch);
+            } catch (const std::exception& e) {
+                c.failed = true;
+                c.local_failure = true;
+                c.error = e.what();
+            }
+            continue;
+        }
+
+        bool all_done = true;
+        bool any_failed = false;
+        std::vector<std::string> roots;
+        roots.reserve(c.shard_job_ids.size());
+        for (const std::string& id : c.shard_job_ids) {
+            const app::sched::Job* shard = scheduler_job(id);
+            if (!shard) {
+                any_failed = true;
+                c.error = "feature-shard job disappeared";
+                c.local_failure = true;
+                continue;
+            }
+            all_done = all_done && shard->state == app::sched::JobState::Succeeded;
+            any_failed = any_failed || scheduler_state_failed(shard->state);
+            if (!shard->phases.empty()) {
+                const app::sched::Phase& phase = shard->phases.front();
+                roots.push_back(phase.outputs.empty() ? phase.output
+                                                       : phase.outputs.front());
+            }
+        }
+        if (any_failed) {
+            c.failed = true;
+            if (c.error.empty()) c.error = "one or more feature shards failed";
+            continue;
+        }
+        if (!all_done) continue;
+
+        if (!c.central_job_id.empty() && scheduler_job(c.central_job_id))
+            c.collected = true;
+        if (!c.collected) {
+            std::string error;
+            if (!sfm_collect_feature_results(
+                    c.plan_path, c.request_paths, roots,
+                    (fs::path(c.workspace) / "features").u8string(), error)) {
+                c.failed = true;
+                c.local_failure = true;
+                c.error = error;
+                continue;
+            }
+            c.collected = true;
+        }
+
+        if (c.central_job_id.empty()) {
+            if (c.central_args.empty() &&
+                !read_feature_central_args(
+                    (fs::path(c.plan_dir) / "central.args").u8string(),
+                    c.central_args, c.central_payload, c.plan_args,
+                    &c.central_tail)) {
+                c.failed = true;
+                c.local_failure = true;
+                c.error = "feature-shard coordinator metadata is unavailable";
+                continue;
+            }
+            app::sched::WorkflowSubmitOpts submit;
+            submit.work_dir = prep->work_dir;
+            submit.workspace = c.workspace;
+            submit.options_payload = feature_scheduler_payload(
+                "central", c.key, c.plan_dir, c.plan_path, c.workspace, -1,
+                c.effective_shards, c.batch_row);
+            const std::vector<fs::path> source_roots = {
+                fs::u8path(c.image_dir), fs::u8path(c.plan_dir),
+                fs::u8path(c.workspace) / "features"};
+            for (const fs::path& source : source_roots)
+                submit.source_paths.push_back(source.u8string());
+            std::string reference_error;
+            if (!bind_project_reference(
+                    static_cast<app::worker::ProjectReference&>(submit),
+                    c.workspace, source_roots,
+                    project_consumed_artifacts(c.workspace,
+                                               c.sfm.prep.inputs),
+                    reference_error)) {
+                c.failed = true;
+                c.local_failure = true;
+                c.error = reference_error;
+                continue;
+            }
+
+            app::sched::Phase sfm;
+            sfm.phase = "sfm";
+            sfm.output = (fs::path(c.workspace) / "sparse" / "0").u8string();
+            sfm.planned_device = c.device;
+            sfm.planned_device_name = c.device_name;
+            sfm.args = c.central_args;
+            sfm.payload = c.central_payload;
+            submit.phases.push_back(std::move(sfm));
+            for (const app::sched::Phase& tail : c.central_tail)
+                submit.phases.push_back(tail);
+            const std::string id = _scheduler.submit(submit);
+            if (id.empty()) {
+                c.failed = true;
+                c.local_failure = true;
+                c.error = _scheduler.state_error();
+                continue;
+            }
+            c.central_job_id = id;
+            _scheduled_dataset_id = id;
+            if (c.batch_row >= 0) {
+                _batch[(size_t)c.batch_row].scheduler_ids.push_back(id);
+                save_batch_list(_batch);
+            }
+            continue;
+        }
+
+        const app::sched::Job* central = scheduler_job(c.central_job_id);
+        if (!central) {
+            c.failed = true;
+            c.local_failure = true;
+            c.error = "central SfM job disappeared";
+        } else if (central->state == app::sched::JobState::Succeeded) {
+            app::ReconStamp stamp;
+            stamp.present = true;
+            stamp.engine = "builtin";
+            stamp.args = c.plan_args;
+            app::write_recon_stamp(c.workspace, stamp);
+            std::string error;
+            if (!close_feature_coordinator(c.plan_dir, error)) {
+                c.failed = true;
+                c.local_failure = true;
+                c.error = std::move(error);
+                continue;
+            }
+            c.finished = true;
+            if (c.batch_row < 0) {
+                _scheduled_dataset_id.clear();
+                const std::string workspace = c.workspace;
+                const std::string image_dir = c.image_dir;
+                const std::string mask_dir = c.mask_dir;
+                const bool mask_flipped =
+                    app::planned_prep(c.sfm.prep).mask_dir_flipped;
+                _feature_coordinators.erase(
+                    std::remove_if(
+                        _feature_coordinators.begin(),
+                        _feature_coordinators.end(),
+                        [](const FeatureShardCoordinator& item) {
+                            return item.batch_row < 0 && item.finished;
+                        }),
+                    _feature_coordinators.end());
+                open_dataset(workspace, image_dir, mask_dir, mask_flipped,
+                             true);
+                return;
+            }
+        } else if (scheduler_state_failed(central->state)) {
+            c.failed = true;
+            c.error = central->error.empty() ? "central SfM job failed"
+                                             : central->error;
+        }
+    }
+}
+
+bool GuiApp::feature_shard_job_live(
+    const FeatureShardCoordinator& c) const {
+    if (c.finished) return false;
+    for (const std::string& id : c.shard_job_ids) {
+        const app::sched::Job* job = scheduler_job(id);
+        if (job && scheduler_state_live(job->state)) return true;
+    }
+    if (const app::sched::Job* job = scheduler_job(c.prep_job_id))
+        if (scheduler_state_live(job->state)) return true;
+    if (const app::sched::Job* job = scheduler_job(c.central_job_id))
+        if (scheduler_state_live(job->state)) return true;
+    return !c.shard_job_ids.empty() && c.central_job_id.empty() &&
+           !c.failed && !c.collected;
+}
+
+void GuiApp::cancel_feature_shards() {
+    auto stop = [this](const std::string& id) {
+        if (id.empty()) return;
+        _scheduler.cancel(id);
+        _scheduler.force_stop(id);
+    };
+    for (FeatureShardCoordinator& c : _feature_coordinators) {
+        stop(c.prep_job_id);
+        for (const std::string& id : c.shard_job_ids) stop(id);
+        stop(c.central_job_id);
+        std::string error;
+        if (close_feature_coordinator(c.plan_dir, error)) {
+            c.finished = true;
+        } else {
+            c.failed = true;
+            c.local_failure = true;
+            c.error = error;
+            log(error);
+        }
+    }
+    _scheduled_dataset_id.clear();
+}
+
 bool GuiApp::scheduled_dataset_pending() const {
+    for (const FeatureShardCoordinator& c : _feature_coordinators)
+        if (feature_shard_job_live(c) || (!c.finished && !c.failed))
+            return true;
     const app::sched::Job* job = scheduler_job(_scheduled_dataset_id);
-    if (!job) return false;
-    return job->state == app::sched::JobState::Queued ||
-           job->state == app::sched::JobState::Starting ||
-           job->state == app::sched::JobState::Running ||
-           job->state == app::sched::JobState::Stopping;
+    return job && scheduler_state_live(job->state);
 }
 
 bool GuiApp::scheduled_dataset_active() const {
+    for (const FeatureShardCoordinator& c : _feature_coordinators) {
+        const app::sched::Job* prep = scheduler_job(c.prep_job_id);
+        if (prep && (prep->state == app::sched::JobState::Starting ||
+                     prep->state == app::sched::JobState::Running ||
+                     prep->state == app::sched::JobState::Stopping))
+            return true;
+        for (const std::string& id : c.shard_job_ids) {
+            const app::sched::Job* shard = scheduler_job(id);
+            if (shard && (shard->state == app::sched::JobState::Starting ||
+                          shard->state == app::sched::JobState::Running ||
+                          shard->state == app::sched::JobState::Stopping))
+                return true;
+        }
+        const app::sched::Job* central = scheduler_job(c.central_job_id);
+        if (central && scheduler_state_live(central->state)) return true;
+    }
     const app::sched::Job* job = scheduler_job(_scheduled_dataset_id);
-    if (!job) return false;
-    return job->state == app::sched::JobState::Starting ||
-           job->state == app::sched::JobState::Running ||
-           job->state == app::sched::JobState::Stopping;
+    return job && (job->state == app::sched::JobState::Starting ||
+                   job->state == app::sched::JobState::Running ||
+                   job->state == app::sched::JobState::Stopping);
 }
 
 void GuiApp::handle_scheduler_dataset_done(const app::sched::Job& job) {
@@ -1286,12 +2209,15 @@ void GuiApp::handle_scheduler_dataset_done(const app::sched::Job& job) {
     bool mask_flipped = false;
     if (!job.phases.empty()) {
         const app::sched::Phase& prep = job.phases.front();
-        if (!prep.outputs.empty()) image_dir = prep.outputs[0];
-        if (prep.outputs.size() > 1) mask_dir = prep.outputs[1];
         try {
             const app::PrepJob frozen =
                 app::worker::deserialize_prep_job(prep.payload);
-            mask_flipped = app::planned_prep(frozen).mask_dir_flipped;
+            const app::PrepResult actual =
+                app::resolve_prep_outputs(app::planned_prep(frozen),
+                                          prep.outputs);
+            image_dir = actual.image_dir;
+            mask_dir = actual.mask_dir;
+            mask_flipped = actual.mask_dir_flipped;
         } catch (const std::exception& e) {
             _scheduled_dataset_id.clear();
             _native_device_error =
@@ -1307,18 +2233,31 @@ void GuiApp::handle_scheduler_dataset_done(const app::sched::Job& job) {
 
 void GuiApp::advance_scheduler_jobs() {
     _scheduler_jobs = _scheduler.list();
-    if (!_scheduled_dataset_id.empty()) {
+    advance_feature_shards();
+    _scheduler_jobs = _scheduler.list();
+    bool coordinator_job = false;
+    for (const FeatureShardCoordinator& c : _feature_coordinators)
+        coordinator_job = coordinator_job ||
+                          c.prep_job_id == _scheduled_dataset_id ||
+                          c.central_job_id == _scheduled_dataset_id;
+    if (!_scheduled_dataset_id.empty() && !coordinator_job) {
         const app::sched::Job* job = scheduler_job(_scheduled_dataset_id);
         if (job && job->state == app::sched::JobState::Succeeded)
             handle_scheduler_dataset_done(*job);
     }
     if (!_batch_active) return;
     bool live = false;
+    for (const FeatureShardCoordinator& c : _feature_coordinators)
+        if (c.batch_row >= 0 && !c.finished &&
+            (feature_shard_job_live(c) || !c.failed))
+            live = true;
     for (const BatchRow& row : _batch) {
         for (const std::string& id : row.scheduler_ids) {
             const app::sched::Job* job = scheduler_job(id);
             if (!job) continue;
-            live = live || job->pending_resume ||
+            live = live ||
+                   (job->pending_resume &&
+                    !feature_scheduler_job_closed(*job)) ||
                    job->state == app::sched::JobState::Queued ||
                    job->state == app::sched::JobState::Starting ||
                    job->state == app::sched::JobState::Running ||
@@ -1469,6 +2408,7 @@ void GuiApp::start_batch(bool skip_invalid) {
         row.scheduler_ids.clear();
         row.scheduler_active = false;
     }
+    _feature_coordinators.clear();
 
     std::error_code ec;
     const std::string work_dir = fs::current_path(ec).u8string();
@@ -1587,14 +2527,88 @@ void GuiApp::start_batch(bool skip_invalid) {
             scheduled_sfm.device_selector = device;
             scheduled_sfm.geometry.device_uuid = device;
             const app::PrepResult planned = app::planned_prep(frozen);
+            const std::vector<std::string> feature_plan_args =
+                _sfm.feature_plan_model_args(scheduled_sfm, planned);
+            const bool reuse_model =
+                reuse_sfm_model(scheduled_sfm, feature_plan_args);
+
+            if (scheduled_sfm.feature_shards > 1 && !reuse_model) {
+                FeatureShardCoordinator c;
+                const std::string run_id = std::to_string(
+                    std::chrono::high_resolution_clock::now()
+                        .time_since_epoch()
+                        .count());
+                c.plan_dir =
+                    (fs::u8path(frozen.workspace) / ".feature-plan" / run_id)
+                        .u8string();
+                c.key = c.plan_dir;
+                c.workspace = frozen.workspace;
+                c.sfm = scheduled_sfm;
+                c.device = device;
+                c.device_name = device_name;
+                c.configured_shards = scheduled_sfm.feature_shards;
+                c.batch_row = static_cast<int>(&row - _batch.data());
+                if (scheduled_sfm.geometry.enable)
+                    c.central_tail.push_back(geometry_phase(
+                        scheduled_sfm.geometry, frozen.workspace,
+                        planned.image_dir, device, device_name));
+                if (row.does(BatchStage::Train)) {
+                    TrainConfig cfg;
+                    std::string preset_base;
+                    if (!batch_build_train_config(
+                            row, 0, frozen.workspace, planned.image_dir,
+                            planned.mask_dir, planned.mask_dir_flipped, cfg,
+                            preset_base, error)) {
+                        log(error);
+                        continue;
+                    }
+                    absolute_config_paths(cfg);
+                    app::sched::Phase train;
+                    train.phase = "train";
+                    set_phase_device(train, device, device_name);
+                    train.args = batch_config_args(cfg);
+                    c.central_tail.push_back(std::move(train));
+                }
+                c.plan_path =
+                    (fs::absolute(fs::u8path(c.plan_dir)) / "plan.json")
+                        .u8string();
+                c.plan_args = feature_plan_args;
+                c.central_args =
+                    _sfm.scheduler_args(c.sfm, c.central_payload, c.plan_path);
+                if (!write_feature_central_args(
+                        (fs::path(c.plan_dir) / "central.args").u8string(),
+                        c.central_args, c.central_payload, c.plan_args,
+                        c.central_tail, error)) {
+                    log(error);
+                    continue;
+                }
+                if (!submit_feature_shard_prep(
+                        c, frozen, work_dir, device, device_name)) {
+                    log(c.error);
+                    continue;
+                }
+                row.scheduler_ids.push_back(c.prep_job_id);
+                row.scheduler_active = true;
+                _feature_coordinators.push_back(std::move(c));
+                submitted++;
+                continue;
+            }
 
             app::sched::WorkflowSubmitOpts submit;
             submit.work_dir = work_dir;
             submit.workspace = frozen.workspace;
             submit.options_payload = "gui:batch:v1";
-            submit.source_paths.reserve(frozen.inputs.size());
-            for (const PrepInput& input : frozen.inputs)
-                submit.source_paths.push_back(input.path);
+            const std::vector<fs::path> source_roots = prep_source_roots(frozen.inputs);
+            for (const fs::path& source : source_roots)
+                submit.source_paths.push_back(source.u8string());
+            if (!bind_project_reference(
+                    static_cast<app::worker::ProjectReference&>(submit),
+                    frozen.workspace, source_roots,
+                    project_consumed_artifacts(frozen.workspace, frozen.inputs),
+                    error)) {
+                log(error);
+                continue;
+            }
 
             app::sched::Phase prep;
             prep.phase = "prep";
@@ -1604,12 +2618,15 @@ void GuiApp::start_batch(bool skip_invalid) {
             prep.payload = app::worker::serialize_prep_job(frozen);
             submit.phases.push_back(std::move(prep));
 
-            app::sched::Phase sfm;
-            sfm.phase = "sfm";
-            sfm.output = (fs::path(frozen.workspace) / "sparse" / "0").u8string();
-            set_phase_device(sfm, device, device_name);
-            sfm.args = _sfm.scheduler_args(scheduled_sfm, sfm.payload);
-            submit.phases.push_back(std::move(sfm));
+            if (!reuse_model) {
+                app::sched::Phase sfm;
+                sfm.phase = "sfm";
+                sfm.output =
+                    (fs::path(frozen.workspace) / "sparse" / "0").u8string();
+                set_phase_device(sfm, device, device_name);
+                sfm.args = _sfm.scheduler_args(scheduled_sfm, sfm.payload);
+                submit.phases.push_back(std::move(sfm));
+            }
 
             if (scheduled_sfm.geometry.enable)
                 submit.phases.push_back(geometry_phase(
@@ -1661,6 +2678,42 @@ void GuiApp::start_batch(bool skip_invalid) {
             submit.device_name = device_name;
             submit.work_dir = work_dir;
             submit.args = batch_config_args(cfg);
+            const fs::path dataset = fs::u8path(cfg.data);
+            std::vector<fs::path> source_roots;
+            auto append_dataset_path = [&](const std::string& value) {
+                if (value.empty()) return;
+                fs::path path = fs::u8path(value);
+                if (path.is_relative()) path = dataset / path;
+                append_unique_path(source_roots, std::move(path));
+            };
+            append_dataset_path(cfg.image_dir);
+            if (cfg.load_masks) append_dataset_path(cfg.mask_dir);
+            if (cfg.load_depths) append_dataset_path(cfg.depth_dir);
+            if (cfg.load_normals) append_dataset_path(cfg.normal_dir);
+            append_dataset_path(cfg.colmap_recon_dir);
+            append_dataset_path(cfg.metashape_xml);
+            append_dataset_path(cfg.metashape_ply);
+            append_dataset_path(cfg.metashape_psx);
+            const std::vector<fs::path> artifacts =
+                project_consumed_artifacts(cfg.data, {});
+            for (const fs::path& artifact : artifacts) {
+                const fs::path relative = artifact.lexically_relative(dataset);
+                std::string extension = relative.extension().string();
+                for (char& c : extension)
+                    c = static_cast<char>(std::tolower((unsigned char)c));
+                if (relative == "transforms.json" || relative == "sparse" ||
+                    relative == "colmap" ||
+                    (relative.parent_path().empty() &&
+                     (extension == ".xml" || extension == ".ply" ||
+                      extension == ".psx")))
+                    append_unique_path(source_roots, artifact);
+            }
+            if (!bind_project_reference(
+                    static_cast<app::worker::ProjectReference&>(submit),
+                    cfg.data, source_roots, artifacts, error)) {
+                log(error);
+                continue;
+            }
             const std::string id = _scheduler.submit(submit);
             if (id.empty()) {
                 log(_scheduler.state_error());
@@ -1705,6 +2758,29 @@ void GuiApp::finish_batch() {
             }
         }
     }
+    for (FeatureShardCoordinator& c : _feature_coordinators) {
+        if (c.batch_row < 0 || !c.failed) continue;
+        auto failed_job = [this](const std::string& id) {
+            const app::sched::Job* job = scheduler_job(id);
+            return job &&
+                   (job->state == app::sched::JobState::Failed ||
+                    job->state == app::sched::JobState::Interrupted ||
+                    job->state == app::sched::JobState::Blocked);
+        };
+        bool represented = failed_job(c.prep_job_id) ||
+                           failed_job(c.central_job_id);
+        for (const std::string& id : c.shard_job_ids)
+            represented = represented || failed_job(id);
+        if (represented) continue;
+        failed++;
+        std::string error;
+        if (close_feature_coordinator(c.plan_dir, error)) {
+            c.finished = true;
+        } else {
+            other++;
+            log(error);
+        }
+    }
     _batch_active = false;
     _scheduler.pause_dispatch(false);
     _batch_msg = i18n::format(msg::batch_log_summary,
@@ -1721,15 +2797,27 @@ void GuiApp::finish_batch() {
 }
 
 void GuiApp::resume_batch_job(const std::string& job_id) {
+    bool resumed = false;
     for (BatchRow& row : _batch) {
         if (std::find(row.scheduler_ids.begin(), row.scheduler_ids.end(),
                       job_id) == row.scheduler_ids.end())
             continue;
         row.scheduler_active = true;
-        _batch_active = true;
-        save_batch_list(_batch);
-        return;
+        resumed = true;
     }
+    if (!resumed) return;
+    for (FeatureShardCoordinator& c : _feature_coordinators) {
+        const bool matches =
+            c.prep_job_id == job_id || c.central_job_id == job_id ||
+            std::find(c.shard_job_ids.begin(), c.shard_job_ids.end(),
+                      job_id) != c.shard_job_ids.end();
+        if (!matches) continue;
+        c.failed = false;
+        c.local_failure = false;
+        c.error.clear();
+    }
+    _batch_active = true;
+    save_batch_list(_batch);
 }
 
 // The whole point of an unattended queue is not watching it, so the one thing
@@ -2958,7 +4046,9 @@ bool GuiApp::native_work_busy() const {
 }
 
 RunProgress* GuiApp::dataset_steps() {
-    if (scheduler_job(_scheduled_dataset_id)) return &_scheduled_steps;
+    if (!_feature_coordinators.empty() ||
+        scheduler_job(_scheduled_dataset_id))
+        return &_scheduled_steps;
     return effective_engine() == Engine::BuiltIn ? &_sfm.steps() : &_colmap.steps();
 }
 
@@ -2970,6 +4060,10 @@ bool GuiApp::dataset_locked(Stage s) {
 }
 
 void GuiApp::cancel_dataset_job() {
+    if (!_feature_coordinators.empty()) {
+        cancel_feature_shards();
+        return;
+    }
     if (!_scheduled_dataset_id.empty()) {
         const app::sched::Job* job = scheduler_job(_scheduled_dataset_id);
         if (job && job->state == app::sched::JobState::Queued)
@@ -3259,19 +4353,105 @@ void GuiApp::launch_dataset_job() {
     const app::PrepResult planned = app::planned_prep(frozen);
     const std::string image_dir = planned.image_dir;
     const std::string mask_dir = planned.mask_dir;
+    const std::vector<std::string> feature_plan_args =
+        _sfm.feature_plan_model_args(scheduled_sfm, planned);
+    const bool reuse_model =
+        reuse_sfm_model(scheduled_sfm, feature_plan_args);
 
+
+    if (_sfm_job.feature_shards > 1 && !reuse_model) {
+        cancel_feature_shards();
+        _feature_coordinators.clear();
+        FeatureShardCoordinator c;
+        const std::string run_id = std::to_string(
+            std::chrono::high_resolution_clock::now()
+                .time_since_epoch()
+                .count());
+        c.plan_dir =
+            (fs::u8path(frozen.workspace) / ".feature-plan" / run_id)
+                .u8string();
+        c.key = c.plan_dir;
+        c.workspace = frozen.workspace;
+        c.sfm = scheduled_sfm;
+        c.device = scheduled_device;
+        c.device_name = scheduled_device_name;
+        c.configured_shards = _sfm_job.feature_shards;
+        c.central_tail.clear();
+        if (scheduled_sfm.geometry.enable) {
+            app::sched::Phase geometry;
+            geometry.phase = "geometry";
+            geometry.optional = true;
+            geometry.output =
+                (fs::path(frozen.workspace) /
+                 (scheduled_sfm.geometry.want_normal ? "normals" : "depths"))
+                    .u8string();
+            geometry.planned_device = scheduled_device;
+            geometry.planned_device_name = scheduled_device_name;
+            geometry.args = {frozen.workspace, "--image-dir", image_dir,
+                             "--model", scheduled_sfm.geometry.model,
+                             "--max-size",
+                             std::to_string(scheduled_sfm.geometry.max_size),
+                             "--num-tokens",
+                             std::to_string(scheduled_sfm.geometry.num_tokens)};
+            if (scheduled_sfm.geometry.want_depth) geometry.args.push_back("--depth");
+            if (!scheduled_sfm.geometry.want_normal)
+                geometry.args.push_back("--no-normal");
+            geometry.args.insert(geometry.args.end(),
+                                 {"--normal-format",
+                                  scheduled_sfm.geometry.normal_jpg ? "jpg" : "png",
+                                  "--jpeg-quality",
+                                  std::to_string(scheduled_sfm.geometry.jpeg_quality),
+                                  "--depth-units",
+                                  scheduled_sfm.geometry.depth_mm ? "mm" : "relative"});
+            c.central_tail.push_back(std::move(geometry));
+        }
+        c.plan_path =
+            (fs::absolute(fs::u8path(c.plan_dir)) / "plan.json").u8string();
+        c.plan_args = feature_plan_args;
+        c.central_args =
+            _sfm.scheduler_args(c.sfm, c.central_payload, c.plan_path);
+        if (!write_feature_central_args(
+                (fs::path(c.plan_dir) / "central.args").u8string(),
+                c.central_args, c.central_payload, c.plan_args, c.central_tail,
+                error)) {
+            log(error);
+            return;
+        }
+        if (!submit_feature_shard_prep(
+                c, frozen, fs::current_path(ec).u8string(), scheduled_device,
+                scheduled_device_name)) {
+            log(c.error);
+            return;
+        }
+        _scheduled_dataset_id = c.prep_job_id;
+        _feature_coordinators.push_back(std::move(c));
+        _scheduler.pause_dispatch(false);
+        close_native_previews();
+        close_splat();
+        reset_dataset_preview(false);
+        _redo_frames = _redo_masks = _redo_model = _redo_geometry = false;
+        return;
+    }
 
     app::sched::WorkflowSubmitOpts submit;
     submit.work_dir = fs::current_path(ec).u8string();
     submit.workspace = frozen.workspace;
-    submit.source_paths.reserve(frozen.inputs.size());
-    for (const PrepInput& input : frozen.inputs)
-        submit.source_paths.push_back(input.path);
+    const std::vector<fs::path> source_roots = prep_source_roots(frozen.inputs);
+    for (const fs::path& source : source_roots)
+        submit.source_paths.push_back(source.u8string());
+    if (!bind_project_reference(
+            static_cast<app::worker::ProjectReference&>(submit),
+            frozen.workspace, source_roots,
+            project_consumed_artifacts(frozen.workspace, frozen.inputs),
+            error)) {
+        log(error);
+        return;
+    }
     submit.options_payload = "gui:native-dataset:v1";
     const app::sched::PathClaim workspace_claim{frozen.workspace, true};
     submit.path_claims.push_back(workspace_claim);
-    for (const PrepInput& input : frozen.inputs) {
-        const app::sched::PathClaim source_claim{input.path, false};
+    for (const fs::path& source : source_roots) {
+        const app::sched::PathClaim source_claim{source.u8string(), false};
         if (!app::sched::path_claims_conflict(source_claim, workspace_claim))
             submit.path_claims.push_back(source_claim);
     }
@@ -3288,12 +4468,15 @@ void GuiApp::launch_dataset_job() {
     prep.payload = app::worker::serialize_prep_job(frozen);
     submit.phases.push_back(std::move(prep));
 
-    app::sched::Phase sfm;
-    sfm.phase = "sfm";
-    sfm.output = (fs::path(frozen.workspace) / "sparse" / "0").u8string();
-    device(sfm);
-    sfm.args = _sfm.scheduler_args(scheduled_sfm, sfm.payload);
-    submit.phases.push_back(std::move(sfm));
+    if (!reuse_model) {
+        app::sched::Phase sfm;
+        sfm.phase = "sfm";
+        sfm.output =
+            (fs::path(frozen.workspace) / "sparse" / "0").u8string();
+        device(sfm);
+        sfm.args = _sfm.scheduler_args(scheduled_sfm, sfm.payload);
+        submit.phases.push_back(std::move(sfm));
+    }
 
     if (_geometry.enable) {
         app::sched::Phase geometry;
@@ -5048,8 +6231,18 @@ void GuiApp::poll_sfm_progress() {
                 phase.outputs.empty())
                 continue;
             completed_prep = &phase;
-            image_dir = phase.outputs[0];
-            if (phase.outputs.size() > 1) mask_dir = phase.outputs[1];
+            try {
+                const app::PrepJob frozen =
+                    app::worker::deserialize_prep_job(phase.payload);
+                const app::PrepResult actual =
+                    app::resolve_prep_outputs(app::planned_prep(frozen),
+                                              phase.outputs);
+                image_dir = actual.image_dir;
+                mask_dir = actual.mask_dir;
+            } catch (...) {
+                image_dir.clear();
+                mask_dir.clear();
+            }
             scheduled_prep_ready = true;
             break;
         }
@@ -5737,6 +6930,11 @@ void GuiApp::draw_sfm_advanced() {
     ui::help_on_hover(dmsg::sfm_final_free_rig_help);
 
     ImGui::SetNextItemWidth(px(260.0f));
+    ui::InputInt(dmsg::feature_shards, &_sfm_job.feature_shards);
+    _sfm_job.feature_shards = std::clamp(_sfm_job.feature_shards, 1, 256);
+    ui::help_on_hover(dmsg::feature_shards_help);
+
+    ImGui::SetNextItemWidth(px(260.0f));
     ui::InputInt(dmsg::max_features_auto, &_sfm_job.max_features);
     ui::help_on_hover(dmsg::max_features_auto_help);
     ImGui::SetNextItemWidth(px(260.0f));
@@ -6092,6 +7290,51 @@ void GuiApp::draw_dataset_form(float height, bool running) {
         }
     } else if (ui::Button(dmsg::cancel, ImVec2(px(200.0f), px(34.0f)))) {
         cancel_dataset_job();
+    }
+
+    if (!_feature_coordinators.empty()) {
+        const FeatureShardCoordinator* shown = nullptr;
+        for (const FeatureShardCoordinator& c : _feature_coordinators)
+            if (!c.finished) { shown = &c; break; }
+        if (!shown) shown = &_feature_coordinators.front();
+        int done = 0;
+        int failed = 0;
+        int validated = 0;
+        const int total = (int)shown->shard_job_ids.size();
+        for (size_t i = 0; i < shown->shard_job_ids.size(); ++i) {
+            const app::sched::Job* shard =
+                scheduler_job(shown->shard_job_ids[i]);
+            if (!shard) continue;
+            if (shard->state == app::sched::JobState::Succeeded) {
+                done++;
+                if (i < shown->shard_images.size())
+                    validated += shown->shard_images[i];
+            }
+            if (scheduler_state_failed(shard->state)) failed++;
+        }
+        ui::Text(dmsg::feature_shards_status,
+                 {(long long)validated, (long long)shown->expected_images,
+                  (long long)done,
+                  (long long)std::max(total, shown->effective_shards)});
+        if (failed)
+            ui::TextColored(kErr, dmsg::feature_shards_failed);
+        else if (!shown->central_job_id.empty()) {
+            if (const app::sched::Job* central =
+                    scheduler_job(shown->central_job_id)) {
+                ui::TextColored(kDim, scheduler_state_label(central->state));
+                if (!central->device_name.empty())
+                    ui::Text(msg::scheduler_device, {central->device_name});
+                if (!central->error.empty())
+                    ui::TextColoredWrapped(kErr, msg::scheduler_reason,
+                                           {central->error});
+            }
+        } else if (shown->collected) {
+            ui::Text(dmsg::feature_collection_waiting);
+        } else if (!shown->error.empty()) {
+            ui::TextColoredWrappedRaw(kErr, shown->error);
+        }
+        _ds_action_h = ImGui::GetCursorPosY() - action_y0;
+        return;
     }
 
     if (const app::sched::Job* scheduled =
@@ -7010,10 +8253,11 @@ void GuiApp::draw_scheduler_queue() {
             }
             if (ui::Button(msg::scheduler_force_stop))
                 request_force_stop(job.job_id);
-        } else if (job.state == app::sched::JobState::Interrupted ||
-                   job.state == app::sched::JobState::Failed ||
-                   job.state == app::sched::JobState::Stopped ||
-                   job.state == app::sched::JobState::Blocked) {
+        } else if (!feature_scheduler_job_closed(job) &&
+                   (job.state == app::sched::JobState::Interrupted ||
+                    job.state == app::sched::JobState::Failed ||
+                    job.state == app::sched::JobState::Stopped ||
+                    job.state == app::sched::JobState::Blocked)) {
             if (ui::Button(msg::scheduler_retry)) {
                 _recovery_dismissed.erase(job.job_id);
                 _scheduler.retry(job.job_id);
@@ -7028,8 +8272,10 @@ void GuiApp::draw_scheduler_queue() {
 void GuiApp::draw_scheduler_recovery_modal() {
     bool pending = false;
     for (const app::sched::Job& job : _scheduler_jobs)
-        pending = pending || (job.pending_resume &&
-                              !_recovery_dismissed[job.job_id]);
+        pending = pending ||
+                  (job.pending_resume &&
+                   !feature_scheduler_job_closed(job) &&
+                   !_recovery_dismissed[job.job_id]);
     if (!pending) {
         if (_recovery_shown) ImGui::CloseCurrentPopup();
         _recovery_shown = false;
@@ -7047,7 +8293,9 @@ void GuiApp::draw_scheduler_recovery_modal() {
     ui::TextWrapped(msg::scheduler_recovery_intro);
     ImGui::Spacing();
     for (const app::sched::Job& job : _scheduler_jobs) {
-        if (!job.pending_resume || _recovery_dismissed[job.job_id]) continue;
+        if (!job.pending_resume || feature_scheduler_job_closed(job) ||
+            _recovery_dismissed[job.job_id])
+            continue;
         ImGui::PushID(("recovery-" + job.job_id).c_str());
         ui::Text(msg::scheduler_job, {job.job_id});
         ui::TextDisabled(msg::scheduler_phase, {job.phase});
@@ -7057,7 +8305,11 @@ void GuiApp::draw_scheduler_recovery_modal() {
             _recovery_dismissed.erase(job.job_id);
             _scheduler.retry(job.job_id);
             resume_batch_job(job.job_id);
-            if (job.options_payload == "gui:native-dataset:v1") {
+            const std::string role =
+                scheduler_payload_field(job.options_payload, "role");
+            if (job.options_payload == "gui:native-dataset:v1" ||
+                (job.options_payload.rfind("gui:feature-shard:v1", 0) == 0 &&
+                 (role == "prep" || role == "central"))) {
                 _scheduled_dataset_id = job.job_id;
                 reset_dataset_preview(false);
                 _screen = Screen::NewDataset;

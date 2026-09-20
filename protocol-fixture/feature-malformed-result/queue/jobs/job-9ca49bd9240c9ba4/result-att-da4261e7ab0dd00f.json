@@ -1,0 +1,19 @@
+{
+  "schema_version": 2,
+  "job_id": "job-9ca49bd9240c9ba4",
+  "attempt_id": "att-da4261e7ab0dd00f",
+  "phase": "sfm-extract",
+  "outcome": "success",
+  "exit_code": 0,
+  "message": "",
+  "partial": false,
+  "metric": true,
+  "registered": 0,
+  "images": 0,
+  "points": 0,
+  "models": 0,
+  "mean_reprojection": 0,
+  "median_reprojection": 0,
+  "sparse_path": "",
+  "outputs": ["C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\feature-malformed-result\\queue\\jobs\\job-9ca49bd9240c9ba4"]
+}

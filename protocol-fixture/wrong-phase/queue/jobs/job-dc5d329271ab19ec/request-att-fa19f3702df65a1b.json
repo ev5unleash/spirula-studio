@@ -1,0 +1,13 @@
+{
+  "schema_version": 2,
+  "job_id": "job-dc5d329271ab19ec",
+  "attempt_id": "att-fa19f3702df65a1b",
+  "phase": "geometry",
+  "device": "protocol-device",
+  "device_name": "",
+  "work_dir": "C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\wrong-phase",
+  "workspace": "C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\wrong-phase",
+  "result_path": "C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\wrong-phase\\queue\\jobs\\job-dc5d329271ab19ec\\result-att-fa19f3702df65a1b.json",
+  "args": ["wrong-phase"],
+  "payload": "{}"
+}

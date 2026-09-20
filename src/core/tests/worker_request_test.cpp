@@ -1,6 +1,7 @@
 // worker_request_test -- schema and output-boundary checks for worker requests.
 
 #include "app/WorkerRequest.h"
+#include "data/ProjectManifest.h"
 
 #include <chrono>
 #include <cstdio>
@@ -37,6 +38,13 @@ std::string replace_once(std::string text, const std::string& from,
     return text.replace(pos, from.size(), to);
 }
 
+std::string json_escape(std::string value) {
+    for (size_t pos = 0; (pos = value.find('\\', pos)) != std::string::npos;
+         pos += 2)
+        value.replace(pos, 1, "\\\\");
+    return value;
+}
+
 bool accepts(const fs::path& path) {
     try {
         const app::worker::Request request =
@@ -69,11 +77,11 @@ int main() {
         "  \"schema_version\": 1,\n"
         "  \"job_id\": \"" + job_id + "\",\n"
         "  \"attempt_id\": \"" + attempt_id + "\",\n"
-        "  \"phase\": \"geometry\",\n"
+        "  \"phase\": \"sfm-extract\",\n"
         "  \"device\": \"uuid:0123456789abcdef0123456789abcdef\",\n"
         "  \"work_dir\": \"\",\n"
         "  \"result_path\": \"" + result_json_path + "\",\n"
-        "  \"args\": [\"--check\", \"quoted value\"]\n"
+        "  \"args\": [\"extract\", \"images\", \"-o\", \"features\"]\n"
         "}\n";
 
     try {
@@ -87,7 +95,7 @@ int main() {
         } catch (const std::exception&) {
             valid_request = false;
         }
-        check(valid_request, "accepts a valid schema-1 request");
+        check(valid_request, "accepts a valid schema-1 sfm-extract request");
         check(request.request_path == request_path.u8string(),
               "retains the request source path");
 
@@ -112,11 +120,11 @@ int main() {
                                     "\"work_dir\": \"\\u0000\"")),
               "rejects an embedded NUL in a path");
         check(rejects(request_path,
-                       replace_once(valid, "\"args\": [\"--check\", \"quoted value\"]",
+                       replace_once(valid, "\"args\": [\"extract\", \"images\", \"-o\", \"features\"]",
                                     "\"args\": [3]")),
               "rejects a non-string args element");
         check(rejects(request_path,
-                       replace_once(valid, "\"phase\": \"geometry\"",
+                       replace_once(valid, "\"phase\": \"sfm-extract\"",
                                     "\"phase\": \"shell\"")),
               "rejects an unsupported phase");
         check(rejects(request_path,
@@ -142,9 +150,124 @@ int main() {
                                     "\"device\": \"uuid:0123456789abcdef0123456789abc\\u0000\"")),
               "rejects an embedded NUL in the device");
         check(rejects(request_path,
-                       replace_once(valid, "\"quoted value\"",
+                       replace_once(valid, "\"features\"",
                                     "\"bad\\u0000arg\"")),
               "rejects an embedded NUL in args");
+        const fs::path project = root / "project";
+        fs::create_directories(project);
+        write_text(project / "artifact.bin", "artifact");
+        write_text(project / "source.bin", "source");
+        write_text(project / "source-copy.bin", "source");
+        spirula::project::ProjectRevision revision;
+        revision.name = "revision-a";
+        auto source_record =
+            spirula::project::make_source_record(project / "source.bin");
+        source_record.locators.push_back(project / "source-copy.bin");
+        revision.sources = {source_record};
+        revision.artifacts = {{"artifact.bin", "test", "identity"}};
+        spirula::project::publish_revision(project, revision);
+        const app::worker::ProjectReference reference =
+            app::worker::make_project_reference(project.u8string(), revision.name);
+        const std::string encoded_project_root =
+            json_escape(reference.project_root);
+        const fs::path ref_request_path = root / ("request-ref-" + attempt_id + ".json");
+        const fs::path ref_result_path = root / ("result-" + attempt_id + ".json");
+        const std::string ref_json =
+            "{\n"
+            "  \"schema_version\": 3,\n"
+            "  \"project_root\": \"" + encoded_project_root + "\",\n"
+            "  \"project_revision\": \"" + reference.project_revision + "\",\n"
+            "  \"project_revision_digest\": \"" +
+                reference.project_revision_digest + "\",\n"
+            "  \"metadata_paths\": [\"revisions/revision-a.json\"],\n"
+            "  \"artifact_paths\": [\"artifact.bin\"],\n"
+            "  \"job_id\": \"" + job_id + "\",\n"
+            "  \"attempt_id\": \"" + attempt_id + "\",\n"
+            "  \"phase\": \"sfm-extract\",\n"
+            "  \"device\": \"uuid:0123456789abcdef0123456789abcdef\",\n"
+            "  \"work_dir\": \"\",\n"
+            "  \"result_path\": \"" + ref_result_path.generic_u8string() + "\",\n"
+            "  \"args\": []\n"
+            "}\n";
+        write_text(ref_request_path, ref_json);
+        const app::worker::Request ref_request =
+            app::worker::parse_request(ref_request_path.u8string());
+        app::worker::validate_request(ref_request);
+        check(ref_request.project_root == reference.project_root &&
+                  ref_request.project_revision == reference.project_revision &&
+                  ref_request.project_revision_digest ==
+                      reference.project_revision_digest &&
+                  ref_request.metadata_paths == reference.metadata_paths &&
+                  ref_request.artifact_paths == reference.artifact_paths,
+              "project reference roundtrips through request JSON");
+        check(rejects(ref_request_path,
+                      replace_once(ref_json, "\"schema_version\": 3",
+                                   "\"schema_version\": 2")),
+              "schema-2 request cannot silently carry a project reference");
+        auto rejects_reference = [](app::worker::ProjectReference bad) {
+            try {
+                app::worker::validate_project_reference(bad);
+                return false;
+            } catch (...) {
+                return true;
+            }
+        };
+        app::worker::ProjectReference partial = reference;
+        partial.project_revision.clear();
+        check(rejects_reference(partial), "rejects an all-or-none project reference");
+        partial = reference;
+        partial.project_revision_digest.clear();
+        check(rejects_reference(partial), "rejects a missing revision digest");
+        partial = reference;
+        partial.project_revision_digest =
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+        check(rejects_reference(partial), "rejects a stale revision digest");
+        partial = reference;
+        partial.metadata_paths.clear();
+        check(rejects_reference(partial), "rejects omitted revision metadata");
+        partial = reference;
+        partial.artifact_paths.clear();
+        check(rejects_reference(partial), "rejects a partial artifact set");
+        partial = reference;
+        partial.artifact_paths = {"../artifact.bin"};
+        check(rejects_reference(partial), "rejects artifact traversal");
+        partial = reference;
+        partial.project_revision = "missing";
+        partial.metadata_paths = {"revisions/missing.json"};
+        check(rejects_reference(partial), "rejects a missing revision");
+        spirula::project::ProjectRevision later = revision;
+        later.name = "revision-b";
+        spirula::project::publish_revision(project, later);
+        bool exact_reference_ok = true;
+        try {
+            app::worker::validate_project_reference(reference);
+        } catch (...) {
+            exact_reference_ok = false;
+        }
+        check(spirula::project::read_current_revision(project).name == "revision-b" &&
+                  exact_reference_ok,
+              "exact revision survives a later current change");
+        const fs::path revision_path = project / "revisions" / "revision-a.json";
+        const std::string original_revision =
+            spirula::project::serialize_revision(revision);
+        spirula::project::ProjectRevision rewritten = revision;
+        rewritten.operations.push_back("same-name-rewrite");
+        write_text(revision_path, spirula::project::serialize_revision(rewritten));
+        check(rejects_reference(reference),
+              "rejects a valid same-name revision rewrite");
+        write_text(revision_path, original_revision);
+        write_text(project / "source-copy.bin", "change");
+        bool primary_locator_survives = true;
+        try {
+            app::worker::validate_project_reference(reference);
+        } catch (...) {
+            primary_locator_survives = false;
+        }
+        check(primary_locator_survives,
+              "accepts a valid primary locator when an alternate is stale");
+        write_text(project / "source-copy.bin", "source");
+        write_text(revision_path, "{");
+        check(rejects_reference(reference), "rejects a truncated revision");
         app::PrepJob prep;
         prep.workspace = "workspace";
         app::PrepInput input;

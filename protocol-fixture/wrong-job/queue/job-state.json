@@ -1,0 +1,6 @@
+{
+  "schema_version": 2,
+  "jobs": [
+    {"order":0,"job_id":"job-eace2772b28e5a6f","phase":"geometry","device":"protocol-device","device_name":"","work_dir":"C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\wrong-job","run_dir":"C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\wrong-job\\queue\\jobs\\job-eace2772b28e5a6f","output_dir":"","workspace":"C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\wrong-job","source_paths":[],"options_payload":"","created_at":"2026-09-20T00:49:02Z","state":"Failed","attempt_id":"att-bcbb51919ec76ef7","error":"worker exited 0","pending_resume":false,"last_exit_code":0,"completed_prefix":0,"current_phase":0,"args":["wrong-job"],"path_claims":[{"path":"C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\wrong-job\\queue\\jobs\\job-eace2772b28e5a6f","write":true}],"phases":[{"phase":"geometry","optional":false,"planned_device":"protocol-device","planned_device_name":"","actual_device":"protocol-device","actual_device_name":"","output":"","outputs":[],"args":["wrong-job"],"payload":"{}","outcome":"failed","completed":false,"exit_code":0,"error":"worker exited 0"}]}
+  ]
+}

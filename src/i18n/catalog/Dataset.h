@@ -6755,6 +6755,98 @@ SS_MSG(features,
     ES("Características"), PT("Características"), IT("Caratteristiche"),
     NL("Kenmerken"),     RU("Особые точки"), TR("Öznitelikler"));
 
+SS_MSG(feature_shards,
+    EN("Feature extraction shards"), JA("特徴抽出の分割数"),
+    ZH_HANS("特征提取分片数"), ZH_HANT("特徵擷取分片數"),
+    KO("특징 추출 분할 수"), DE("Teilanzahl der Merkmalsextraktion"),
+    FR("Lots d'extraction des points"), ES("Fragmentos de extracción"),
+    PT("Partes da extração de características"), IT("Partizioni dell'estrazione"),
+    NL("Fragmenten voor kenmerkextractie"), RU("Сегменты извлечения признаков"),
+    TR("Öznitelik çıkarma parçaları"));
+
+SS_MSG(feature_shards_help,
+    EN("Split feature extraction into this many independent local jobs. One "
+       "keeps the usual single-job workflow; larger values use available "
+       "devices and collect only after every shard succeeds."),
+    JA("特徴抽出をこの数の独立したローカルジョブに分割します。1 は通常の単一ジョブ"
+       "のまま、2 以上では利用可能なデバイスを使い、全分割成功後にのみ収集します。"),
+    ZH_HANS("将特征提取拆分为这么多个独立本地任务。1 保持通常的单任务流程；更大值"
+            "使用可用设备，并仅在所有分片成功后收集。"),
+    ZH_HANT("將特徵擷取拆分為這麼多個獨立本機工作。1 保持通常的單一工作流程；更大值"
+            "使用可用裝置，且只有所有分片成功後才收集。"),
+    KO("특징 추출을 이 수의 독립적인 로컬 작업으로 나눕니다. 1은 일반 단일 작업 흐름을 "
+       "유지하고, 더 큰 값은 사용 가능한 장치를 사용하며 모든 분할이 성공한 뒤에만 "
+       "수집합니다."),
+    DE("Teilt die Merkmalsextraktion in diese Anzahl unabhängiger lokaler Jobs. Eins "
+       "behält den üblichen Einzeljob bei; größere Werte nutzen verfügbare Geräte und "
+       "sammeln erst nach Erfolg aller Teile."),
+    FR("Répartit l'extraction des points entre ce nombre de tâches locales indépendantes. "
+       "Un conserve le flux habituel en une tâche ; les valeurs supérieures utilisent "
+       "les appareils disponibles et ne collectent qu'après la réussite de tous les lots."),
+    ES("Divide la extracción en este número de trabajos locales independientes. Uno "
+       "mantiene el flujo habitual de un solo trabajo; los valores mayores usan los "
+       "dispositivos disponibles y recopilan solo cuando todos terminan bien."),
+    PT("Divide a extração em vários trabalhos locais independentes. Um mantém o fluxo "
+       "normal de um só trabalho; valores maiores usam os dispositivos disponíveis e "
+       "só recolhem depois de todas as partes concluírem."),
+    IT("Divide l'estrazione in questo numero di lavori locali indipendenti. Uno mantiene "
+       "il flusso abituale a lavoro singolo; valori maggiori usano i dispositivi "
+       "disponibili e raccolgono solo dopo il successo di tutte le parti."),
+    NL("Verdeelt de kenmerkextractie over dit aantal onafhankelijke lokale taken. Eén "
+       "behoudt de gewone taak; hogere waarden gebruiken beschikbare apparaten en "
+       "verzamelen pas als alle delen geslaagd zijn."),
+    RU("Разделяет извлечение признаков на такое число независимых локальных заданий. "
+       "Единица сохраняет обычный одиночный поток; большие значения используют "
+       "доступные устройства и собирают результат только после успеха всех частей."),
+    TR("Öznitelik çıkarmayı bu kadar bağımsız yerel işe böler. Bir, olağan tek iş akışını "
+       "korur; daha büyük değerler kullanılabilir aygıtları kullanır ve yalnızca tüm "
+       "parçalar başarılı olduktan sonra toplar."));
+
+SS_MSG(feature_shards_status,
+    EN("Validated images: {0}/{1}; shards: {2}/{3}"),
+    JA("検証済み画像: {0}/{1}、分割: {2}/{3}"),
+    ZH_HANS("已验证图像：{0}/{1}；分片：{2}/{3}"),
+    ZH_HANT("已驗證影像：{0}/{1}；分片：{2}/{3}"),
+    KO("검증된 이미지: {0}/{1}; 분할: {2}/{3}"),
+    DE("Geprüfte Bilder: {0}/{1}; Teile: {2}/{3}"),
+    FR("Images validées : {0}/{1} ; lots : {2}/{3}"),
+    ES("Imágenes validadas: {0}/{1}; fragmentos: {2}/{3}"),
+    PT("Imagens validadas: {0}/{1}; partes: {2}/{3}"),
+    IT("Immagini convalidate: {0}/{1}; partizioni: {2}/{3}"),
+    NL("Gevalideerde beelden: {0}/{1}; fragmenten: {2}/{3}"),
+    RU("Проверенные изображения: {0}/{1}; сегменты: {2}/{3}"),
+    TR("Doğrulanan görüntüler: {0}/{1}; parçalar: {2}/{3}"));
+
+SS_MSG(feature_shards_failed,
+    EN("One or more feature shards failed."),
+    JA("1 つ以上の特徴抽出分割が失敗しました。"),
+    ZH_HANS("一个或多个特征分片失败。"),
+    ZH_HANT("一個或多個特徵分片失敗。"),
+    KO("하나 이상의 특징 분할이 실패했습니다."),
+    DE("Mindestens ein Teil der Merkmalsextraktion ist fehlgeschlagen."),
+    FR("Au moins un lot d'extraction a échoué."),
+    ES("Uno o más fragmentos de extracción fallaron."),
+    PT("Uma ou mais partes da extração falharam."),
+    IT("Una o più partizioni dell'estrazione non sono riuscite."),
+    NL("Een of meer fragmenten voor kenmerkextractie zijn mislukt."),
+    RU("Один или несколько сегментов извлечения признаков завершились с ошибкой."),
+    TR("Bir veya daha fazla öznitelik parçası başarısız oldu."));
+
+SS_MSG(feature_collection_waiting,
+    EN("Feature collection sealed; awaiting central reconstruction."),
+    JA("特徴点コレクションを封印しました。中央再構成を待っています。"),
+    ZH_HANS("特征集合已封存；正在等待集中重建。"),
+    ZH_HANT("特徵集合已封存；正在等待集中重建。"),
+    KO("특징 컬렉션이 봉인되었습니다. 중앙 재구성을 기다리는 중입니다."),
+    DE("Merkmalsammlung versiegelt; zentrale Rekonstruktion steht aus."),
+    FR("Collection de points scellée ; reconstruction centrale en attente."),
+    ES("Conjunto de rasgos sellado; esperando la reconstrucción central."),
+    PT("Coleção de características selada; a aguardar a reconstrução central."),
+    IT("Raccolta di caratteristiche sigillata; ricostruzione centrale in attesa."),
+    NL("Kenmerkencollectie verzegeld; centrale reconstructie wacht."),
+    RU("Коллекция признаков запечатана; ожидается центральная реконструкция."),
+    TR("Öznitelik koleksiyonu mühürlendi; merkezi yeniden oluşturma bekleniyor."));
+
 SS_MSG(features_sift,
     EN("SIFT (classic)"), JA("SIFT（古典的）"), ZH_HANS("SIFT（经典）"),
     ZH_HANT("SIFT（經典）"), KO("SIFT(고전적)"), DE("SIFT (klassisch)"),

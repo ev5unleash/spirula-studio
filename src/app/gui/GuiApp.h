@@ -262,6 +262,45 @@ private:
     void draw_force_stop_modal();
     void handle_scheduler_dataset_done(const app::sched::Job& job);
 
+    struct FeatureShardCoordinator {
+        std::string key;
+        std::string plan_dir;
+        std::string plan_path;
+        std::string workspace;
+        std::string image_dir;
+        std::string mask_dir;
+        std::string device;
+        std::string prep_job_id;
+        std::vector<std::string> shard_job_ids;
+        std::vector<std::string> request_paths;
+        std::string central_job_id;
+        std::vector<std::string> central_args;
+        std::vector<std::string> plan_args;
+        std::string central_payload;
+        SfmJob sfm;
+        std::vector<app::sched::Phase> central_tail;
+        std::string device_name;
+        int configured_shards = 1;
+        int effective_shards = 1;
+        int expected_images = 0;
+        std::vector<int> shard_images;
+        int batch_row = -1;
+        bool collected = false;
+        bool failed = false;
+        // A coordinator-owned error stays latched; scheduler state changes
+        // cannot repair collection or recovery metadata.
+        bool local_failure = false;
+        bool finished = false;
+        std::string error;
+    };
+    bool submit_feature_shard_prep(FeatureShardCoordinator& c,
+                                   const PrepJob& frozen,
+                                   const std::string& work_dir,
+                                   const std::string& device,
+                                   const std::string& device_name);
+    void advance_feature_shards();
+    bool feature_shard_job_live(const FeatureShardCoordinator& c) const;
+    void cancel_feature_shards();
     // ---- dataset creation ----
     // Which engines this build and this machine can actually offer.
     bool builtin_sfm_available() const;
@@ -701,7 +740,6 @@ private:
     // input_pixel_size()'s cache, keyed by input path. A zero pair is a
     // remembered "could not tell", so nothing is probed twice.
     std::map<std::string, std::pair<int, int>> _input_size;
-
     // The segmentation checkpoint in use. Not persisted -- neither is any
     // other masking or geometry setting, so a fresh session never runs a
     // model the last one happened to pick.
@@ -740,6 +778,7 @@ private:
     std::string _scheduled_preview_attempt;
     bool _scheduled_preview_ready = false;
     std::vector<app::sched::Job> _scheduler_jobs;
+    std::vector<FeatureShardCoordinator> _feature_coordinators;
     std::map<std::string, std::deque<std::string>> _scheduler_log_tail;
     std::map<std::string, bool> _recovery_dismissed;
     std::string _force_stop_job;

@@ -2,9 +2,10 @@
 // Time-indexed queries over one video's telemetry: the IMU rotation between
 // two instants, the up direction at an instant, a pre-integration over an
 // interval, a GPS position at an instant. Every query takes video time
-// (seconds from the first frame) and adds `time_offset` to reach the IMU
-// clock. Gyro and attitude are interchangeable rotation sources, so a DJI
-// file with no raw gyro answers the same questions as an Insta360.
+// (seconds from the first frame) and maps it with `offset + rate * local_time`
+// to reach the IMU clock. Gyro and attitude are interchangeable rotation
+// sources, so a DJI file with no raw gyro answers the same questions as an
+// Insta360.
 
 #include <algorithm>
 #include <cctype>
@@ -55,15 +56,32 @@ struct UpVote {
     double motion = 0;   // RMS deviation of the window's samples from that average, m/s^2
     int samples = 0;
 };
-
 class SensorTimeline {
 public:
-    double time_offset = 0;   // seconds: IMU clock = video clock + time_offset
+    double time_offset = 0;   // session clock = offset + rate * local time
+    double time_rate = 1.0;
+    bool time_rate_estimated = false;
     ImuNoise noise;
 
+    bool validTimeMapping() const {
+        return std::isfinite(time_offset) && std::isfinite(time_rate) &&
+               time_rate > 0 && time_rate <= 100.0;
+    }
+    double sessionTime(double local_time) const {
+        return time_offset + time_rate * local_time;
+    }
+    bool localTime(double session_time, double& local_time) const {
+        if (!validTimeMapping() || !std::isfinite(session_time)) return false;
+        local_time = (session_time - time_offset) / time_rate;
+        return std::isfinite(local_time);
+    }
     // False with `error` when the file carries nothing this can answer with.
     bool init(const Telemetry& t, const TelemetryCheck& c, std::string& error) {
         using namespace timeline_detail;
+        if (!validTimeMapping() || (!time_rate_estimated && time_rate != 1.0)) {
+            error = "invalid clock mapping";
+            return false;
+        }
         _gyro.clear(); _accel.clear(); _att.clear();
         _q_plus.clear(); _q_minus.clear(); _gps.clear();
         _P = mat3Identity();
@@ -125,14 +143,16 @@ public:
     // DJI's 30 Hz); the position integral over a 0.1-1 s pair still has
     // samples to work with, and the fit's own sigma says when it does not.
     bool canPreintegrate() const {
-        return hasRotation() && _accel_rate >= 20 && _accel.size() >= 2;
+        return validTimeMapping() && hasRotation() && _accel_rate >= 20 &&
+               _accel.size() >= 2;
     }
     bool hasGps() const { return _gps_usable; }
     double imuFirst() const { return _use_gyro ? _gyro.front().t : _use_att ? _att.front().t : 0; }
     double imuLast() const { return _use_gyro ? _gyro.back().t : _use_att ? _att.back().t : 0; }
     bool coversImu(double t) const {
-        const double ti = t + time_offset;
-        return hasRotation() && ti >= imuFirst() && ti <= imuLast();
+        if (!validTimeMapping() || !std::isfinite(t)) return false;
+        const double ti = sessionTime(t);
+        return std::isfinite(ti) && hasRotation() && ti >= imuFirst() && ti <= imuLast();
     }
     const std::vector<TelemetryGps>& gpsFixes() const { return _gps; }
 
@@ -140,7 +160,10 @@ public:
     // t1 into the IMU frame at t0. `sign` -1 integrates the gyro negated,
     // the left-handed-axes hypothesis map/ImuExtrinsic.h tests.
     bool rotationBetween(double t0, double t1, Mat3& R, double sign = 1.0) const {
-        return rotationBetweenImu(t0 + time_offset, t1 + time_offset, R, sign);
+        if (!validTimeMapping() || !std::isfinite(t0) || !std::isfinite(t1)) return false;
+        const double a = sessionTime(t0), b = sessionTime(t1);
+        if (!std::isfinite(a) || !std::isfinite(b)) return false;
+        return rotationBetweenImu(a, b, R, sign);
     }
 
     // The specific force averaged over +-half_window around t, each sample
@@ -148,7 +171,11 @@ public:
     // smear it. A camera at rest reads +g up, so this points UP.
     UpVote upAt(double t, double half_window = 0.25, double sign = 1.0) const {
         UpVote v;
-        const double ti = t + time_offset;
+        if (!validTimeMapping() || !std::isfinite(t) || !std::isfinite(half_window) ||
+            half_window < 0)
+            return v;
+        const double ti = sessionTime(t);
+        if (!std::isfinite(ti)) return v;
         if (_use_att && _accel_rate < 50) {
             Quat q;
             if (!attitudeAt(ti, q)) return v;
@@ -157,7 +184,9 @@ public:
             v.samples = 1;
             return v;
         }
-        if (_accel.empty()) return v;
+        if (_accel.empty() || ti - half_window < _accel.front().t ||
+            ti + half_window > _accel.back().t)
+            return v;
         auto lo = std::lower_bound(_accel.begin(), _accel.end(), ti - half_window,
                                    [](const Stamped& s, double x) { return s.t < x; });
         auto hi = std::upper_bound(_accel.begin(), _accel.end(), ti + half_window,
@@ -169,8 +198,10 @@ public:
         for (auto it = lo; it != hi; ++it) {
             Vec3 x = it->v;
             if (hasRotation()) {
+                double sample_local = 0;
+                if (!localTime(it->t, sample_local)) continue;
                 Mat3 R;
-                if (!rotationBetween(t, it->t - time_offset, R, sign)) continue;
+                if (!rotationBetween(t, sample_local, R, sign)) continue;
                 x = mul(R, x);
             }
             xs.push_back(x);
@@ -191,9 +222,9 @@ public:
     Preintegration preintegrate(double t0, double t1, const Vec3& bg, const Vec3& ba,
                                 double sign = 1.0) const {
         Preintegration P;
-        if (!canPreintegrate()) return P;
-        const double a = t0 + time_offset, b = t1 + time_offset;
-        if (!(b > a)) return P;
+        if (!canPreintegrate() || !std::isfinite(t0) || !std::isfinite(t1)) return P;
+        const double a = sessionTime(t0), b = sessionTime(t1);
+        if (!std::isfinite(a) || !std::isfinite(b) || !(b > a)) return P;
         if (!_use_gyro) return preintegrateFromAttitude(a, b, ba);
         if (a < _gyro.front().t || b > _gyro.back().t) return P;
         std::vector<ImuSample> s;
@@ -210,19 +241,22 @@ public:
         if (interpolate(_gyro, b, w)) push(b, w);
         return sfm::preintegrate(s, bg, ba, noise);
     }
-
     // The log's position at t, interpolated between the first appearances of
     // consecutive distinct fixes. False beyond the log or across a gap over
     // `max_gap` seconds.
     bool gpsAt(double t, TelemetryGps& out, double max_gap = 10.0) const {
-        if (_gps.size() < 2) return false;
-        auto it = std::lower_bound(_gps.begin(), _gps.end(), t,
+        if (!validTimeMapping() || !std::isfinite(t) || !std::isfinite(max_gap) ||
+            max_gap < 0 || _gps.size() < 2)
+            return false;
+        const double ti = sessionTime(t);
+        if (!std::isfinite(ti)) return false;
+        auto it = std::lower_bound(_gps.begin(), _gps.end(), ti,
                                    [](const TelemetryGps& g, double x) { return g.t < x; });
         if (it == _gps.begin() || it == _gps.end()) return false;
         const TelemetryGps& b = *it;
         const TelemetryGps& a = *(it - 1);
-        if (b.t - a.t > max_gap) return false;
-        const double u = (t - a.t) / (b.t - a.t);
+        if (!(b.t > a.t) || b.t - a.t > max_gap) return false;
+        const double u = (ti - a.t) / (b.t - a.t);
         out = a;
         out.t = t;
         out.lat = a.lat + (b.lat - a.lat) * u;
@@ -310,28 +344,39 @@ private:
     }
 
     static bool interpolate(const std::vector<Stamped>& s, double t, Vec3& out) {
-        if (s.size() < 2 || t < s.front().t || t > s.back().t) return false;
-        auto it = std::upper_bound(s.begin(), s.end(), t,
-                                   [](double x, const Stamped& g) { return x < g.t; });
-        if (it == s.begin()) { out = s.front().v; return true; }
-        if (it == s.end()) { out = s.back().v; return true; }
+        if (s.size() < 2 || !std::isfinite(t) || t < s.front().t || t > s.back().t)
+            return false;
+        auto it = std::lower_bound(s.begin(), s.end(), t,
+                                   [](const Stamped& g, double x) { return g.t < x; });
+        if (it != s.end() && it->t == t) {
+            out = it->v;
+            return true;
+        }
+        if (it == s.begin() || it == s.end()) return false;
         const Stamped& b = *it;
         const Stamped& a = *(it - 1);
-        const double u = b.t > a.t ? (t - a.t) / (b.t - a.t) : 0.0;
+        if (!(b.t > a.t)) return false;
+        const double u = (t - a.t) / (b.t - a.t);
         out = a.v + (b.v - a.v) * u;
         return true;
     }
 
     bool attitudeAt(double ti, Quat& q) const {
         using namespace timeline_detail;
-        if (_att.size() < 2 || ti < _att.front().t || ti > _att.back().t) return false;
-        auto it = std::upper_bound(_att.begin(), _att.end(), ti,
-                                   [](double x, const StampedQuat& g) { return x < g.t; });
-        if (it == _att.begin()) { q = _att.front().q; return true; }
-        if (it == _att.end()) { q = _att.back().q; return true; }
+        if (_att.size() < 2 || !std::isfinite(ti) || ti < _att.front().t ||
+            ti > _att.back().t)
+            return false;
+        auto it = std::lower_bound(_att.begin(), _att.end(), ti,
+                                   [](const StampedQuat& g, double x) { return g.t < x; });
+        if (it != _att.end() && it->t == ti) {
+            q = it->q;
+            return true;
+        }
+        if (it == _att.begin() || it == _att.end()) return false;
         const StampedQuat& b = *it;
         const StampedQuat& a = *(it - 1);
-        const double u = b.t > a.t ? (ti - a.t) / (b.t - a.t) : 0.0;
+        if (!(b.t > a.t)) return false;
+        const double u = (ti - a.t) / (b.t - a.t);
         q = quatNlerp(a.q, b.q, u);
         return true;
     }

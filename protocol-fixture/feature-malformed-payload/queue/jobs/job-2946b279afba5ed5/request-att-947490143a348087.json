@@ -1,0 +1,13 @@
+{
+  "schema_version": 2,
+  "job_id": "job-2946b279afba5ed5",
+  "attempt_id": "att-947490143a348087",
+  "phase": "sfm-extract",
+  "device": "feature-device",
+  "device_name": "",
+  "work_dir": "C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\feature-malformed-payload",
+  "workspace": "C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\feature-malformed-payload",
+  "result_path": "C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\feature-malformed-payload\\queue\\jobs\\job-2946b279afba5ed5\\result-att-947490143a348087.json",
+  "args": ["feature-malformed-payload"],
+  "payload": "{}"
+}

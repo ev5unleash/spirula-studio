@@ -1,0 +1,13 @@
+{
+  "schema_version": 2,
+  "job_id": "job-aa3b42cae537de7b",
+  "attempt_id": "att-2fe342b397c2c053",
+  "phase": "sfm-extract",
+  "device": "feature-device",
+  "device_name": "",
+  "work_dir": "C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\feature-extra-output",
+  "workspace": "C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\feature-extra-output",
+  "result_path": "C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\feature-extra-output\\queue\\jobs\\job-aa3b42cae537de7b\\result-att-2fe342b397c2c053.json",
+  "args": ["feature-extra-output"],
+  "payload": "{}"
+}

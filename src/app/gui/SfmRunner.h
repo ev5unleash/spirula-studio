@@ -27,7 +27,7 @@
 #include "app/gui/GeometryRunner.h"
 #include "app/gui/PrepProgress.h"
 #include "i18n/catalog/Dataset.h"
-
+#include <cstdint>
 #include <atomic>
 #include <mutex>
 #include <optional>
@@ -131,6 +131,9 @@ struct SfmJob {
     bool final_per_image_intrinsics = false;
     // ... and one with the rigs released, every image on its own pose.
     bool final_free_rig = false;
+    // Number of independent feature-extraction shards. One preserves the
+    // ordinary prep -> sfm -> geometry workflow.
+    int feature_shards = 1;
     int max_features = 0;             // 0 = the quality preset's
     int max_image_size = 0;           // 0 = the quality preset's
     // 0 flat, 1 bottom-up. Flat for every capture, whatever its size: there is
@@ -185,6 +188,34 @@ struct SfmJob {
     std::string extra_args;
 };
 
+// Files created by the bounded GUI fan-out. They are artifacts of one run,
+// not dataset settings.
+struct SfmFeaturePlanArtifacts {
+    std::string plan_path;
+    std::vector<std::string> request_paths;
+    std::vector<std::string> extract_args;
+    uint32_t shard_count = 0;
+    std::vector<uint32_t> shard_image_counts;
+    uint32_t image_count = 0;
+};
+
+// Build (or validate/reuse) the portable feature plan and its shard requests.
+// The extraction recipe lives in the plan; extract_args only carries roots and
+// the optional mask root required by the worker.
+bool sfm_make_feature_plan(const std::vector<std::string>& model_args,
+                           const std::string& device_selector,
+                           const PrepResult& prep, uint32_t requested_shards,
+                           const std::string& plan_dir,
+                           SfmFeaturePlanArtifacts& out,
+                           std::string& error);
+
+// Import every validated worker result and require a sealed collection.
+bool sfm_collect_feature_results(const std::string& plan_path,
+                                 const std::vector<std::string>& request_paths,
+                                 const std::vector<std::string>& result_roots,
+                                 const std::string& feature_dir,
+                                 std::string& error);
+
 // What a learned frontend still has to fetch, in order; empty for SIFT with
 // brute force, and empty once both artifacts are cached.
 std::vector<PendingDownload> sfm_feature_downloads(int features, int matcher);
@@ -197,9 +228,11 @@ public:
     static std::string availability();
     ~SfmRunner();
 
-    // Prep's completed output folders override planned mask paths at dispatch.
-    std::vector<std::string> scheduler_args(const SfmJob& job,
-                                            std::string& manifest_payload);
+    std::vector<std::string> scheduler_args(
+        const SfmJob& job, std::string& manifest_payload,
+        const std::string& feature_plan = {});
+    std::vector<std::string> feature_plan_model_args(
+        const SfmJob& job, const PrepResult& prep);
     // `films` are the screen's picture reels, null for a caller with no
     // screen; they outlive the run.
     void start(const SfmJob& job, RunFilms films = {});

@@ -11,6 +11,7 @@
 // streams side by side), so tracks are enumerated and selected explicitly.
 
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -20,14 +21,44 @@ namespace video {
 enum class Codec { Unknown, H264, H265, AV1 };
 const char* codec_name(Codec c);
 
+enum class TimingKind : uint8_t {
+    Missing,
+    SourceExact,
+    SourceDerived,
+    ExportDerived,
+};
+
+constexpr uint64_t kUnknownOrdinal = std::numeric_limits<uint64_t>::max();
+
+// One coded picture's lossless source timing and identity within its stream.
+struct FrameTiming {
+    TimingKind kind = TimingKind::Missing;
+    uint64_t presentation_ordinal = kUnknownOrdinal;
+    uint64_t decode_ordinal = kUnknownOrdinal;
+    uint32_t stream_index = 0;
+    uint32_t discontinuity_segment = 0;
+    int64_t pts = 0;
+    int64_t dts = 0;
+    int64_t duration = 0;
+    int32_t time_base_num = 0;
+    int32_t time_base_den = 0;
+    bool has_pts = false;
+    bool has_dts = false;
+    bool has_duration = false;
+};
+
 struct TrackInfo {
     int      index = 0;              // position among the file's video tracks
+    uint32_t stream_index = 0;       // stable index used by FrameTiming
+    std::string stream_id;           // stable container stream identity
     Codec    codec = Codec::Unknown;
     int      width = 0;
     int      height = 0;
     double   fps = 0.0;
     int64_t  frame_count = 0;        // 0 when the container does not state it
     double   duration_sec = 0.0;
+    int32_t  time_base_num = 0;
+    int32_t  time_base_den = 0;
     // avcC / hvcC / av1C record, or Matroska CodecPrivate (same bytes).
     std::vector<uint8_t> codec_config;
     // Length in bytes of the size prefix on each NAL unit; 0 means the frame
@@ -42,13 +73,7 @@ struct TrackInfo {
 
 struct Packet {
     std::vector<uint8_t> data;
-    int64_t index = 0;               // position in DECODE order
-    // ... and in PRESENTATION order, which is what numbers a decoded frame:
-    // counting the pictures that come out instead drifts on a stream the
-    // decoder drops any of, and cannot survive a seek.
-    int64_t display_index = 0;
-    double  pts = 0.0;               // seconds, presentation order
-    double  dts = 0.0;               // seconds, decode order
+    FrameTiming timing;
     bool    is_sync = false;
 };
 

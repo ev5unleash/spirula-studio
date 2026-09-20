@@ -15,6 +15,7 @@
 #include "sfm/core/Events.h"
 #include "sfm/core/FeatureCompaction.h"
 #include "sfm/core/Features.h"
+#include "sfm/core/FeatureWork.h"
 #include "sfm/core/Image.h"
 #include "sfm/core/Log.h"
 #include "sfm/core/Mask.h"
@@ -77,6 +78,45 @@ struct VerifyCalibration {
     bool used_bearings = false;
 };
 
+struct FeaturePlanOptions {
+    uint32_t shards = 1;
+    std::string chunk_memberships;
+    uint32_t chunk_window = 0;
+    uint32_t chunk_overlap = 0;
+};
+
+feature_work::Recipe makeFeatureRecipe(const SfmConfig& cfg);
+feature_work::FeaturePlan makeFeaturePlan(const std::string& image_root,
+                                         const SfmConfig& cfg,
+                                         const FeaturePlanOptions& options);
+feature_work::FeatureRequest makeFeatureRequest(
+    const feature_work::FeaturePlan& plan, uint32_t shard,
+    const std::string& attempt_id, const std::string& supersedes = {});
+void validateFeaturePlanInputs(const feature_work::FeaturePlan& plan,
+                               const std::string& image_root,
+                               const std::string& mask_root);
+int extractFeatureRequest(const std::string& image_root,
+                          const std::string& mask_root,
+                          const std::string& request_path,
+                          const std::filesystem::path& output_dir,
+                          const SfmConfig& cfg, ExtractStats& stats,
+                          const std::string& adopt_from = {});
+void validateFeatureResult(const std::string& request_path,
+                           const std::filesystem::path& result_root);
+feature_work::CollectionIndex collectFeatureResults(
+    const feature_work::FeaturePlan& plan,
+    const std::vector<std::string>& request_paths,
+    const std::vector<std::string>& cancellation_paths,
+    const std::vector<std::string>& result_roots,
+    const std::filesystem::path& feature_dir,
+    const std::vector<std::filesystem::path>& adopt_from = {});
+int loadFeatureCollection(const std::filesystem::path& feature_dir,
+                          const feature_work::FeaturePlan& plan,
+                          const feature_work::CollectionIndex& index,
+                          const SfmConfig& cfg, bool with_descriptors,
+                          std::vector<FeatureSet>& feats,
+                          MatchesDatabase& db);
+
 // ---------------------------------------------------------------------------
 // Stages
 // ---------------------------------------------------------------------------
@@ -104,7 +144,9 @@ int loadFeatureDir(const std::string& featdir, const SfmConfig& cfg, bool with_d
 int matchFeatureDir(const std::string& featdir, const SfmConfig& cfg, PairMode mode,
                     bool verify, std::vector<FeatureSet>& feats, MatchesDatabase& db,
                     MatchStats& stats, VerifyCalibration* calib = nullptr,
-                    const MatchResume* res = nullptr);
+                    const MatchResume* res = nullptr,
+                    const feature_work::FeaturePlan* plan = nullptr,
+                    const feature_work::CollectionIndex* index = nullptr);
 
 std::vector<Reconstruction> runMapper(Mapper& mapper, const MatchesDatabase& db,
                                       const std::vector<FeatureSet>& feats, SfmConfig& cfg,
@@ -137,6 +179,8 @@ bool fixGauge(std::vector<Reconstruction>& models, const SfmConfig& cfg,
               std::vector<ModelGauge>& gauge);
 
 void resolveImageNames(std::vector<Reconstruction>& models, const std::string& imagedir);
+void resolveImageNames(std::vector<Reconstruction>& models,
+                       const feature_work::FeaturePlan& plan);
 void recolorPoints(std::vector<Reconstruction>& models, const SfmConfig& cfg);
 void splitCamerasBySize(std::vector<Reconstruction>& models,
                         const std::vector<FeatureSet>& feats);
@@ -200,6 +244,7 @@ public:
 struct AutoInputs {
     std::string image_dir;
     std::string workspace;
+    std::string feature_plan;
     // The front end said where the masks are; do not look for a sibling.
     bool mask_dir_explicit = false;
     // Flags the front end set by hand, so preset fan-out and the EXR colour
@@ -240,6 +285,7 @@ struct AutoRequest {
 //
 // Presets fill in first, then the manifest, then finalize(): an explicit
 // setting beats the file and the file beats a preset's guess.
-std::string parse_auto_args(const std::vector<std::string>& args, AutoRequest& out);
+std::string parse_auto_args(const std::vector<std::string>& args, AutoRequest& out,
+                            bool resolve_device = true);
 
 }  // namespace sfm

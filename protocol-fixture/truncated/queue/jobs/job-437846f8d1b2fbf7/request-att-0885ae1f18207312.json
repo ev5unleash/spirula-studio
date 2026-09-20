@@ -1,0 +1,13 @@
+{
+  "schema_version": 2,
+  "job_id": "job-437846f8d1b2fbf7",
+  "attempt_id": "att-0885ae1f18207312",
+  "phase": "geometry",
+  "device": "protocol-device",
+  "device_name": "",
+  "work_dir": "C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\truncated",
+  "workspace": "C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\truncated",
+  "result_path": "C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\truncated\\queue\\jobs\\job-437846f8d1b2fbf7\\result-att-0885ae1f18207312.json",
+  "args": ["truncated"],
+  "payload": "{}"
+}

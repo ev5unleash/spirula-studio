@@ -23,8 +23,8 @@ build directory is `build`. Use `-L fast` for deterministic CPU checks,
 Keep `--no-tests=error`: an empty selection is not a successful check.
 Do not use bare `ctest` when intending to avoid GPU workloads.
 
-The normal GUI-enabled Vulkan build registers 19 headless tests. None opens a
-window or initializes a compute device. `-DSS_BUILD_GUI=OFF` runs 14 core tests;
+The normal GUI-enabled Vulkan build registers 20 headless tests. None opens a
+window or initializes a compute device. `-DSS_BUILD_GUI=OFF` runs 15 core tests;
 it omits the batch, preset, argv and two stamp tests. CUDA also omits
 `split_faces_test`, `frustum_size_test` and `bilagrid_selector_test` unless built
 with `-DSS_BUILD_BACKEND_TESTS=ON`. Configure output identifies these differences.
@@ -265,6 +265,13 @@ Real worker preparation remains covered by `scheduler_test`, while
 `cli_training_smoke` covers real training. The protocol fixture is not a fake
 successful compute workload. Rapid scheduler shutdown/pause cycles guard the
 condition-variable lost-wake regression found by concurrent headless runs.
+
+`sfm_feature_work_test` checks the distributed feature plan, request, receipt,
+collection and replan-adoption contracts without a GPU. `scheduler_test`
+exercises real `sfm-extract` ordering and reload, while
+`scheduler_result_test` rejects invalid extraction results before a dependent
+phase can run. The desktop shard count, status, cancellation and restart paths
+still require D2 on a supported non-NVIDIA Vulkan device.
 
 ## What to run before calling a change done
 

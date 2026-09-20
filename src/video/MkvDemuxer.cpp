@@ -4,7 +4,7 @@
 #include "video/Mp4Demuxer.h"
 
 #include <cstring>
-
+#include <limits>
 namespace video {
 
 namespace {
@@ -194,11 +194,16 @@ bool MkvDemuxer::open(const std::string& path, std::string& error) {
 
     infos_.clear();
     for (size_t i = 0; i < tracks_.size(); ++i) {
-        tracks_[i].info.index = (int)i;
-        tracks_[i].info.duration_sec = duration_;
-        if (tracks_[i].info.fps > 0.0 && duration_ > 0.0)
-            tracks_[i].info.frame_count = (int64_t)(duration_ * tracks_[i].info.fps + 0.5);
-        infos_.push_back(tracks_[i].info);
+        Track& tk = tracks_[i];
+        tk.info.index = (int)i;
+        tk.info.stream_index = (uint32_t)i;
+        tk.info.stream_id = "matroska:track:" + std::to_string(tk.number);
+        tk.info.time_base_num = 1;
+        tk.info.time_base_den = 1000000000;
+        tk.info.duration_sec = duration_;
+        if (tk.info.fps > 0.0 && duration_ > 0.0)
+            tk.info.frame_count = (int64_t)(duration_ * tk.info.fps + 0.5);
+        infos_.push_back(tk.info);
     }
     return selectTrack(0, error);
 }
@@ -210,13 +215,16 @@ bool MkvDemuxer::parseInfo(uint64_t end) {
         bool unknown;
         if (!readId(id) || !readSize(size, unknown)) return false;
         const uint64_t next = pos_ + size;
-        if (id == kTimestampScale)
-            timestamp_scale_ = (double)readUInt(size) * 1e-9;
-        else if (id == kDuration)
+        if (id == kTimestampScale) {
+            const uint64_t scale = readUInt(size);
+            if (scale != 0) timestamp_scale_ns_ = scale;
+        } else if (id == kDuration) {
             duration_ = readFloat(size);
+        }
         seek(next);
     }
-    if (duration_ > 0.0) duration_ *= timestamp_scale_;
+    if (duration_ > 0.0)
+        duration_ *= (double)timestamp_scale_ns_ * 1e-9;
     return true;
 }
 
@@ -238,8 +246,6 @@ bool MkvDemuxer::parseTrackEntry(uint64_t end) {
     Track tk;
     uint64_t track_type = 0;
     std::string codec_id;
-    double default_duration = 0.0;
-
     while (pos_ < end) {
         uint32_t id;
         uint64_t size;
@@ -249,7 +255,7 @@ bool MkvDemuxer::parseTrackEntry(uint64_t end) {
         switch (id) {
             case kTrackNumber: tk.number = readUInt(size); break;
             case kTrackType:   track_type = readUInt(size); break;
-            case kDefaultDuration: default_duration = (double)readUInt(size) * 1e-9; break;
+            case kDefaultDuration: tk.default_duration_ns = readUInt(size); break;
             case kCodecID: {
                 codec_id.resize((size_t)size);
                 readBytes(codec_id.data(), size);
@@ -293,14 +299,12 @@ bool MkvDemuxer::parseTrackEntry(uint64_t end) {
     } else {
         return false;
     }
-    if (default_duration > 0.0) tk.info.fps = 1.0 / default_duration;
+    if (tk.default_duration_ns > 0)
+        tk.info.fps = 1e9 / (double)tk.default_duration_ns;
     tracks_.push_back(std::move(tk));
     return true;
 }
 
-// ================
-// Cluster walk
-// ================
 
 bool MkvDemuxer::selectTrack(int index, std::string& error) {
     if (index < 0 || index >= (int)tracks_.size()) {
@@ -310,6 +314,9 @@ bool MkvDemuxer::selectTrack(int index, std::string& error) {
     selected_ = index;
     in_cluster_ = false;
     packet_index_ = 0;
+    discontinuity_segment_ = 0;
+    last_pts_ns_ = 0;
+    have_last_pts_ = false;
     seek(first_cluster_);
     return true;
 }
@@ -397,21 +404,53 @@ bool MkvDemuxer::next(Packet& out, std::string& error) {
         }
 
         const uint64_t payload = next_elem - pos_;
+        out = Packet{};
         out.data.resize((size_t)payload);
         if (!readBytes(out.data.data(), payload)) {
             error = "truncated Matroska block";
             return false;
         }
-        out.index = packet_index_++;
-        // Matroska blocks are read in storage order and this demuxer parses no
-        // composition offsets, so the two orders are the same here.
-        out.display_index = out.index;
-        out.pts = (double)(cluster_ts_ + rel_ts) * timestamp_scale_;
-        out.dts = out.pts;
+
+        FrameTiming& timing = out.timing;
+        timing.stream_index = tk.info.stream_index;
+        timing.discontinuity_segment = discontinuity_segment_;
+        timing.decode_ordinal = packet_index_;
+        timing.presentation_ordinal = packet_index_;
+        const int64_t cluster = cluster_ts_;
+        const int64_t relative = rel_ts;
+        bool exact = true;
+        if ((relative > 0 && cluster > std::numeric_limits<int64_t>::max() - relative) ||
+            (relative < 0 && cluster < std::numeric_limits<int64_t>::min() - relative))
+            exact = false;
+        const int64_t timestamp = exact ? cluster + relative : 0;
+        int64_t pts_ns = 0;
+        if (exact && timestamp_scale_ns_ <= (uint64_t)std::numeric_limits<int64_t>::max()) {
+            const int64_t scale = (int64_t)timestamp_scale_ns_;
+            if (timestamp >= 0) {
+                exact = timestamp <= std::numeric_limits<int64_t>::max() / scale;
+            } else {
+                exact = timestamp >= std::numeric_limits<int64_t>::min() / scale;
+            }
+            if (exact) pts_ns = timestamp * scale;
+        } else {
+            exact = false;
+        }
+        if (exact) {
+            timing.kind = TimingKind::SourceExact;
+            timing.time_base_num = 1;
+            timing.time_base_den = 1000000000;
+            timing.pts = pts_ns;
+            timing.has_pts = true;
+            if (tk.default_duration_ns <= (uint64_t)std::numeric_limits<int64_t>::max()) {
+                timing.duration = (int64_t)tk.default_duration_ns;
+                timing.has_duration = tk.default_duration_ns > 0;
+            }
+        }
         // SimpleBlock states keyframe-ness in bit 7; a Block inside a BlockGroup
         // is a keyframe when it has no ReferenceBlock, which we approximate the
         // same way (the codec parser is the authority for IDR/IRAP anyway).
         out.is_sync = (id == kSimpleBlock) ? ((flags & 0x80) != 0) : false;
+        ++packet_index_;
         seek(next_elem);
         return true;
     }

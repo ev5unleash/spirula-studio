@@ -11,18 +11,24 @@
 #include "app/FrameMotion.h"
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <vector>
 
 namespace app {
 
+struct FrameSelectOutput {
+    std::string path;
+    uint64_t export_ordinal = 0;
+};
+
 struct FrameSelectOptions {
     int group = 1;          // candidates per kept frame
     int max_frames = 0;     // 0 = no cap
     // Adaptive: the rate stays within `range` either side of the average, and
     // the sharpest of `window` candidates around each chosen one is kept.
-    bool  adaptive = false;
+    bool adaptive = false;
     float range = 4.0f;
     int   window = 3;
     app::MotionView view = app::MotionView::Planar;
@@ -37,6 +43,8 @@ struct FrameSelectOptions {
     // Each candidate's view change as it is measured, for a live curve:
     // the candidate it ends at, how many there are, and the change.
     std::function<void(int64_t, int64_t, float)> measured;
+    // Called after a selected candidate has reached its final path.
+    std::function<void(const FrameSelectOutput&)> selected;
 };
 
 // Scores every image in cand_dir (sorted by filename) across all hardware

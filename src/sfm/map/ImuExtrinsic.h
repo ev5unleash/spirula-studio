@@ -295,7 +295,11 @@ inline ExtrinsicFit calibrateImuExtrinsic(const std::vector<SensorFrame>& frames
 struct TimeOffsetFit {
     bool found = false;
     double offset = 0;      // seconds to add to video times
+    double rate = 1.0;      // no drift estimate without distributed observations
+    bool rate_estimated = false;
     double gain = 0;        // fraction of the angle mismatch removed
+    double residual = 0;    // RMS angle residual in degrees
+    double uncertainty = 0; // local offset search resolution in seconds
     int pairs = 0;
 };
 
@@ -308,14 +312,15 @@ inline TimeOffsetFit estimateTimeOffset(const std::vector<SensorFrame>& frames,
     constexpr size_t kMinPairs = 30;
     std::vector<Pair> pairs;
     for (size_t k = 1; k < frames.size(); k++) {
-        const SensorFrame& a = frames[k - 1];
-        const SensorFrame& b = frames[k];
-        if (a.group != b.group || a.capture != b.capture) continue;
-        const double dt = b.t - a.t;
-        if (dt < 0.02 || dt > 3.0) continue;
-        const double vis = rotAngleDeg(mul(a.R, transpose(b.R)));
-        if (vis < 2.0) continue;
-        pairs.push_back({a.t, b.t, vis});
+        for (size_t lag = 1; lag <= 3 && lag <= k; ++lag) {
+            const SensorFrame& a = frames[k - lag];
+            const SensorFrame& b = frames[k];
+            if (a.group != b.group || a.capture != b.capture) continue;
+            const double dt = b.t - a.t;
+            if (dt < 0.02 || dt > 3.0) continue;
+            const double vis = rotAngleDeg(mul(a.R, transpose(b.R)));
+            if (vis >= 2.0) pairs.push_back({a.t, b.t, vis});
+        }
     }
     fit.pairs = (int)pairs.size();
     if (pairs.size() < kMinPairs) return fit;
@@ -348,9 +353,11 @@ inline TimeOffsetFit estimateTimeOffset(const std::vector<SensorFrame>& frames,
         if (c < best_c) { best_c = c; best_d = d; }
     }
     const double cm = cost(best_d - step), cp = cost(best_d + step);
-    const double denom = cm - 2 * best_c + cp;
-    if (denom > 0) best_d += 0.5 * step * (cm - cp) / denom;
+    const double curvature = cm - 2 * best_c + cp;
+    if (curvature > 0) best_d += 0.5 * step * (cm - cp) / curvature;
     if (!(c0 > 0) || std::fabs(best_d) >= range - 0.005) return fit;
+    fit.residual = std::sqrt(std::max(0.0, best_c));
+    fit.uncertainty = step;
     fit.gain = 1.0 - best_c / c0;
     fit.found = fit.gain > 0.2;
     fit.offset = fit.found ? best_d : 0.0;

@@ -36,7 +36,10 @@ struct ManifestCapture {
     std::string prefix;
     std::string telemetry;
     double fps = 0;
-    double time_offset = 0;   // seconds added to every frame time
+    double time_offset = 0;   // legacy CLI value; project timing records are authoritative
+    std::string source_export_mapping;
+    std::string timing_estimate;
+    std::string synchronization_decision;
 };
 
 struct Manifest {

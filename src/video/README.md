@@ -125,11 +125,12 @@ window in decoded form rather than re-decoding it.
 
 ## Frame numbers, and seeking by them
 
-`FrameHandle::index` is the frame's place in the container's **presentation**
-order, taken from the sample table (`Packet::display_index`) rather than
-counted as pictures come out. Counting drifts: on a file the decoder loses a
-picture in, every later frame would be renamed, and after a seek the count
-would restart. Naming them from the container leaves a gap instead.
+`FrameHandle::timing.presentation_ordinal` is the frame's place in the
+container's **presentation** order, taken from
+`Packet::timing.presentation_ordinal` rather than counted as pictures come out.
+Counting drifts: on a file the decoder loses a picture in, every later frame
+would be renamed, and after a seek the count would restart. Naming them from the
+container leaves a gap instead.
 
 `VideoPipeline::seek()` jumps to the sync sample at or before a frame — the
 reorder queue, the DPB pins and the codec's reference state all go, and

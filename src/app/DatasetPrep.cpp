@@ -4,6 +4,9 @@
 
 #include "sfm/core/Resume.h"
 
+#include "data/Json.h"
+#include "data/JsonWrite.h"
+#include "data/ProjectManifest.h"
 #include "i18n/catalog/Log.h"
 
 #include "app/FrameSelect.h"
@@ -31,10 +34,18 @@
 #include "video/Video.h"
 #endif
 
-#ifndef _WIN32
-#include <ftw.h>
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#ifndef NOMINMAX
+#define NOMINMAX
 #endif
-
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <ftw.h>
+#include <unistd.h>
+#endif
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -50,6 +61,8 @@
 #include <map>
 #include <mutex>
 #include <set>
+#include <system_error>
+#include <limits>
 #include <thread>
 
 namespace fs = std::filesystem;
@@ -949,6 +962,503 @@ std::string planned_image_dir(const std::vector<PrepInput>& inputs,
     return workspace.empty() ? std::string()
                              : (fs::path(workspace) / "images").string();
 }
+namespace {
+
+bool sidecar_fields(const JsonValue& v,
+                    std::initializer_list<const char*> allowed,
+                    const char* what, std::string& error) {
+    if (!v.is_object()) {
+        error = std::string(what) + " is not an object";
+        return false;
+    }
+    std::set<std::string> seen;
+    for (const auto& kv : v.obj) {
+        if (!seen.emplace(kv.first).second) {
+            error = std::string(what) + " has duplicate field " + kv.first;
+            return false;
+        }
+        bool known = false;
+        for (const char* key : allowed)
+            if (kv.first == key) { known = true; break; }
+        if (!known) {
+            error = std::string(what) + " has unknown field " + kv.first;
+            return false;
+        }
+    }
+    return true;
+}
+
+const JsonValue& sidecar_required(const JsonValue& v, const char* key,
+                                  const char* what) {
+    const JsonValue* out = v.find(key);
+    if (!out) throw std::runtime_error(std::string(what) + " is missing " + key);
+    return *out;
+}
+
+std::string sidecar_string(const JsonValue& v, const char* key,
+                           const char* what, bool allow_empty = false) {
+    const JsonValue& value = sidecar_required(v, key, what);
+    if (value.type != JsonValue::Type::String ||
+        (!allow_empty && value.str.empty()))
+        throw std::runtime_error(std::string(what) + " has invalid " + key);
+    return value.str;
+}
+
+bool sidecar_bool(const JsonValue& v, const char* key, const char* what) {
+    const JsonValue& value = sidecar_required(v, key, what);
+    if (value.type != JsonValue::Type::Bool)
+        throw std::runtime_error(std::string(what) + " has invalid " + key);
+    return value.b;
+}
+
+std::string sidecar_u64(uint64_t value) { return std::to_string(value); }
+
+uint64_t sidecar_parse_u64(const JsonValue& value, const char* what) {
+    if (value.type != JsonValue::Type::String || value.str.empty() ||
+        value.str[0] == '-')
+        throw std::runtime_error(std::string(what) + " is not a decimal string");
+    size_t at = 0;
+    unsigned long long n = 0;
+    try {
+        n = std::stoull(value.str, &at, 10);
+    } catch (...) {
+        throw std::runtime_error(std::string(what) + " is not a decimal string");
+    }
+    if (at != value.str.size() ||
+        n > (unsigned long long)std::numeric_limits<uint64_t>::max())
+        throw std::runtime_error(std::string(what) + " is out of range");
+    return (uint64_t)n;
+}
+
+int32_t sidecar_parse_i32(const JsonValue& value, const char* what) {
+    if (value.type != JsonValue::Type::String || value.str.empty())
+        throw std::runtime_error(std::string(what) + " is not a decimal string");
+    size_t at = 0;
+    long long n = 0;
+    try {
+        n = std::stoll(value.str, &at, 10);
+    } catch (...) {
+        throw std::runtime_error(std::string(what) + " is not a decimal string");
+    }
+    if (at != value.str.size() ||
+        n < std::numeric_limits<int32_t>::min() ||
+        n > std::numeric_limits<int32_t>::max())
+        throw std::runtime_error(std::string(what) + " is out of range");
+    return (int32_t)n;
+}
+
+void sidecar_check_source_id(const std::string& id, const char* what) {
+    bool valid = id.size() == 71 && id.compare(0, 7, "sha256:") == 0;
+    for (size_t i = 7; valid && i < id.size(); ++i)
+        valid = (id[i] >= '0' && id[i] <= '9') ||
+                (id[i] >= 'a' && id[i] <= 'f');
+    if (!valid) throw std::runtime_error(std::string("invalid ") + what);
+}
+
+bool sidecar_safe_name(const std::string& name) {
+    if (name.empty() || name.find('\0') != std::string::npos) return false;
+    const fs::path path = fs::u8path(name);
+    if (path.empty() || path.is_absolute() || path.has_root_name() ||
+        path.has_root_directory() || path.lexically_normal() != path)
+        return false;
+    for (const fs::path& part : path)
+        if (part == fs::path(".") || part == fs::path("..")) return false;
+    return path.generic_string() == name;
+}
+fs::path sidecar_output_path(const fs::path& image_root,
+                             const std::string& name) {
+    const fs::path output = image_root / fs::u8path(name);
+    std::error_code ec;
+    const fs::path root_real = fs::weakly_canonical(image_root, ec);
+    const fs::path output_real = fs::weakly_canonical(output, ec);
+    if (ec || !inside(output_real, root_real) ||
+        !fs::is_regular_file(output, ec))
+        throw std::runtime_error("fallback output path is unsafe");
+    return output;
+}
+
+
+void sidecar_nullable_u64(JsonWriter& w, const char* key, uint64_t value) {
+    if (value == video::kUnknownOrdinal) w.field_raw(key, "null");
+    else w.field(key, sidecar_u64(value));
+}
+
+void sidecar_nullable_i64(JsonWriter& w, const char* key, bool present,
+                          int64_t value) {
+    if (!present) w.field_raw(key, "null");
+    else w.field(key, std::to_string(value));
+}
+
+const JsonValue* sidecar_nullable(const JsonValue& v, const char* key,
+                                  const char* what) {
+    const JsonValue& value = sidecar_required(v, key, what);
+    if (value.is_null()) return nullptr;
+    return &value;
+}
+
+uint64_t sidecar_nullable_u64(const JsonValue& v, const char* key,
+                              const char* what) {
+    const JsonValue* value = sidecar_nullable(v, key, what);
+    return value ? sidecar_parse_u64(*value, what) : video::kUnknownOrdinal;
+}
+
+int64_t sidecar_nullable_i64(const JsonValue& v, const char* key,
+                             const char* what) {
+    const JsonValue* value = sidecar_nullable(v, key, what);
+    if (!value) return 0;
+    if (value->type != JsonValue::Type::String || value->str.empty())
+        throw std::runtime_error(std::string(what) + " is not a decimal string");
+    size_t at = 0;
+    long long n = 0;
+    try {
+        n = std::stoll(value->str, &at, 10);
+    } catch (...) {
+        throw std::runtime_error(std::string(what) + " is not a decimal string");
+    }
+    if (at != value->str.size())
+        throw std::runtime_error(std::string(what) + " is not a decimal string");
+    return (int64_t)n;
+}
+
+const char* sidecar_timing_kind(video::TimingKind kind) {
+    switch (kind) {
+        case video::TimingKind::SourceExact: return "source_exact";
+        case video::TimingKind::SourceDerived: return "source_derived";
+        case video::TimingKind::ExportDerived: return "export_derived";
+        default: return "missing";
+    }
+}
+
+video::TimingKind parse_sidecar_timing_kind(const std::string& kind) {
+    if (kind == "source_exact") return video::TimingKind::SourceExact;
+    if (kind == "source_derived") return video::TimingKind::SourceDerived;
+    if (kind == "export_derived") return video::TimingKind::ExportDerived;
+    throw std::runtime_error("invalid timing kind");
+}
+
+void validate_sidecar_timing(const video::FrameTiming& timing) {
+    if (timing.kind == video::TimingKind::ExportDerived) {
+        if (timing.presentation_ordinal != video::kUnknownOrdinal ||
+            timing.decode_ordinal != video::kUnknownOrdinal || timing.has_pts ||
+            timing.has_dts || timing.has_duration)
+            throw std::runtime_error("fallback timing invents source identity");
+        return;
+    }
+    if ((timing.kind != video::TimingKind::SourceExact &&
+         timing.kind != video::TimingKind::SourceDerived) ||
+        timing.presentation_ordinal == video::kUnknownOrdinal ||
+        !timing.has_pts || timing.time_base_num <= 0 || timing.time_base_den <= 0)
+        throw std::runtime_error("source timing is incomplete");
+}
+
+void write_sidecar_timing(JsonWriter& w, const video::FrameTiming& timing) {
+    validate_sidecar_timing(timing);
+    w.key("timing").object();
+    w.field("kind", sidecar_timing_kind(timing.kind));
+    sidecar_nullable_u64(w, "presentation_ordinal",
+                         timing.presentation_ordinal);
+    sidecar_nullable_u64(w, "decode_ordinal", timing.decode_ordinal);
+    w.field("stream_index", sidecar_u64(timing.stream_index));
+    w.field("discontinuity_segment", sidecar_u64(timing.discontinuity_segment));
+    sidecar_nullable_i64(w, "pts", timing.has_pts, timing.pts);
+    sidecar_nullable_i64(w, "dts", timing.has_dts, timing.dts);
+    sidecar_nullable_i64(w, "duration", timing.has_duration, timing.duration);
+    w.field("time_base_num", std::to_string(timing.time_base_num));
+    w.field("time_base_den", std::to_string(timing.time_base_den));
+    w.field("has_pts", timing.has_pts);
+    w.field("has_dts", timing.has_dts);
+    w.field("has_duration", timing.has_duration);
+    w.end();
+}
+
+void parse_sidecar_timing(const JsonValue& value, video::FrameTiming& timing) {
+    std::string error;
+    if (!sidecar_fields(value,
+                        {"kind", "presentation_ordinal", "decode_ordinal",
+                         "stream_index", "discontinuity_segment", "pts", "dts",
+                         "duration", "time_base_num", "time_base_den", "has_pts",
+                         "has_dts", "has_duration"},
+                        "timing", error))
+        throw std::runtime_error(error);
+    timing = video::FrameTiming{};
+    timing.kind = parse_sidecar_timing_kind(
+        sidecar_string(value, "kind", "timing"));
+    timing.presentation_ordinal =
+        sidecar_nullable_u64(value, "presentation_ordinal",
+                             "timing presentation ordinal");
+    timing.decode_ordinal =
+        sidecar_nullable_u64(value, "decode_ordinal", "timing decode ordinal");
+    const uint64_t stream = sidecar_parse_u64(
+        sidecar_required(value, "stream_index", "timing"), "timing stream index");
+    const uint64_t segment = sidecar_parse_u64(
+        sidecar_required(value, "discontinuity_segment", "timing"),
+        "timing discontinuity segment");
+    if (stream > std::numeric_limits<uint32_t>::max() ||
+        segment > std::numeric_limits<uint32_t>::max())
+        throw std::runtime_error("timing stream index is out of range");
+    timing.stream_index = (uint32_t)stream;
+    timing.discontinuity_segment = (uint32_t)segment;
+    timing.has_pts = sidecar_bool(value, "has_pts", "timing");
+    timing.has_dts = sidecar_bool(value, "has_dts", "timing");
+    timing.has_duration = sidecar_bool(value, "has_duration", "timing");
+    timing.pts = sidecar_nullable_i64(value, "pts", "timing pts");
+    timing.dts = sidecar_nullable_i64(value, "dts", "timing dts");
+    timing.duration = sidecar_nullable_i64(value, "duration", "timing duration");
+    timing.time_base_num = sidecar_parse_i32(
+        sidecar_required(value, "time_base_num", "timing"),
+        "timing time base numerator");
+    timing.time_base_den = sidecar_parse_i32(
+        sidecar_required(value, "time_base_den", "timing"),
+        "timing time base denominator");
+    validate_sidecar_timing(timing);
+}
+
+bool sync_sidecar_file(const fs::path& path, std::string& error) {
+#ifdef _WIN32
+    const int fd = _open(path.string().c_str(), _O_RDWR | _O_BINARY);
+    if (fd < 0 || _commit(fd) != 0) {
+        if (fd >= 0) _close(fd);
+        error = "cannot flush " + path.string();
+        return false;
+    }
+    _close(fd);
+#else
+    const int fd = ::open(path.c_str(), O_RDONLY);
+    if (fd < 0 || ::fsync(fd) != 0) {
+        if (fd >= 0) ::close(fd);
+        error = "cannot flush " + path.string();
+        return false;
+    }
+    ::close(fd);
+#endif
+    return true;
+}
+
+bool append_fallback_row(PrepCapture& capture, const fs::path& image_root,
+                         const FrameSelectOutput& selected,
+                         const std::string& original_source_id,
+                         uint32_t stream_index, std::string& error) {
+    try {
+        const std::string name = under_root(fs::path(selected.path), image_root)
+                                     .generic_string();
+        if (!sidecar_safe_name(name))
+            throw std::runtime_error("fallback output path is unsafe");
+        const fs::path output = sidecar_output_path(image_root, name);
+        spirula::project::SourceRecord exported =
+            spirula::project::make_source_record(output);
+        exported.relation = spirula::project::SourceRelation::Export;
+        exported.original_source_id = original_source_id;
+        spirula::project::validate_source_record(exported);
+        PrepFrameSource row;
+        row.output_name = name;
+        row.output_source_id = exported.source_id;
+        row.export_ordinal = selected.export_ordinal;
+        row.timing.kind = video::TimingKind::ExportDerived;
+        row.timing.presentation_ordinal = video::kUnknownOrdinal;
+        row.timing.decode_ordinal = video::kUnknownOrdinal;
+        row.timing.stream_index = stream_index;
+        row.timing.discontinuity_segment = 0;
+        row.timing.time_base_num = 0;
+        row.timing.time_base_den = 0;
+        capture.frames.push_back(std::move(row));
+        return true;
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    }
+}
+
+}  // namespace
+
+std::string prep_provenance_path(const std::string& workspace) {
+    return (fs::path(workspace) / kPrepProvenanceFile).string();
+}
+
+bool write_prep_provenance(const std::string& workspace,
+                           const std::vector<PrepCapture>& captures,
+                           std::string& error) {
+    try {
+        const fs::path root(workspace);
+        const fs::path image_root = root / "images";
+        JsonWriter w;
+        w.object().field("schema", kPrepProvenanceSchema).key("captures").array();
+        std::vector<size_t> order(captures.size());
+        for (size_t i = 0; i < captures.size(); i++) order[i] = i;
+        std::set<std::string> names;
+        for (size_t index : order) {
+            const PrepCapture& capture = captures[index];
+            sidecar_check_source_id(capture.source_id, "capture source_id");
+            w.object().field("subdir", capture.subdir)
+                .field("path", capture.path)
+                .field("source_id", capture.source_id)
+                .key("rows").array();
+            std::vector<size_t> rows(capture.frames.size());
+            for (size_t i = 0; i < capture.frames.size(); i++) rows[i] = i;
+            std::sort(rows.begin(), rows.end(), [&](size_t a, size_t b) {
+                return capture.frames[a].output_name <
+                       capture.frames[b].output_name;
+            });
+            for (size_t row_index : rows) {
+                const PrepFrameSource& row = capture.frames[row_index];
+                if (!sidecar_safe_name(row.output_name) ||
+                    !names.emplace(row.output_name).second)
+                    throw std::runtime_error("duplicate or unsafe provenance output");
+                if (row.output_source_id.empty() ||
+                    row.export_ordinal == video::kUnknownOrdinal)
+                    throw std::runtime_error("invalid provenance row");
+                validate_sidecar_timing(row.timing);
+                const fs::path output =
+                    sidecar_output_path(image_root, row.output_name);
+                spirula::project::SourceRecord exported =
+                    spirula::project::make_source_record(output);
+                if (exported.source_id != row.output_source_id)
+                    throw std::runtime_error("output changed before provenance publish");
+                exported.relation = spirula::project::SourceRelation::Export;
+                exported.original_source_id = capture.source_id;
+                spirula::project::validate_source_record(exported);
+                const char* mapping_status =
+                    row.timing.kind == video::TimingKind::SourceExact
+                        ? "exact"
+                        : row.timing.kind == video::TimingKind::SourceDerived
+                              ? "derived"
+                              : "unsupported";
+                w.object().field("output_name", row.output_name)
+                    .field("output_source_id", row.output_source_id)
+                    .field("original_source_id", capture.source_id)
+                    .field("relation", "export")
+                    .field("mapping_status", mapping_status)
+                    .field("export_ordinal", sidecar_u64(row.export_ordinal));
+                write_sidecar_timing(w, row.timing);
+                w.end();
+            }
+            w.end().end();
+        }
+        const std::string encoded = w.end().end().str();
+        const fs::path dir = root / ".spirula";
+        const fs::path target = dir / "prep-provenance.json";
+        const fs::path temp = dir / "prep-provenance.json.tmp";
+        std::error_code ec;
+        fs::create_directories(dir, ec);
+        if (ec) throw std::runtime_error("cannot create " + dir.string());
+        {
+            std::ofstream f(temp, std::ios::binary | std::ios::trunc);
+            if (!f) throw std::runtime_error("cannot write " + temp.string());
+            f.write(encoded.data(), (std::streamsize)encoded.size());
+            f.flush();
+            if (!f) throw std::runtime_error("cannot write " + temp.string());
+        }
+        if (!sync_sidecar_file(temp, error)) return false;
+        fs::rename(temp, target, ec);
+#ifdef _WIN32
+        if (ec) {
+            if (MoveFileExW(temp.wstring().c_str(), target.wstring().c_str(),
+                            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+                ec.clear();
+            else
+                ec = std::make_error_code(std::errc::io_error);
+        }
+#endif
+        if (ec) {
+            fs::remove(temp, ec);
+            error = "cannot publish " + target.string();
+            return false;
+        }
+        return true;
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    }
+}
+
+bool read_prep_provenance(const std::string& sidecar,
+                          std::vector<PrepCapture>& captures,
+                          std::string& error) {
+    try {
+        const JsonValue root = json_parse_file(sidecar);
+        static constexpr const char* kFields[] = {"schema", "captures"};
+        std::string fields_error;
+        if (!sidecar_fields(root,
+                            {kFields[0], kFields[1]}, "provenance", fields_error))
+            throw std::runtime_error(fields_error);
+        if (sidecar_string(root, "schema", "provenance") !=
+            kPrepProvenanceSchema)
+            throw std::runtime_error("unknown provenance schema");
+        const JsonValue& list = sidecar_required(root, "captures", "provenance");
+        if (!list.is_array()) throw std::runtime_error("provenance captures is not an array");
+        const fs::path workspace = fs::path(sidecar).parent_path().parent_path();
+        const fs::path image_root = workspace / "images";
+        std::set<std::string> names;
+        captures.clear();
+        for (const JsonValue& value : list.arr) {
+            std::string capture_error;
+            if (!sidecar_fields(value, {"subdir", "path", "source_id", "rows"},
+                                "capture", capture_error))
+                throw std::runtime_error(capture_error);
+            PrepCapture capture;
+            capture.subdir = sidecar_string(value, "subdir", "capture", true);
+            capture.path = sidecar_string(value, "path", "capture");
+            capture.source_id = sidecar_string(value, "source_id", "capture");
+            sidecar_check_source_id(capture.source_id, "capture source_id");
+            const JsonValue& rows = sidecar_required(value, "rows", "capture");
+            if (!rows.is_array()) throw std::runtime_error("capture rows is not an array");
+            for (const JsonValue& row_value : rows.arr) {
+                if (!sidecar_fields(row_value,
+                                    {"output_name", "output_source_id",
+                                     "original_source_id", "relation",
+                                     "mapping_status", "export_ordinal", "timing"},
+                                    "row", capture_error))
+                    throw std::runtime_error(capture_error);
+                PrepFrameSource row;
+                row.output_name = sidecar_string(row_value, "output_name", "row");
+                if (!sidecar_safe_name(row.output_name) ||
+                    !names.emplace(row.output_name).second)
+                    throw std::runtime_error("unsafe or duplicate provenance output");
+                row.output_source_id =
+                    sidecar_string(row_value, "output_source_id", "row");
+                const std::string original =
+                    sidecar_string(row_value, "original_source_id", "row");
+                if (original != capture.source_id)
+                    throw std::runtime_error("row original source mismatch");
+                const std::string mapping_status =
+                    sidecar_string(row_value, "mapping_status", "row");
+                if (sidecar_string(row_value, "relation", "row") != "export" ||
+                    (mapping_status != "exact" && mapping_status != "derived" &&
+                     mapping_status != "unsupported"))
+                    throw std::runtime_error("invalid provenance mapping status");
+                row.export_ordinal = sidecar_parse_u64(
+                    sidecar_required(row_value, "export_ordinal", "row"),
+                    "row export ordinal");
+                parse_sidecar_timing(sidecar_required(row_value, "timing", "row"),
+                                     row.timing);
+                const char* expected_status =
+                    row.timing.kind == video::TimingKind::SourceExact
+                        ? "exact"
+                        : row.timing.kind == video::TimingKind::SourceDerived
+                              ? "derived"
+                              : "unsupported";
+                if (mapping_status != expected_status)
+                    throw std::runtime_error("mapping status disagrees with timing");
+                const fs::path output =
+                    sidecar_output_path(image_root, row.output_name);
+                spirula::project::SourceRecord exported =
+                    spirula::project::make_source_record(output);
+                if (exported.source_id != row.output_source_id)
+                    throw std::runtime_error("output does not match provenance");
+                exported.relation = spirula::project::SourceRelation::Export;
+                exported.original_source_id = capture.source_id;
+                spirula::project::validate_source_record(exported);
+                capture.frames.push_back(std::move(row));
+            }
+            captures.push_back(std::move(capture));
+        }
+        return true;
+    } catch (const std::exception& e) {
+        captures.clear();
+        error = e.what();
+        return false;
+    }
+}
+
 
 PrepResult planned_prep(const PrepJob& job) {
     PrepResult out;
@@ -1075,6 +1585,19 @@ void DatasetPrep::enter(Stage s, const std::string& text) {
     _stage = s;
     if (_sinks.enter) _sinks.enter(s, text);
 }
+bool DatasetPrep::load_resume_provenance(const PrepJob& job, std::string& error) {
+    if (_resume_provenance_loaded) return true;
+    _resume_provenance_loaded = true;
+    _resume_provenance_present = false;
+    _resume_captures.clear();
+    const fs::path sidecar = prep_provenance_path(job.workspace);
+    std::error_code ec;
+    if (!fs::exists(sidecar, ec)) return true;
+    if (!read_prep_provenance(sidecar.string(), _resume_captures, error))
+        return false;
+    _resume_provenance_present = true;
+    return true;
+}
 
 int DatasetPrep::exec(
         const std::vector<std::string>& argv,
@@ -1137,6 +1660,9 @@ int64_t DatasetPrep::estimate_frames(const PrepJob& job, const PrepInput& in,
 bool DatasetPrep::run(const PrepJob& job_in, PrepResult& out, std::string& error,
                       const RefreshFn& refresh_masks) {
     PrepJob job = job_in;
+    _resume_provenance_loaded = false;
+    _resume_provenance_present = false;
+    _resume_captures.clear();
     const PrepResult plan = planned_prep(job);
     out = PrepResult{};
     out.image_dir = plan.image_dir;
@@ -1182,6 +1708,10 @@ bool DatasetPrep::run(const PrepJob& job_in, PrepResult& out, std::string& error
             out.frames_rebuilt = true;
             log(fmt(lmsg::frames_settings_changed, {moved}), /*detail=*/false);
         }
+    }
+    if (frames_stale(job)) {
+        std::error_code provenance_ec;
+        fs::remove(prep_provenance_path(job.workspace), provenance_ec);
     }
 
     // Where each input's images and masks ended up, so the masking pass below
@@ -1319,9 +1849,6 @@ bool DatasetPrep::run(const PrepJob& job_in, PrepResult& out, std::string& error
             out.per_folder_cameras = true;
     }
 
-    // Written once the images are there, so an interrupted extraction is not
-    // recorded as having produced what it was asked for.
-    write_recon_stamp(ws.string(), frames_now, kFramesStampFile);
 
     out.n_images = count_images(out.image_dir, skip_dir);
     log(fmt(lmsg::found_images, {(long long)out.n_images, out.image_dir}),
@@ -1330,6 +1857,17 @@ bool DatasetPrep::run(const PrepJob& job_in, PrepResult& out, std::string& error
         error = fmt(lmsg::err_too_few_images, {(long long)out.n_images});
         return false;
     }
+    bool have_provenance = false;
+    for (const PrepCapture& capture : out.captures)
+        have_provenance = have_provenance || !capture.frames.empty();
+    if (have_provenance &&
+        !write_prep_provenance(job.workspace, out.captures, error))
+        return false;
+    if (have_provenance)
+        out.provenance_sidecar = prep_provenance_path(job.workspace);
+    // Written once the images and their provenance are there, so an interrupted
+    // extraction is not recorded as having produced what it was asked for.
+    write_recon_stamp(ws.string(), frames_now, kFramesStampFile);
 
     // The frames exist now, so what masking is asked to do can still be the
     // answer the user gave while watching them go by.
@@ -1427,6 +1965,14 @@ bool DatasetPrep::extract_video(const PrepJob& job, const PrepInput& in,
                                 const std::string& images,
                                 const std::string& masks, PrepResult& out,
                                 bool& masked, std::string& error) {
+    std::string source_id;
+    try {
+        source_id = spirula::project::make_source_record(in.path).source_id;
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    }
+
     // Resume: frames are moved into place in one batch after selection, so a
     // non-empty folder means a previous extraction of THIS input finished.
     if (frames_stale(job)) clear_generated(images, job.workspace);
@@ -1438,10 +1984,29 @@ bool DatasetPrep::extract_video(const PrepJob& job, const PrepInput& in,
             std::error_code ec;
             if (fs::is_directory(fs::path(images) / "cam1", ec))
                 out.per_folder_cameras = true;
-            // Kept frames of unknown provenance: the file's own rate is the
-            // built-in extractor's convention, and a wrong one is refused
-            // downstream by the gyro-against-poses check, not misused.
-            out.captures.push_back({in.subdir, in.path, 0.0});
+            PrepCapture capture;
+            capture.subdir = in.subdir;
+            capture.path = in.path;
+            capture.source_id = source_id;
+            if (!load_resume_provenance(job, error)) return false;
+            if (_resume_provenance_present) {
+                bool found = false;
+                for (const PrepCapture& candidate : _resume_captures) {
+                    if (candidate.subdir == in.subdir &&
+                        candidate.path == in.path &&
+                        candidate.source_id == source_id) {
+                        capture = candidate;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    error = "provenance sidecar has no resumed capture";
+                    return false;
+                }
+                out.provenance_sidecar = prep_provenance_path(job.workspace);
+            }
+            out.captures.push_back(std::move(capture));
             // Masks a previous run left. Not when this one is re-doing them:
             // `masked` is what makes run() skip the masking pass entirely.
             if (job.mask_enable && !job.redo_masks) {
@@ -1458,23 +2023,24 @@ bool DatasetPrep::extract_video(const PrepJob& job, const PrepInput& in,
     const bool want_builtin =
         !job.force_external_decode && native_decode_reason().empty();
     if (want_builtin) {
-        if (extract_video_builtin(job, in, images, out, error)) {
-            out.captures.push_back({in.subdir, in.path, 0.0});
+        if (extract_video_builtin(job, in, source_id, images, out, error))
             return true;
-        }
         if (_cancel.load()) return false;
         // A container or profile the driver cannot decode is exactly what the
         // fallback is for, and the user should not have to know which is which.
         log(fmt(lmsg::decode_fallback_ffmpeg, {error}), /*detail=*/false);
     }
-    const bool ok = in.pano360.valid() && job.pano.mode != app::Pano360Mode::Off
-                        ? extract_360_ffmpeg(job, in, images, out, error)
-                        : extract_video_ffmpeg(job, in, images, out, error);
-    // The stems are candidate numbers, and the candidates were resampled at
-    // the kept rate times the group -- which is the rate that times them.
-    if (ok)
-        out.captures.push_back(
-            {in.subdir, in.path, (double)input_fps(job, in) * candidate_group(job)});
+    PrepCapture capture;
+    capture.subdir = in.subdir;
+    capture.path = in.path;
+    capture.source_id = source_id;
+    const bool is_360 = in.pano360.valid() && job.pano.mode != app::Pano360Mode::Off;
+    const bool ok = is_360
+                        ? extract_360_ffmpeg(job, in, source_id, images, capture,
+                                             error)
+                        : extract_video_ffmpeg(job, in, source_id, images, capture,
+                                              error);
+    if (ok) out.captures.push_back(std::move(capture));
     return ok;
 }
 
@@ -1582,10 +2148,11 @@ bool DatasetPrep::plan_group(const PrepJob& job, size_t at, std::string& error) 
 // (generate_masks_builtin), so frames are visible before the user chooses
 // masks and re-masking costs no re-extraction.
 bool DatasetPrep::extract_video_builtin(const PrepJob& job, const PrepInput& in,
+                                        const std::string& source_id,
                                         const std::string& images,
                                         PrepResult& out, std::string& error) {
 #ifndef SS_HAVE_VIDEO
-    (void)job; (void)in; (void)images; (void)out;
+    (void)job; (void)in; (void)source_id; (void)images; (void)out;
     error = backends().video_reason;
     return false;
 #else
@@ -1610,6 +2177,11 @@ bool DatasetPrep::extract_video_builtin(const PrepJob& job, const PrepInput& in,
     if (!builtin_job(job, in, fx, nullptr, error)) return false;
     fx.image_dir = images;
     fx.device = job.device;
+    fx.source_id = source_id;
+    PrepCapture capture;
+    capture.subdir = in.subdir;
+    capture.path = in.path;
+    capture.source_id = source_id;
     const size_t row = input_index(job, in);
     if (row < _plans.size()) fx.plan = _plans[row];
     if (!views.empty())
@@ -1637,25 +2209,32 @@ bool DatasetPrep::extract_video_builtin(const PrepJob& job, const PrepInput& in,
     sinks.measured = [this, row](int64_t at, int64_t of, float c) {
         if (_sinks.scan_step) _sinks.scan_step(row, at, of, c);
     };
-    sinks.planned = [this, row](const std::vector<int64_t>& plan,
-                                int64_t frames) {
-        if (_sinks.scan_kept)
-            _sinks.scan_kept(row, plan, frames);
-    };
+    const fs::path root(images);
+    const fs::path provenance_root = fs::path(job.workspace) / "images";
     if (_sinks.frame) {
-        const fs::path root(images);
         sinks.preview = [this, root](const uint8_t* rgb, int w, int h,
-                                     const std::string& path) {
+                                     const std::string& path,
+                                     const video::FrameTiming& timing) {
             PrepFrame f;
             f.name = under_root(fs::path(path), root).generic_string();
             f.image_path = path;
             f.rgb = rgb;
             f.width = w;
             f.height = h;
+            f.timing = timing;
             // The callback runs before the decoder reuses this frame buffer.
             _sinks.frame(f);
         };
     }
+    sinks.written = [&capture, provenance_root](
+                        const std::string& path,
+                        const video::FrameTiming& timing) {
+        PrepFrameSource f;
+        f.output_name =
+            under_root(fs::path(path), provenance_root).generic_string();
+        f.timing = timing;
+        capture.frames.push_back(std::move(f));
+    };
 
     app::FrameExtractStats stats;
     if (!app::extract_frames(fx, sinks, stats, error)) return false;
@@ -1664,13 +2243,34 @@ bool DatasetPrep::extract_video_builtin(const PrepJob& job, const PrepInput& in,
         error = lmsg::err_no_frames_extracted.get();
         return false;
     }
+    try {
+        for (PrepFrameSource& frame : capture.frames) {
+            validate_sidecar_timing(frame.timing);
+            frame.output_source_id =
+                spirula::project::make_source_record(
+                    provenance_root / fs::u8path(frame.output_name))
+                    .source_id;
+            frame.export_ordinal = frame.timing.presentation_ordinal;
+        }
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    }
+    capture.source_id = stats.source_id.empty() ? source_id : stats.source_id;
+    for (const video::TrackInfo& stream : stats.streams)
+        capture.streams.push_back({stream.stream_id, "video",
+                                   video::codec_name(stream.codec),
+                                   stream.time_base_num, stream.time_base_den});
+    out.captures.push_back(std::move(capture));
     return true;
 #endif
 }
 
 bool DatasetPrep::extract_video_ffmpeg(const PrepJob& job, const PrepInput& in,
+                                       const std::string& source_id,
                                        const std::string& images,
-                                       PrepResult& out, std::string& error) {
+                                       PrepCapture& capture,
+                                       std::string& error) {
     if (job.sync_tracks) log(lmsg::sync_needs_builtin.get(), /*detail=*/false);
     const fs::path ws = job.workspace;
     if (!command_exists(job.ffmpeg_exe)) {
@@ -1687,8 +2287,6 @@ bool DatasetPrep::extract_video_ffmpeg(const PrepJob& job, const PrepInput& in,
     size_t streams = 1;
     if (is_dual_fisheye_path(in.path) && facts.tracks.size() > 1)
         streams = facts.tracks.size();
-    if (streams > 1) out.per_folder_cameras = true;
-
     const int window = std::max(job.sharp_window, 1);
     const int group = candidate_group(job);
     const bool fisheye = streams > 1 && !facts.tracks.empty() &&
@@ -1778,6 +2376,13 @@ bool DatasetPrep::extract_video_ffmpeg(const PrepJob& job, const PrepInput& in,
                                  int64_t frames) {
             if (_sinks.scan_kept) _sinks.scan_kept(row, plan, frames);
         };
+        std::string provenance_error;
+        so.selected = [&](const FrameSelectOutput& selected) {
+            if (provenance_error.empty())
+                append_fallback_row(capture, fs::path(job.workspace) / "images",
+                                    selected, source_id, (uint32_t)tr,
+                                    provenance_error);
+        };
         const int kept = select_sharpest_frames(
             cand.string(), out_dir.string(), "", so,
             [this](const std::string& l) { log(l); }, _cancel);
@@ -1788,16 +2393,15 @@ bool DatasetPrep::extract_video_ffmpeg(const PrepJob& job, const PrepInput& in,
             error = _cancel.load() ? "cancelled" : "frame selection failed";
             return false;
         }
+        if (!provenance_error.empty()) {
+            error = provenance_error;
+            return false;
+        }
         log(fmt(lmsg::kept_frames, {(long long)kept, out_dir.string()}),
             /*detail=*/false);
     }
     return true;
 }
-
-// ---------------------------------------------------------------------------
-// 360 -> views
-// ---------------------------------------------------------------------------
-
 namespace {
 
 // The canvas frames selection kept, resampled into the plan's views. One
@@ -1808,6 +2412,8 @@ bool warp_canvases(const fs::path& from, const fs::path& to,
                    const std::vector<app::Pano360View>& views,
                    const std::atomic<bool>& cancel,
                    const std::function<void(int64_t)>& progress,
+                   const std::function<bool(const fs::path&, const fs::path&,
+                                            std::string&)>& selected,
                    std::string& error) {
     std::error_code ec;
     std::vector<app::Pano360Remap> maps(views.size());
@@ -1834,15 +2440,16 @@ bool warp_canvases(const fs::path& from, const fs::path& to,
         }
         std::atomic<bool> ok{true};
         std::vector<std::thread> pool;
+        std::vector<fs::path> outputs(views.size());
         pool.reserve(views.size());
         for (size_t i = 0; i < views.size(); i++) {
             pool.emplace_back([&, i] {
                 std::vector<uint8_t> out((size_t)maps[i].width * maps[i].height * 3);
                 app::pano360_apply(maps[i], px, w, h, per_view, out.data());
-                const std::string path =
-                    (to / views[i].dir / (f.stem().string() + ".jpg")).string();
-                if (!stbi_write_jpg(path.c_str(), maps[i].width, maps[i].height, 3,
-                                    out.data(), kPhotoJpegQuality))
+                outputs[i] = to / views[i].dir / (f.stem().string() + ".jpg");
+                if (!stbi_write_jpg(outputs[i].string().c_str(), maps[i].width,
+                                    maps[i].height, 3, out.data(),
+                                    kPhotoJpegQuality))
                     ok = false;
             });
         }
@@ -1852,15 +2459,20 @@ bool warp_canvases(const fs::path& from, const fs::path& to,
             error = fmt(lmsg::err_360_frame_write, {(to / f.stem()).string()});
             return false;
         }
+        if (selected) {
+            for (const fs::path& output : outputs)
+                if (!selected(f, output, error)) return false;
+        }
         if (progress) progress(++done);
     }
     return true;
 }
 
 }  // namespace
-
 bool DatasetPrep::extract_360_ffmpeg(const PrepJob& job, const PrepInput& in,
-                                     const std::string& images, PrepResult& out,
+                                     const std::string& source_id,
+                                     const std::string& images,
+                                     PrepCapture& capture,
                                      std::string& error) {
     if (!command_exists(job.ffmpeg_exe)) {
         error = fmt(lmsg::err_ffmpeg_missing, {job.ffmpeg_exe});
@@ -1872,7 +2484,6 @@ bool DatasetPrep::extract_360_ffmpeg(const PrepJob& job, const PrepInput& in,
         error = lmsg::err_ffmpeg_extract_failed.get();
         return false;
     }
-    if (views.size() > 1) out.per_folder_cameras = true;
     log(fmt(lmsg::video_input, {in.path}), /*detail=*/false);
     log(fmt(lmsg::pano360_plan, {(long long)views.size(), views[0].width,
                                  views[0].height}), /*detail=*/false);
@@ -1934,6 +2545,10 @@ bool DatasetPrep::extract_360_ffmpeg(const PrepJob& job, const PrepInput& in,
                              int64_t frames) {
         if (_sinks.scan_kept) _sinks.scan_kept(row, plan, frames);
     };
+    std::map<fs::path, uint64_t> kept_ordinals;
+    so.selected = [&](const FrameSelectOutput& selected) {
+        kept_ordinals[fs::path(selected.path)] = selected.export_ordinal;
+    };
     const int n = select_sharpest_frames(
         cand.string(), kept.string(), "", so,
         [this](const std::string& l) { log(l); }, _cancel);
@@ -1951,6 +2566,18 @@ bool DatasetPrep::extract_360_ffmpeg(const PrepJob& job, const PrepInput& in,
     const bool ok = warp_canvases(
         kept, fs::path(images), in.pano360, views, _cancel,
         [&](int64_t done) { progress.update(done * (int64_t)views.size()); },
+        [&](const fs::path& candidate, const fs::path& output,
+            std::string& row_error) {
+            const auto it = kept_ordinals.find(candidate);
+            if (it == kept_ordinals.end()) {
+                row_error = "360 fallback output has no candidate ordinal";
+                return false;
+            }
+            return append_fallback_row(
+                capture, fs::path(job.workspace) / "images",
+                FrameSelectOutput{output.string(), it->second}, source_id, 0,
+                row_error);
+        },
         error);
     remove_tree(kept);
     if (!ok) return false;

@@ -24,6 +24,7 @@ public:
 private:
     struct Track {
         uint64_t  number = 0;
+        uint64_t  default_duration_ns = 0;
         TrackInfo info;
     };
 
@@ -49,8 +50,8 @@ private:
 
     uint64_t segment_end_ = 0;
     uint64_t first_cluster_ = 0;
-    double   timestamp_scale_ = 1e-6;   // seconds per timestamp unit
-    double   duration_ = 0.0;           // seconds
+    uint64_t timestamp_scale_ns_ = 1000000;  // integer nanoseconds per timestamp unit
+    double   duration_ = 0.0;                // seconds, convenience only
 
     std::vector<Track>     tracks_;
     std::vector<TrackInfo> infos_;
@@ -59,7 +60,10 @@ private:
     bool     in_cluster_ = false;
     uint64_t cluster_end_ = 0;
     int64_t  cluster_ts_ = 0;
-    int64_t  packet_index_ = 0;
+    uint64_t packet_index_ = 0;
+    uint32_t discontinuity_segment_ = 0;
+    int64_t  last_pts_ns_ = 0;
+    bool     have_last_pts_ = false;
 };
 
 }  // namespace video

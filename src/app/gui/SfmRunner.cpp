@@ -1,6 +1,7 @@
 // SfmRunner.cpp -- see SfmRunner.h.
 
 #include "app/gui/SfmRunner.h"
+#include "app/OutputLease.h"
 #include "app/TextFile.h"
 
 #include "app/gui/SfmInProcess.h"
@@ -20,6 +21,7 @@
 // module has no child to run (see availability()).
 #include "sfm/core/Log.h"
 #include "sfm/core/Manifest.h"
+#include "sfm/Pipeline.h"
 #include "i18n/catalog/Sfm.h"
 #endif
 
@@ -36,6 +38,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -167,6 +170,49 @@ void remove_tree(const fs::path& p) {
     std::filesystem::remove_all(p, ec);
 #endif
 }
+fs::path unique_sibling(const fs::path& path, const char* tag) {
+    const auto tick = std::chrono::steady_clock::now().time_since_epoch().count();
+    return fs::path(path.string() + "." + tag + "-" +
+                    std::to_string(static_cast<long long>(tick)));
+}
+
+bool swap_feature_collection(const fs::path& staged,
+                             const fs::path& destination,
+                             std::string& error) {
+    std::error_code ec;
+    const bool had_destination = fs::exists(destination, ec);
+    if (ec) {
+        error = "cannot inspect feature collection: " + ec.message();
+        return false;
+    }
+    const fs::path backup = unique_sibling(destination, "rollback");
+    if (had_destination) {
+        fs::rename(destination, backup, ec);
+        if (ec) {
+            error = "cannot stage old feature collection: " + ec.message();
+            return false;
+        }
+    }
+    fs::rename(staged, destination, ec);
+    if (!ec) {
+        if (had_destination) remove_tree(backup);
+        return true;
+    }
+    const std::string publish_error = ec.message();
+    if (had_destination) {
+        std::error_code restore_error;
+        fs::rename(backup, destination, restore_error);
+        if (restore_error) {
+            error = "cannot publish feature collection: " + publish_error +
+                    "; cannot restore previous collection: " +
+                    restore_error.message();
+            return false;
+        }
+    }
+    error = "cannot publish feature collection: " + publish_error;
+    return false;
+}
+
 void sweep_sfm_intermediates(const std::string& ws) {
     if (ws.empty()) return;
     const fs::path dir(ws);
@@ -237,9 +283,9 @@ std::string SfmRunner::availability() {
     return "";
 #endif
 }
-
 std::vector<std::string> SfmRunner::scheduler_args(
-    const SfmJob& job, std::string& manifest_payload) {
+    const SfmJob& job, std::string& manifest_payload,
+    const std::string& feature_plan) {
     PrepResult prep = app::planned_prep(job.prep);
     for (const PrepInput& input : job.prep.inputs) {
         if (!input.is_video) continue;
@@ -262,7 +308,183 @@ std::vector<std::string> SfmRunner::scheduler_args(
             args.push_back(model_args[i]);
         }
     }
+    if (!feature_plan.empty()) {
+        args.push_back("--feature-plan");
+        args.push_back(feature_plan);
+    }
     return args;
+}
+
+std::vector<std::string> SfmRunner::feature_plan_model_args(
+    const SfmJob& job, const PrepResult& prep) {
+    return recon_args(job, prep, false);
+}
+
+bool sfm_make_feature_plan(const std::vector<std::string>& model_args,
+                           const std::string& device_selector,
+                           const PrepResult& prep, uint32_t requested_shards,
+                           const std::string& plan_dir,
+                           SfmFeaturePlanArtifacts& out,
+                           std::string& error) {
+    out = {};
+    error.clear();
+#ifndef SS_TOOL_SFM
+    (void)model_args;
+    (void)device_selector;
+    (void)prep;
+    (void)requested_shards;
+    (void)plan_dir;
+    error = "spirula-sfm is not included in this build";
+    return false;
+#else
+    try {
+        if (!requested_shards) {
+            error = "feature shard count must be positive";
+            return false;
+        }
+        const fs::path root = fs::absolute(fs::u8path(plan_dir));
+        fs::create_directories(root);
+        const fs::path plan_path = root / "plan.json";
+        sfm::feature_work::FeaturePlan plan;
+        if (fs::exists(plan_path)) {
+            plan = sfm::feature_work::readPlanFile(plan_path.string());
+            sfm::feature_work::validatePlan(plan);
+            sfm::validateFeaturePlanInputs(plan, prep.image_dir, prep.mask_dir);
+        } else {
+            std::vector<std::string> args = {prep.image_dir, "-o", root.string()};
+            for (size_t i = 0; i < model_args.size(); ++i) {
+                if (model_args[i] == "--manifest" && i + 1 < model_args.size()) {
+                    const fs::path manifest = root / "manifest.yaml";
+                    if (const std::string write_error =
+                            app::write_text_file(manifest, model_args[++i]);
+                        !write_error.empty()) {
+                        error = "cannot write feature-plan manifest: " + write_error;
+                        return false;
+                    }
+                    args.push_back("--manifest");
+                    args.push_back(manifest.string());
+                } else if (model_args[i] == "--masks" &&
+                           i + 1 < model_args.size()) {
+                    args.insert(args.end(), {"--masks", prep.mask_dir});
+                    ++i;
+                } else {
+                    args.push_back(model_args[i]);
+                }
+            }
+            if (!device_selector.empty())
+                args.insert(args.end(), {"--device", device_selector});
+            sfm::AutoRequest request;
+            if (const std::string parse_error =
+                    sfm::parse_auto_args(args, request, false);
+                !parse_error.empty()) {
+                error = parse_error;
+                return false;
+            }
+            sfm::FeaturePlanOptions options;
+            options.shards = requested_shards;
+            plan = sfm::makeFeaturePlan(prep.image_dir, request.cfg, options);
+            sfm::feature_work::writePlanFile(plan_path.string(), plan);
+        }
+
+        uint32_t shard_count = 1;
+        for (const auto& image : plan.images)
+            shard_count = std::max(shard_count, image.owner_shard + 1);
+        out.plan_path = plan_path.string();
+        out.shard_count = shard_count;
+        out.image_count = static_cast<uint32_t>(plan.images.size());
+        out.request_paths.reserve(shard_count);
+        for (uint32_t shard = 0; shard < shard_count; ++shard) {
+            char name[96];
+            std::snprintf(name, sizeof(name),
+                          "request-shard-%04u-attempt-0001.json", shard);
+            const fs::path request_path = root / name;
+            sfm::feature_work::FeatureRequest request;
+            if (!fs::exists(request_path)) {
+                request =
+                    sfm::makeFeatureRequest(plan, shard, "attempt-0001");
+                sfm::feature_work::writeRequestFile(request_path.string(), request);
+            } else {
+                request =
+                    sfm::feature_work::readRequestFile(request_path.string());
+                sfm::feature_work::validateRequest(plan, request);
+            }
+            out.shard_image_counts.push_back(
+                static_cast<uint32_t>(request.image_indices.size()));
+            out.request_paths.push_back(request_path.string());
+        }
+        for (size_t i = 0; i + 1 < model_args.size(); ++i) {
+            if (model_args[i] == "--masks" && !prep.mask_dir.empty()) {
+                out.extract_args = {"--masks", prep.mask_dir};
+            } else if (model_args[i] == "--aliked-model" ||
+                       model_args[i] == "--loma-detector-model" ||
+                       model_args[i] == "--loma-descriptor-model") {
+                out.extract_args.insert(out.extract_args.end(),
+                                        {model_args[i], model_args[i + 1]});
+            } else {
+                continue;
+            }
+            ++i;
+        }
+        return true;
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    }
+#endif
+}
+
+bool sfm_collect_feature_results(const std::string& plan_path,
+                                 const std::vector<std::string>& request_paths,
+                                 const std::vector<std::string>& result_roots,
+                                 const std::string& feature_dir,
+                                 std::string& error) {
+    fs::path staging;
+    fs::path collector_staging;
+    try {
+        const sfm::feature_work::FeaturePlan plan =
+            sfm::feature_work::readPlanFile(plan_path);
+        const fs::path destination =
+            fs::absolute(fs::u8path(feature_dir));
+        app::OutputLease lease;
+        if (!lease.acquire(destination.parent_path(), error)) return false;
+        if (fs::exists(destination)) {
+            try {
+                const sfm::feature_work::CollectionIndex existing =
+                    sfm::collectFeatureResults(
+                        plan, request_paths, {}, result_roots, destination);
+                if (existing.complete && !existing.collection_digest.empty()) {
+                    error.clear();
+                    return true;
+                }
+            } catch (...) {
+            }
+        }
+        staging = unique_sibling(destination, "import");
+        remove_tree(staging);
+        collector_staging =
+            fs::u8path(staging.string() + ".import-" +
+                       plan.digest.substr(0, 12));
+        const sfm::feature_work::CollectionIndex index =
+            sfm::collectFeatureResults(plan, request_paths, {}, result_roots,
+                                       staging);
+        if (!index.complete)
+            throw std::runtime_error("feature collection is incomplete");
+        if (index.collection_digest.empty())
+            throw std::runtime_error("feature collection index has no digest");
+        const sfm::feature_work::CollectionIndex sealed =
+            sfm::feature_work::readCollectionIndexFile(
+                (staging / "index.json").string());
+        sfm::feature_work::validateCollection(plan, sealed);
+        if (!swap_feature_collection(staging, destination, error))
+            throw std::runtime_error(error);
+        error.clear();
+        return true;
+    } catch (const std::exception& e) {
+        if (!staging.empty()) remove_tree(staging);
+        if (!collector_staging.empty()) remove_tree(collector_staging);
+        error = e.what();
+        return false;
+    }
 }
 
 

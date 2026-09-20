@@ -1,0 +1,19 @@
+{
+  "schema_version": 2,
+  "job_id": "job-370d2e7213a4e1fb",
+  "attempt_id": "att-1f81f0ca20e6acd2",
+  "phase": "sfm-extract",
+  "outcome": "success",
+  "exit_code": 0,
+  "message": "",
+  "partial": false,
+  "metric": true,
+  "registered": 0,
+  "images": 0,
+  "points": 0,
+  "models": 0,
+  "mean_reprojection": 0,
+  "median_reprojection": 0,
+  "sparse_path": "",
+  "outputs": ["C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\feature-missing-binding\\queue\\jobs\\job-370d2e7213a4e1fb"]
+}

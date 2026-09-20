@@ -42,6 +42,33 @@ static fs::path scratch() {
     return d;
 }
 
+static std::string read_file_text(const std::string& path) {
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) return {};
+    std::fseek(f, 0, SEEK_END);
+    const long n = std::ftell(f);
+    std::fseek(f, 0, SEEK_SET);
+    std::string text(n > 0 ? (size_t)n : 0, '\0');
+    const size_t got =
+        n > 0 ? std::fread(text.data(), 1, (size_t)n, f) : 0;
+    std::fclose(f);
+    text.resize(got);
+    return text;
+}
+
+static std::string schema_preset_text(const char* kind, const char* version) {
+    std::string text = "{";
+    if (version) {
+        text += "\"spirula_preset\":";
+        text += version;
+        text += ",";
+    }
+    text += "\"kind\":\"";
+    text += kind;
+    text += "\",\"name\":\"legacy\",\"description\":\"old\",\"settings\":{}}";
+    return text;
+}
+
 static void test_dataset_preset() {
     gui::DatasetPreset p;
     p.name = "Round trip";
@@ -226,6 +253,7 @@ static void test_dataset_preset() {
     CHECK_EQ(b.sfm.distortion_refine, s.sfm.distortion_refine);
     CHECK_EQ(b.sfm.final_per_image_intrinsics, s.sfm.final_per_image_intrinsics);
     CHECK_EQ(b.sfm.final_free_rig, s.sfm.final_free_rig);
+    CHECK_EQ(b.sfm.feature_shards, s.sfm.feature_shards);
     CHECK_EQ(b.sfm.max_features, s.sfm.max_features);
     CHECK_EQ(b.sfm.max_image_size, s.sfm.max_image_size);
     CHECK_EQ(b.sfm.mapper, s.sfm.mapper);
@@ -366,6 +394,74 @@ static void test_sanitize() {
     CHECK_EQ(gui::mesh_job_outputs(two)[0], std::string("C:/runs/one/mesh.ply"));
 }
 
+// The schema marker is optional for legacy files, but anything malformed or
+// newer must stop at the shared reader without changing the source file.
+static void test_preset_schema() {
+    const gui::PresetKind kinds[] = {
+        gui::PresetKind::Train,
+        gui::PresetKind::Dataset,
+        gui::PresetKind::Mesh,
+    };
+    for (gui::PresetKind kind : kinds) {
+        const std::string label = gui::preset_kind_name(kind);
+        const std::string path =
+            (scratch() / ("schema_" + label + ".json")).string();
+
+        const char* supported_versions[] = {nullptr, "1"};
+        for (const char* version : supported_versions) {
+            const std::string text = schema_preset_text(label.c_str(), version);
+            gui::write_preset_file(path, text);
+            const std::string before = read_file_text(path);
+
+            gui::PresetHeader head;
+            const JsonValue root = gui::read_preset_file(path, kind, head);
+            CHECK(root.is_object());
+            const std::optional<gui::PresetKind> probed =
+                gui::probe_preset_kind(path);
+            CHECK(probed && *probed == kind);
+            CHECK_EQ(read_file_text(path), before);
+        }
+
+        for (const char* version : {"\"one\"", "1.5", "0", "-1", "2"}) {
+            const std::string text = schema_preset_text(label.c_str(), version);
+            gui::write_preset_file(path, text);
+            const std::string before = read_file_text(path);
+
+            bool threw = false;
+            try {
+                gui::PresetHeader head;
+                (void)gui::read_preset_file(path, kind, head);
+            } catch (const std::exception&) {
+                threw = true;
+            }
+            CHECK(threw);
+            CHECK(!gui::probe_preset_kind(path));
+            CHECK_EQ(read_file_text(path), before);
+        }
+        const std::string duplicate_versions[] = {
+            "{\"spirula_preset\":1,\"spirula_preset\":2,\"kind\":\"" +
+                label + "\",\"name\":\"legacy\",\"description\":\"old\",\"settings\":{}}",
+            "{\"spirula_preset\":2,\"spirula_preset\":1,\"kind\":\"" +
+                label + "\",\"name\":\"legacy\",\"description\":\"old\",\"settings\":{}}",
+        };
+        for (const std::string& text : duplicate_versions) {
+            gui::write_preset_file(path, text);
+            const std::string before = read_file_text(path);
+
+            bool threw = false;
+            try {
+                gui::PresetHeader head;
+                (void)gui::read_preset_file(path, kind, head);
+            } catch (const std::exception&) {
+                threw = true;
+            }
+            CHECK(threw);
+            CHECK(!gui::probe_preset_kind(path));
+            CHECK_EQ(read_file_text(path), before);
+        }
+    }
+}
+
 // A preset of one kind must not load as another, whatever its name is.
 static void test_kinds_do_not_cross() {
     const std::string ds = (scratch() / "dataset.json").string();
@@ -390,6 +486,7 @@ int main() {
     test_dataset_preset();
     test_mesh_preset();
     test_sanitize();
+    test_preset_schema();
     test_kinds_do_not_cross();
     if (failures) {
         std::printf("preset_roundtrip_test: %d failure(s)\n", failures);

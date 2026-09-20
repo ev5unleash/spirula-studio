@@ -11,15 +11,32 @@
 
 namespace app::worker {
 
+// Non-empty references freeze one immutable revision and its exact file digest;
+// metadata and artifact paths are project-relative, while revision locators
+// remain in the revision file.
+struct ProjectReference {
+    std::string project_root;
+    std::string project_revision;
+    std::string project_revision_digest;
+    std::vector<std::string> metadata_paths;
+    std::vector<std::string> artifact_paths;
+};
+
+// Throws std::runtime_error unless the reference is empty or points at one
+// complete, immutable manifest revision and its declared artifact set.
+void validate_project_reference(const ProjectReference& reference);
+ProjectReference make_project_reference(const std::string& project_root,
+                                        const std::string& project_revision);
+
 // A request is immutable once written by the scheduler.  `payload` is one
 // phase-specific JSON object encoded as text; keeping it opaque here avoids a
 // second phase registry in the worker boundary.
-struct Request {
+struct Request : ProjectReference {
     int schema_version = 2;
     std::string request_path; // source JSON path; not part of the schema
     std::string job_id;
     std::string attempt_id;
-    std::string phase;        // prep | train | sfm | geometry
+    std::string phase;        // prep | train | sfm-extract | sfm | geometry
     std::string device;       // resolved device identity
     std::string device_name;  // captured display name
     std::string work_dir;     // cwd for the phase

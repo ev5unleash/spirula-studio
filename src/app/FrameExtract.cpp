@@ -8,6 +8,7 @@
 
 #include "app/FrameMotion.h"
 #include "app/WriterPool.h"
+#include "data/ProjectManifest.h"
 #include "i18n/catalog/Data.h"
 #include "i18n/catalog/Log.h"
 #include "nn/core/Log.h"
@@ -16,12 +17,12 @@
 #include "sam/Sam.h"
 #include "video/Demuxer.h"
 #include "video/VideoPipeline.h"
-
 #include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <condition_variable>
 #include <cstdio>
+#include <exception>
 #include <deque>
 #include <functional>
 #include <filesystem>
@@ -29,6 +30,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <limits>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -160,7 +162,14 @@ bool measure_motion(const FrameExtractJob& o, const FrameExtractSinks& sinks,
             }
             break;
         }
-        if (h.index % stride == 0) {
+        if (h.timing.presentation_ordinal == video::kUnknownOrdinal ||
+            h.timing.presentation_ordinal >
+                (uint64_t)std::numeric_limits<int64_t>::max()) {
+            pipe.release(h);
+            continue;
+        }
+        const int64_t index = (int64_t)h.timing.presentation_ordinal;
+        if (index % stride == 0) {
             if (!pipe.toGray(h, mo.width, mo.height, gray, error)) {
                 pipe.release(h);
                 stop();
@@ -168,14 +177,14 @@ bool measure_motion(const FrameExtractJob& o, const FrameExtractSinks& sinks,
             }
             std::unique_lock<std::mutex> lk(mu);
             room.wait(lk, [&] { return queue.size() < 3; });
-            queue.push_back({gray, h.index});
+            queue.push_back({gray, index});
             lk.unlock();
             work.notify_one();
             ++t.analyzed;
             if (sinks.scanning)
-                sinks.scanning(h.index + 1, info.frame_count);
+                sinks.scanning(index + 1, info.frame_count);
         }
-        last = h.index;
+        last = index;
         pipe.release(h);
     }
     stop();
@@ -231,7 +240,6 @@ namespace {
 // ---------------------------------------------------------------------------
 // Extraction
 // ---------------------------------------------------------------------------
-
 bool extract_track(const FrameExtractJob& o, const FrameExtractSinks& sinks,
                    int track, const fs::path& image_dir,
                    const fs::path& mask_dir, sam::Masker* masker,
@@ -250,7 +258,6 @@ bool extract_track(const FrameExtractJob& o, const FrameExtractSinks& sinks,
 
     struct Buffered {
         video::FrameHandle h;
-        int64_t index;
     };
     std::deque<Buffered> window;
     const int keep = o.keep;
@@ -279,17 +286,25 @@ bool extract_track(const FrameExtractJob& o, const FrameExtractSinks& sinks,
                 }
             }
             const Buffered& chosen = window[best];
+            const uint64_t ordinal = chosen.h.timing.presentation_ordinal;
+            if (ordinal == video::kUnknownOrdinal ||
+                ordinal > (uint64_t)std::numeric_limits<int64_t>::max()) {
+                error = "native decoder cannot prove the selected frame's source ordinal";
+                return;
+            }
+            const int64_t index = (int64_t)ordinal;
 
             nn::Image image;
             double t0 = nn::now_ms();
             std::string err;
             if (!pipe.toImage(chosen.h, conv, image, err)) {
-                log_line(sinks, "frame " + std::to_string(chosen.index) + ": " + err);
+                log_line(sinks, "frame " + std::to_string(index) + ": " + err);
             } else {
                 t.convert += nn::now_ms() - t0;
 
                 char stem[64];
-                std::snprintf(stem, sizeof(stem), "%05lld", (long long)chosen.index);
+                std::snprintf(stem, sizeof(stem), "%05llu",
+                              (unsigned long long)ordinal);
                 if (masker) {
                     t0 = nn::now_ms();
                     sam::Mask mask;
@@ -298,7 +313,7 @@ bool extract_track(const FrameExtractJob& o, const FrameExtractSinks& sinks,
                     // on a frame of the video, and only one frame per sharpness
                     // window survives to be written.
                     if (masker->run(image, mask, o.write_overlay ? &overlay : nullptr,
-                                    chosen.index)) {
+                                    index)) {
                         t.mask += nn::now_ms() - t0;
                         WriteJob mj;
                         mj.mask = std::move(mask);
@@ -310,7 +325,7 @@ bool extract_track(const FrameExtractJob& o, const FrameExtractSinks& sinks,
                                 (mask_dir / (std::string(stem) + "_overlay.png")).string());
                         }
                     } else {
-                        log_line(sinks, "frame " + std::to_string(chosen.index) +
+                        log_line(sinks, "frame " + std::to_string(index) +
                                                 ": masking failed: " + masker->lastError());
                     }
                 }
@@ -320,7 +335,8 @@ bool extract_track(const FrameExtractJob& o, const FrameExtractSinks& sinks,
                 job.path = (image_dir / (std::string(stem) + (jpeg ? ".jpg" : ".png"))).string();
                 if (sinks.preview && image.channels == 3)
                     sinks.preview(image.data.data(), image.width, image.height,
-                                  job.path);
+                                  job.path, chosen.h.timing);
+                if (sinks.written) sinks.written(job.path, chosen.h.timing);
                 job.quality = o.quality;
                 job.image = std::move(image);
                 t0 = nn::now_ms();
@@ -351,7 +367,13 @@ bool extract_track(const FrameExtractJob& o, const FrameExtractSinks& sinks,
         t.decode += nn::now_ms() - t0;
         ++t.decoded;
 
-        const int64_t i = h.index;
+        if (h.timing.presentation_ordinal == video::kUnknownOrdinal ||
+            h.timing.presentation_ordinal >
+                (uint64_t)std::numeric_limits<int64_t>::max()) {
+            pipe.release(h);
+            continue;
+        }
+        const int64_t i = (int64_t)h.timing.presentation_ordinal;
         // A frame matters only if some write window can select it. Everything
         // else is decoded (inter prediction needs it) but never touched again.
         if (!clock.candidate(i)) {
@@ -366,7 +388,7 @@ bool extract_track(const FrameExtractJob& o, const FrameExtractSinks& sinks,
             measured_pending = true;
             ++t.measured;
         }
-        window.push_back({h, i});
+        window.push_back({h});
         if ((int)window.size() > std::max(keep, 1)) {
             pipe.release(window.front().h);
             window.pop_front();
@@ -375,14 +397,16 @@ bool extract_track(const FrameExtractJob& o, const FrameExtractSinks& sinks,
         if (clock.step(i)) flush_window(true);
     }
     flush_window(false);
-    return true;
+    return error.empty();
 }
 
 // Several tracks decoded in lockstep under one sharpness window (the score is
 // summed over the tracks); `on_frame` gets the chosen instant's pictures, one
 // per track, and writes whatever the caller wants out of them.
-using LockstepSink = std::function<bool(std::vector<nn::Image>& imgs, int64_t index,
-                                        std::string& err)>;
+using LockstepSink =
+    std::function<bool(std::vector<nn::Image>& imgs,
+                       const std::vector<video::FrameTiming>& timing,
+                       std::string& err)>;
 
 bool extract_lockstep(const FrameExtractJob& o, const FrameExtractSinks& sinks,
                       const std::vector<int>& tracks, const video::ConvertOpts& conv,
@@ -437,6 +461,9 @@ bool extract_lockstep(const FrameExtractJob& o, const FrameExtractSinks& sinks,
                 }
             }
             const Buffered& chosen = window[best];
+            std::vector<video::FrameTiming> timing;
+            timing.reserve(n);
+            for (const video::FrameHandle& h : chosen.h) timing.push_back(h.timing);
 
             double t0 = nn::now_ms();
             std::vector<nn::Image> imgs(n);
@@ -445,7 +472,7 @@ bool extract_lockstep(const FrameExtractJob& o, const FrameExtractSinks& sinks,
             for (size_t k = 0; k < n && ok; k++)
                 ok = pipe[k]->toImage(chosen.h[k], conv, imgs[k], err);
             t.convert += nn::now_ms() - t0;
-            if (ok) ok = on_frame(imgs, chosen.index, err);
+            if (ok) ok = on_frame(imgs, timing, err);
             if (!ok) {
                 log_line(sinks, "frame " + std::to_string(chosen.index) + ": " + err);
             } else {
@@ -478,7 +505,13 @@ bool extract_lockstep(const FrameExtractJob& o, const FrameExtractSinks& sinks,
         }
         ++t.decoded;
 
-        b.index = b.h[0].index;
+        if (b.h[0].timing.presentation_ordinal == video::kUnknownOrdinal ||
+            b.h[0].timing.presentation_ordinal >
+                (uint64_t)std::numeric_limits<int64_t>::max()) {
+            release(b);
+            continue;
+        }
+        b.index = (int64_t)b.h[0].timing.presentation_ordinal;
         if (!clock.candidate(b.index)) {
             release(b);
             continue;
@@ -490,12 +523,13 @@ bool extract_lockstep(const FrameExtractJob& o, const FrameExtractSinks& sinks,
             measured_pending = true;
             ++t.measured;
         }
+        const int64_t step_index = b.index;
         window.push_back(std::move(b));
         if ((int)window.size() > std::max(keep, 1)) {
             release(window.front());
             window.pop_front();
         }
-        if (clock.step(b.index)) flush_window(true);
+        if (clock.step(step_index)) flush_window(true);
     }
     flush_window(false);
     return true;
@@ -527,15 +561,19 @@ bool extract_pair(const FrameExtractJob& o, const FrameExtractSinks& sinks,
     }
     std::vector<uint8_t> canvas((size_t)o.eac.canvasW() * o.eac.canvasH() * 3);
     const bool jpeg = o.quality >= 0 && o.quality <= 100;
-
-    auto on_frame = [&](std::vector<nn::Image>& track, int64_t index, std::string&) {
+    auto on_frame = [&](std::vector<nn::Image>& track,
+                        const std::vector<video::FrameTiming>& timing,
+                        std::string&) {
         double t0 = nn::now_ms();
         pano360_canvas(o.eac, track[0].data.data(),
                        track.size() > 1 ? track[1].data.data() : nullptr,
                        canvas.data());
         t.convert += nn::now_ms() - t0;
+        if (timing.empty() || timing[0].presentation_ordinal == video::kUnknownOrdinal)
+            return false;
+        const uint64_t ordinal = timing[0].presentation_ordinal;
         char stem[64];
-        std::snprintf(stem, sizeof(stem), "%05lld", (long long)index);
+        std::snprintf(stem, sizeof(stem), "%05llu", (unsigned long long)ordinal);
         for (size_t i = 0; i < o.views.size(); i++) {
             t0 = nn::now_ms();
             WriteJob job;
@@ -554,7 +592,8 @@ bool extract_pair(const FrameExtractJob& o, const FrameExtractSinks& sinks,
             // slider is for.
             if (i == 0 && sinks.preview)
                 sinks.preview(job.image.data.data(), job.image.width, job.image.height,
-                              job.path);
+                              job.path, timing[0]);
+            if (sinks.written) sinks.written(job.path, timing[0]);
             t0 = nn::now_ms();
             pool.submit(std::move(job));
             t.submit += nn::now_ms() - t0;
@@ -584,14 +623,21 @@ bool extract_synced(const FrameExtractJob& o, const FrameExtractSinks& sinks,
     conv.scale = o.scale;
     conv.rotate = o.rotate;
     const bool jpeg = o.quality >= 0 && o.quality <= 100;
-    auto on_frame = [&](std::vector<nn::Image>& imgs, int64_t index, std::string&) {
+    auto on_frame = [&](std::vector<nn::Image>& imgs,
+                        const std::vector<video::FrameTiming>& timing,
+                        std::string&) {
+        if (timing.empty() || timing[0].presentation_ordinal == video::kUnknownOrdinal)
+            return false;
+        const uint64_t ordinal = timing[0].presentation_ordinal;
         char stem[64];
-        std::snprintf(stem, sizeof(stem), "%05lld", (long long)index);
+        std::snprintf(stem, sizeof(stem), "%05llu", (unsigned long long)ordinal);
         for (size_t k = 0; k < imgs.size(); k++) {
             WriteJob job;
             job.path = (dirs[k] / (std::string(stem) + (jpeg ? ".jpg" : ".png"))).string();
             if (k == 0 && sinks.preview && imgs[k].channels == 3)
-                sinks.preview(imgs[k].data.data(), imgs[k].width, imgs[k].height, job.path);
+                sinks.preview(imgs[k].data.data(), imgs[k].width, imgs[k].height,
+                              job.path, timing[k]);
+            if (sinks.written) sinks.written(job.path, timing[k]);
             job.quality = o.quality;
             job.image = std::move(imgs[k]);
             const double t0 = nn::now_ms();
@@ -676,8 +722,19 @@ bool extract_frames(const FrameExtractJob& job_in, const FrameExtractSinks& sink
     job.device = nn::configured_device_selector();
     job.mask.device = job.device;
 
-    error = video_decode_availability();
-    if (!error.empty()) return false;
+    if (job.source_id.empty()) {
+        try {
+            job.source_id = spirula::project::make_source_record(job.input).source_id;
+        } catch (const std::exception& e) {
+            error = e.what();
+            return false;
+        }
+    }
+    stats.source_id = job.source_id;
+    std::unique_ptr<video::Demuxer> metadata_demux =
+        video::open_demuxer(job.input, error);
+    if (!metadata_demux) return false;
+    stats.streams = metadata_demux->tracks();
 
     const bool pano = job.eac.valid() && !job.views.empty();
     if (pano) {
@@ -912,11 +969,17 @@ bool extract_frames_at(const std::string& input, const FrameLook& look_in,
         // track that landed on a later keyframe than another could never be
         // caught up with. A frame already there is left where it is.
         for (size_t k = 0; k < np && !ended; k++) {
-            while (!held[k].valid() || held[k].index < floor_index) {
+            while (!held[k].valid() ||
+                   (held[k].timing.presentation_ordinal != video::kUnknownOrdinal &&
+                    held[k].timing.presentation_ordinal < (uint64_t)floor_index)) {
                 video::FrameHandle h;
                 if (!pipe[k]->next(h, error)) {
                     ended = true;
                     break;
+                }
+                if (h.timing.presentation_ordinal == video::kUnknownOrdinal) {
+                    pipe[k]->release(h);
+                    continue;
                 }
                 if (held[k].valid()) pipe[k]->release(held[k]);
                 held[k] = h;
@@ -925,11 +988,14 @@ bool extract_frames_at(const std::string& input, const FrameLook& look_in,
         if (ended) break;
         // Presentation order from the decoder, which is what extraction names
         // its files after -- not a count of how many have gone by.
-        int64_t index = held[0].index;
+        int64_t index = (int64_t)held[0].timing.presentation_ordinal;
         bool aligned = true;
         for (size_t k = 1; k < np; k++) {
-            index = std::max(index, held[k].index);
-            aligned = aligned && held[k].index == held[0].index;
+            const int64_t other = (int64_t)held[k].timing.presentation_ordinal;
+            index = std::max(index, other);
+            aligned = aligned &&
+                      held[k].timing.presentation_ordinal ==
+                          held[0].timing.presentation_ordinal;
         }
         floor_index = index;
         if (!aligned) continue;   // a track is behind; pull it up next round

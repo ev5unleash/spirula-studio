@@ -228,9 +228,7 @@ struct Picture {
     uint64_t decode_value = 0;   // video timeline value covering its decode
     uint64_t read_value = 0;     // compute timeline value covering our reads
     int64_t  poc = 0;
-    double   pts = 0.0;
-    int64_t  decode_index = 0;
-    int64_t  display_index = 0;
+    FrameTiming timing;
     bool     metric_queued = false;
 };
 
@@ -1118,13 +1116,11 @@ bool VideoPipeline::Impl::recordDecode(int pool_idx, const PictureInfo& pi,
 
 bool VideoPipeline::Impl::decodeNext(std::string& error) {
     if (!more_in_packet) {
-        Packet pkt;
         if (!demux->next(packet, error)) {
             if (!error.empty()) return false;
             eos = true;
             return true;
         }
-        (void)pkt;
     }
 
     PictureInfo pi;
@@ -1136,15 +1132,15 @@ bool VideoPipeline::Impl::decodeNext(std::string& error) {
     more_in_packet = pi.more_in_packet;
 
     Packet& pkt = packet;
-    NN_LOG_DEBUG("[dec] pkt %lld poc %lld setup %d refs %zu show %d out %d more %d\n",
-                   (long long)packet.index, (long long)pi.poc, pi.setup_slot, pi.refs.size(),
-                   pi.show_existing_slot, (int)pi.output, (int)pi.more_in_packet);
+    NN_LOG_DEBUG("[dec] pkt %llu poc %lld setup %d refs %zu show %d out %d more %d\n",
+                 (unsigned long long)packet.timing.decode_ordinal, (long long)pi.poc,
+                 pi.setup_slot, pi.refs.size(), pi.show_existing_slot, (int)pi.output,
+                 (int)pi.more_in_packet);
     if (pi.show_existing_slot >= 0) {
         const int src = dpb_pin[(size_t)pi.show_existing_slot];
         if (src >= 0) {
             ++pool[(size_t)src].refs;
-            pool[(size_t)src].pts = pkt.pts;
-            pool[(size_t)src].display_index = pkt.display_index;
+            pool[(size_t)src].timing = pkt.timing;
             ready.push_back(src);
         }
         codec->commitFrame();
@@ -1165,9 +1161,7 @@ bool VideoPipeline::Impl::decodeNext(std::string& error) {
 
     Picture& p = pool[(size_t)idx];
     p.poc = pi.poc;
-    p.pts = pkt.pts;
-    p.decode_index = pkt.index;
-    p.display_index = pkt.display_index;
+    p.timing = pkt.timing;
 
     // Pin the pool image while a DPB slot still refers to it (AV1 replays
     // pictures with show_existing_frame; H.264/H.265 never do).
@@ -1213,8 +1207,7 @@ bool VideoPipeline::next(FrameHandle& out, std::string& error) {
             const int idx = s.ready[best];
             s.ready.erase(s.ready.begin() + (ptrdiff_t)best);
             out.slot = idx;
-            out.index = s.pool[(size_t)idx].display_index;
-            out.pts = s.pool[(size_t)idx].pts;
+            out.timing = s.pool[(size_t)idx].timing;
             return true;
         }
         if (s.eos) return false;

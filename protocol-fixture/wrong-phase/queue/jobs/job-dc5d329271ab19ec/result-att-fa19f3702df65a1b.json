@@ -1,0 +1,19 @@
+{
+  "schema_version": 2,
+  "job_id": "job-dc5d329271ab19ec",
+  "attempt_id": "att-fa19f3702df65a1b",
+  "phase": "prep",
+  "outcome": "success",
+  "exit_code": 0,
+  "message": "",
+  "partial": false,
+  "metric": true,
+  "registered": 0,
+  "images": 0,
+  "points": 0,
+  "models": 0,
+  "mean_reprojection": 0,
+  "median_reprojection": 0,
+  "sparse_path": "",
+  "outputs": ["C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\wrong-phase\\queue\\jobs\\job-dc5d329271ab19ec"]
+}

@@ -1,0 +1,13 @@
+{
+  "schema_version": 2,
+  "job_id": "job-5c908410b06a92be",
+  "attempt_id": "att-d9ef1d07f8c38fce",
+  "phase": "sfm-extract",
+  "device": "feature-device",
+  "device_name": "",
+  "work_dir": "C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\feature-unclaimed-output",
+  "workspace": "C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\feature-unclaimed-output",
+  "result_path": "C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\feature-unclaimed-output\\queue\\jobs\\job-5c908410b06a92be\\result-att-d9ef1d07f8c38fce.json",
+  "args": ["feature-unclaimed-output"],
+  "payload": "{}"
+}

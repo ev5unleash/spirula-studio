@@ -1,0 +1,6 @@
+{
+  "schema_version": 2,
+  "jobs": [
+    {"order":0,"job_id":"job-4dfd523b1d2119e4","phase":"publish","device":"feature-device","device_name":"","work_dir":"C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\feature-valid","run_dir":"C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\feature-valid\\queue\\jobs\\job-4dfd523b1d2119e4","output_dir":"","workspace":"C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\feature-valid","source_paths":[],"options_payload":"","created_at":"2026-09-20T00:49:02Z","state":"Succeeded","attempt_id":"","error":"","pending_resume":false,"last_exit_code":0,"completed_prefix":1,"current_phase":1,"args":["feature-valid"],"path_claims":[{"path":"C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\feature-valid\\queue\\jobs\\job-4dfd523b1d2119e4","write":true}],"phases":[{"phase":"sfm-extract","optional":false,"planned_device":"feature-device","planned_device_name":"","actual_device":"feature-device","actual_device_name":"","output":"","outputs":["C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\feature-valid\\queue\\jobs\\job-4dfd523b1d2119e4"],"args":["feature-valid"],"payload":"{}","outcome":"success","completed":true,"exit_code":0,"error":""}]}
+  ]
+}

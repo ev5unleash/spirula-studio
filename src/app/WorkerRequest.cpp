@@ -4,7 +4,9 @@
 #include "app/WorkerRequest.h"
 
 #include "data/Json.h"
+#include "data/ProjectManifest.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -12,6 +14,7 @@
 #include <limits>
 #include <sstream>
 #include <stdexcept>
+#include <system_error>
 #include <utility>
 
 namespace fs = std::filesystem;
@@ -182,6 +185,20 @@ std::vector<std::string> strings_value(const JsonValue& v, const char* key) {
     }
     return out;
 }
+std::vector<std::string> optional_strings(const JsonValue& v, const char* key) {
+    const JsonValue* p = optional(v, key);
+    if (!p) return {};
+    if (p->type != JsonValue::Type::Array)
+        throw std::runtime_error(std::string("request: \"") + key + "\" must be an array");
+    std::vector<std::string> out;
+    out.reserve(p->arr.size());
+    for (const JsonValue& item : p->arr) {
+        if (item.type != JsonValue::Type::String || has_nul(item.str))
+            throw std::runtime_error(std::string("request: invalid \"") + key + "\" item");
+        out.push_back(item.str);
+    }
+    return out;
+}
 
 bool generated_id(const std::string& value, const char* prefix) {
     constexpr size_t digits = 16;
@@ -210,6 +227,133 @@ fs::path canonical_parent(const fs::path& path, const char* key) {
     if (ec)
         throw std::runtime_error(std::string("request: cannot canonicalize ") + key + ": " + ec.message());
     return canonical.parent_path();
+}
+bool same_path(const fs::path& a, const fs::path& b) {
+    std::string left = a.lexically_normal().generic_u8string();
+    std::string right = b.lexically_normal().generic_u8string();
+#ifdef _WIN32
+    for (char& c : left)
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    for (char& c : right)
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+#endif
+    return left == right;
+}
+
+bool path_within(const fs::path& root, const fs::path& child) {
+    auto parent = root.begin();
+    auto value = child.begin();
+    for (; parent != root.end() && value != child.end(); ++parent, ++value) {
+        if (!same_path(*parent, *value)) return false;
+    }
+    return parent == root.end();
+}
+
+std::string project_relative_path(const std::string& value, const char* key) {
+    if (value.empty() || has_nul(value))
+        throw std::runtime_error(std::string("request: ") + key + " is empty");
+    const fs::path path = fs::u8path(value);
+    if (path.is_absolute() || path.has_root_name() || path.has_root_directory())
+        throw std::runtime_error(std::string("request: ") + key + " must be project-relative");
+    for (const fs::path& part : path) {
+        if (part == fs::path(".."))
+            throw std::runtime_error(std::string("request: ") + key + " escapes project root");
+    }
+    const fs::path normalized = path.lexically_normal();
+    if (normalized.empty() || normalized == fs::path(".") ||
+        normalized == fs::path(".."))
+        throw std::runtime_error(std::string("request: ") + key + " is invalid");
+    return normalized.generic_u8string();
+}
+
+void validate_existing_project_path(const fs::path& root,
+                                    const fs::path& canonical_root,
+                                    const std::string& relative,
+                                    const char* key) {
+    const fs::path path = root / fs::u8path(relative);
+    std::error_code ec;
+    const fs::path canonical = fs::canonical(path, ec);
+    if (ec)
+        throw std::runtime_error(std::string("request: cannot read ") + key + ": " +
+                                 ec.message());
+    if (!path_within(canonical_root, canonical))
+        throw std::runtime_error(std::string("request: ") + key +
+                                 " escapes project root");
+}
+
+void validate_project_reference_impl(const ProjectReference& reference) {
+    const bool any = !reference.project_root.empty() ||
+                     !reference.project_revision.empty() ||
+                     !reference.project_revision_digest.empty() ||
+                     !reference.metadata_paths.empty() ||
+                     !reference.artifact_paths.empty();
+    if (!any) return;
+    if (reference.project_root.empty() || reference.project_revision.empty() ||
+        reference.project_revision_digest.empty() ||
+        reference.metadata_paths.empty())
+        throw std::runtime_error("request: incomplete project reference");
+    reject_nul(reference.project_root, "project_root");
+    reject_nul(reference.project_revision, "project_revision");
+    reject_nul(reference.project_revision_digest, "project_revision_digest");
+    const fs::path root = fs::u8path(reference.project_root);
+    if (!root.is_absolute())
+        throw std::runtime_error("request: project_root must be absolute");
+    std::error_code ec;
+    if (!fs::is_directory(root, ec) || ec)
+        throw std::runtime_error("request: project_root is not a directory");
+    const fs::path canonical_root = fs::canonical(root, ec);
+    if (ec)
+        throw std::runtime_error("request: cannot canonicalize project_root: " +
+                                 ec.message());
+    if (!same_path(root, canonical_root))
+        throw std::runtime_error("request: project_root must be canonical");
+
+    const spirula::project::ProjectRevision revision =
+        spirula::project::read_revision(canonical_root, reference.project_revision);
+    if (reference.project_revision_digest !=
+        spirula::project::revision_digest(canonical_root, revision.name))
+        throw std::runtime_error("request: project revision digest does not match");
+    for (const spirula::project::SourceRecord& source : revision.sources) {
+        spirula::project::SourceRecord located = source;
+        for (fs::path& locator : located.locators) {
+            if (locator.is_relative()) locator = canonical_root / locator;
+        }
+        spirula::project::verify_source_record(located);
+    }
+    const std::string expected_metadata =
+        (fs::path("revisions") /
+         fs::u8path(reference.project_revision + ".json")).generic_u8string();
+    if (reference.metadata_paths.size() != 1 ||
+        project_relative_path(reference.metadata_paths.front(), "metadata path") !=
+            expected_metadata)
+        throw std::runtime_error("request: project metadata paths are incomplete");
+    validate_existing_project_path(canonical_root, canonical_root, expected_metadata,
+                                   "project metadata");
+
+    std::vector<std::string> expected_artifacts;
+    expected_artifacts.reserve(revision.artifacts.size());
+    for (const spirula::project::ArtifactReference& artifact : revision.artifacts)
+        expected_artifacts.push_back(
+            project_relative_path(artifact.artifact, "declared artifact"));
+    std::vector<std::string> actual_artifacts;
+    actual_artifacts.reserve(reference.artifact_paths.size());
+    for (const std::string& artifact : reference.artifact_paths)
+        actual_artifacts.push_back(project_relative_path(artifact, "artifact path"));
+#ifdef _WIN32
+    for (std::string& value : expected_artifacts)
+        for (char& c : value)
+            if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    for (std::string& value : actual_artifacts)
+        for (char& c : value)
+            if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+#endif
+    std::sort(expected_artifacts.begin(), expected_artifacts.end());
+    std::sort(actual_artifacts.begin(), actual_artifacts.end());
+    if (expected_artifacts != actual_artifacts)
+        throw std::runtime_error("request: project artifact paths are incomplete");
+    for (const std::string& artifact : actual_artifacts)
+        validate_existing_project_path(canonical_root, canonical_root, artifact,
+                                       "project artifact");
 }
 
 void add_string(std::string& out, const char* key, const std::string& value, bool& first) {
@@ -553,6 +697,35 @@ void require_absolute(const std::string& value, const char* key) {
 }
 
 }  // namespace
+void validate_project_reference(const ProjectReference& reference) {
+    validate_project_reference_impl(reference);
+}
+
+ProjectReference make_project_reference(const std::string& project_root,
+                                        const std::string& project_revision) {
+    if (project_root.empty() || project_revision.empty())
+        throw std::runtime_error("request: project reference is incomplete");
+    std::error_code ec;
+    const fs::path canonical_root = fs::canonical(fs::u8path(project_root), ec);
+    if (ec)
+        throw std::runtime_error("request: cannot canonicalize project_root: " +
+                                 ec.message());
+    ProjectReference reference;
+    reference.project_root = canonical_root.u8string();
+    reference.project_revision = project_revision;
+    const spirula::project::ProjectRevision revision =
+        spirula::project::read_revision(canonical_root, project_revision);
+    reference.project_revision_digest =
+        spirula::project::revision_digest(canonical_root, revision.name);
+    reference.metadata_paths = {
+        (fs::path("revisions") /
+         fs::u8path(project_revision + ".json")).generic_u8string()};
+    reference.artifact_paths.reserve(revision.artifacts.size());
+    for (const spirula::project::ArtifactReference& artifact : revision.artifacts)
+        reference.artifact_paths.push_back(artifact.artifact);
+    validate_project_reference(reference);
+    return reference;
+}
 
 Request parse_request(const std::string& path) {
     if (has_nul(path)) throw std::runtime_error("request: request path contains an embedded NUL");
@@ -562,7 +735,12 @@ Request parse_request(const std::string& path) {
     if (root.type != JsonValue::Type::Object) throw std::runtime_error("request: root must be an object");
     Request r;
     r.request_path = path;
-r.schema_version = int_value(root, "schema_version", 0, 2);
+    r.schema_version = int_value(root, "schema_version", 0, 3);
+    r.project_root = optional_string(root, "project_root");
+    r.project_revision = optional_string(root, "project_revision");
+    r.project_revision_digest = optional_string(root, "project_revision_digest");
+    r.metadata_paths = optional_strings(root, "metadata_paths");
+    r.artifact_paths = optional_strings(root, "artifact_paths");
     r.job_id = string_value(root, "job_id"); r.attempt_id = string_value(root, "attempt_id");
     r.phase = string_value(root, "phase"); r.device = string_value(root, "device");
     r.device_name = optional_string(root, "device_name"); r.work_dir = string_value(root, "work_dir");
@@ -581,13 +759,22 @@ void validate_request(const Request& r) {
     reject_nul(r.device, "device"); reject_nul(r.device_name, "device_name");
     reject_nul(r.work_dir, "work_dir"); reject_nul(r.workspace, "workspace");
     reject_nul(r.result_path, "result_path"); reject_nul(r.payload, "payload");
+    validate_project_reference(static_cast<const ProjectReference&>(r));
     if (r.args.size() > kMaxArgs) throw std::runtime_error("request: too many args");
     for (const std::string& arg : r.args) reject_nul(arg, "args");
-    if (r.schema_version != 1 && r.schema_version != 2)
+    if (r.schema_version != 1 && r.schema_version != 2 && r.schema_version != 3)
         throw std::runtime_error("request: unsupported schema_version " + std::to_string(r.schema_version));
+    const bool has_project_reference =
+        !r.project_root.empty() || !r.project_revision.empty() ||
+        !r.project_revision_digest.empty() || !r.metadata_paths.empty() ||
+        !r.artifact_paths.empty();
+    if ((r.schema_version == 3 && !has_project_reference) ||
+        (r.schema_version != 3 && has_project_reference))
+        throw std::runtime_error("request: project reference requires schema_version 3");
     if (!generated_id(r.job_id, "job-")) throw std::runtime_error("request: invalid job_id");
     if (!generated_id(r.attempt_id, "att-")) throw std::runtime_error("request: invalid attempt_id");
-    if (r.phase != "prep" && r.phase != "train" && r.phase != "sfm" && r.phase != "geometry")
+    if (r.phase != "prep" && r.phase != "train" && r.phase != "sfm" &&
+        r.phase != "sfm-extract" && r.phase != "geometry")
         throw std::runtime_error("request: unsupported phase " + r.phase);
     if (r.schema_version == 1 && r.phase == "prep")
         throw std::runtime_error("request: prep requires schema_version 2");

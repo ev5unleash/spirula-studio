@@ -44,6 +44,7 @@ int spirula_train_main(int argc, char** argv);
 #endif
 #ifdef SS_TOOL_SFM
 int spirula_sfm_main(int argc, char** argv);
+void spirula_sfm_set_cancel_token(const std::atomic<bool>* token);
 #endif
 #ifdef SS_TOOL_GEOMETRY
 int spirula_geometry_main(int argc, char** argv);
@@ -134,10 +135,60 @@ struct WorkerControl {
 
 std::vector<std::string> build_argv(const app::worker::Request& r) {
     std::vector<std::string> argv;
-    argv.push_back("spirula " + r.phase);
+    if (r.phase == "sfm-extract") argv.push_back("spirula sfm");
+    else argv.push_back("spirula " + r.phase);
     argv.insert(argv.end(), r.args.begin(), r.args.end());
     if (!r.device.empty()) { argv.push_back("--device"); argv.push_back(r.device); }
     return argv;
+}
+
+int run_sfm_extract(const app::worker::Request& r, app::worker::Result& result) {
+    std::string output;
+    const auto reject_missing_output = [&] {
+        result.outcome = "failed";
+        result.message = "worker: SfM extract output path missing";
+        return 2;
+    };
+    for (size_t i = 0; i < r.args.size(); ++i) {
+        const std::string& arg = r.args[i];
+        if (arg == "-o" || arg == "--output") {
+            if (i + 1 >= r.args.size() || r.args[i + 1].empty())
+                return reject_missing_output();
+            output = r.args[++i];
+        } else if (arg.compare(0, 9, "--output=") == 0) {
+            output = arg.substr(9);
+            if (output.empty()) return reject_missing_output();
+        }
+    }
+    if (output.empty()) return reject_missing_output();
+#ifdef SS_TOOL_SFM
+    WorkerControl control;
+    std::vector<std::string> storage = build_argv(r);
+    std::vector<char*> argv; argv.reserve(storage.size() + 1);
+    for (std::string& s : storage) argv.push_back(s.data());
+    argv.push_back(nullptr);
+    const int argc = (int)argv.size() - 1;
+    spirula_sfm_set_cancel_token(&control.stop);
+    int rc;
+    try {
+        rc = spirula_sfm_main(argc, argv.data());
+    } catch (...) {
+        spirula_sfm_set_cancel_token(nullptr);
+        throw;
+    }
+    spirula_sfm_set_cancel_token(nullptr);
+    if (control.stop.load() && rc != 0) rc = 42;
+    if (rc == 0) {
+        result.outputs.clear();
+        result.outputs.push_back(output);
+    }
+    return rc;
+#else
+    (void)r;
+    result.outcome = "spawn_failed";
+    result.message = "worker: SfM phase unavailable in this build";
+    return 100;
+#endif
 }
 
 int run_sfm(const app::worker::Request& r, app::worker::Result& result) {
@@ -232,6 +283,8 @@ int run_prep(const app::worker::Request& r, app::worker::Result& result) {
         result.exit_code = 0; result.outcome = "success";
         if (!prepared.image_dir.empty()) result.outputs.push_back(prepared.image_dir);
         if (!prepared.mask_dir.empty()) result.outputs.push_back(prepared.mask_dir);
+        if (!prepared.provenance_sidecar.empty())
+            result.outputs.push_back(prepared.provenance_sidecar);
         result.images = prepared.n_images;
         return 0;
     } catch (const std::exception& e) {
@@ -315,6 +368,7 @@ int spirula_worker_main(int argc, char** argv) {
     try {
         if (req.phase == "prep") rc = run_prep(req, res);
         else if (req.phase == "sfm") rc = run_sfm(req, res);
+        else if (req.phase == "sfm-extract") rc = run_sfm_extract(req, res);
         else rc = run_tool_phase(req, res);
     } catch (const std::exception& e) {
         res.outcome = "failed"; res.exit_code = 99; res.message = e.what();

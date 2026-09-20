@@ -21,12 +21,12 @@
 #include "app/FrameMotion.h"
 #include "nn/io/Image.h"
 #include "sam/Masking.h"
+#include "video/Demuxer.h"
 
 #include <atomic>
 #include <functional>
 #include <string>
 #include <vector>
-
 namespace app {
 
 // What every frame goes through is the base class, so a preview can be handed
@@ -35,6 +35,9 @@ struct FrameExtractJob : FrameLook {
     std::string input;             // video file
     std::string image_dir;         // written here (cam0/, cam1/ ... if multi-track)
     std::string mask_dir;          // only when masking is on
+    // Verified once for the original container; empty asks extract_frames() to
+    // compute it with the project source hasher.
+    std::string source_id;
 
     // The device request for this job, in the spelling
     // core/VulkanDeviceSelection.h parses. Frozen before the decode probe and
@@ -75,6 +78,8 @@ struct FrameExtractStats {
     int    tracks = 1;
     int    encoder_threads = 0;
     int    write_failures = 0;
+    std::string source_id;
+    std::vector<video::TrackInfo> streams;
 };
 
 struct FrameExtractSinks {
@@ -98,7 +103,9 @@ struct FrameExtractSinks {
     // return -- the decoder does not wait, and a caller that cannot keep up
     // should decline frames rather than slow it down.
     std::function<void(const uint8_t* rgb, int w, int h,
-                       const std::string& path)> preview;
+                       const std::string& path, const video::FrameTiming&)> preview;
+    // Every output file, including transformed multi-view outputs.
+    std::function<void(const std::string& path, const video::FrameTiming&)> written;
     // Polled between frames; set it to stop early. Frames already written stay.
     const std::atomic<bool>* cancel = nullptr;
 };

@@ -1,0 +1,13 @@
+{
+  "schema_version": 2,
+  "job_id": "job-d0f456438fe9e6e6",
+  "attempt_id": "att-d294d00de7fe0b44",
+  "phase": "geometry",
+  "device": "protocol-device",
+  "device_name": "",
+  "work_dir": "C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\outside-claim",
+  "workspace": "C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\outside-claim",
+  "result_path": "C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\outside-claim\\queue\\jobs\\job-d0f456438fe9e6e6\\result-att-d294d00de7fe0b44.json",
+  "args": ["outside-claim"],
+  "payload": "{}"
+}

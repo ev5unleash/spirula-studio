@@ -1,0 +1,6 @@
+{
+  "schema_version": 2,
+  "jobs": [
+    {"order":0,"job_id":"job-becfe10204c8c188","phase":"publish","device":"protocol-device","device_name":"","work_dir":"C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\valid","run_dir":"C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\valid\\queue\\jobs\\job-becfe10204c8c188","output_dir":"","workspace":"C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\valid","source_paths":[],"options_payload":"","created_at":"2026-09-20T00:49:02Z","state":"Succeeded","attempt_id":"","error":"","pending_resume":false,"last_exit_code":0,"completed_prefix":1,"current_phase":1,"args":["valid"],"path_claims":[{"path":"C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\valid\\queue\\jobs\\job-becfe10204c8c188","write":true}],"phases":[{"phase":"geometry","optional":false,"planned_device":"protocol-device","planned_device_name":"","actual_device":"protocol-device","actual_device_name":"","output":"","outputs":["C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\valid\\queue\\jobs\\job-becfe10204c8c188"],"args":["valid"],"payload":"{}","outcome":"success","completed":true,"exit_code":0,"error":""}]}
+  ]
+}

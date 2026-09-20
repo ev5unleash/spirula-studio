@@ -1,0 +1,19 @@
+{
+  "schema_version": 2,
+  "job_id": "job-aa3b42cae537de7b",
+  "attempt_id": "att-2fe342b397c2c053",
+  "phase": "sfm-extract",
+  "outcome": "success",
+  "exit_code": 0,
+  "message": "",
+  "partial": false,
+  "metric": true,
+  "registered": 0,
+  "images": 0,
+  "points": 0,
+  "models": 0,
+  "mean_reprojection": 0,
+  "median_reprojection": 0,
+  "sparse_path": "",
+  "outputs": ["C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\feature-extra-output\\queue\\jobs\\job-aa3b42cae537de7b", "C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\feature-extra-output\\queue\\jobs\\job-aa3b42cae537de7b\\extra"]
+}

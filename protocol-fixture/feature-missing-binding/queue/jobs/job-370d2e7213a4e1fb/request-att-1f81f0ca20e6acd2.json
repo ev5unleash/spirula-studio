@@ -1,0 +1,13 @@
+{
+  "schema_version": 2,
+  "job_id": "job-370d2e7213a4e1fb",
+  "attempt_id": "att-1f81f0ca20e6acd2",
+  "phase": "sfm-extract",
+  "device": "feature-device",
+  "device_name": "",
+  "work_dir": "C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\feature-missing-binding",
+  "workspace": "C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\feature-missing-binding",
+  "result_path": "C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\feature-missing-binding\\queue\\jobs\\job-370d2e7213a4e1fb\\result-att-1f81f0ca20e6acd2.json",
+  "args": ["feature-missing-binding"],
+  "payload": "{}"
+}

@@ -25,9 +25,8 @@
 namespace video {
 
 struct FrameHandle {
-    int64_t index = -1;      // presentation order, from zero
-    double  pts = 0.0;       // seconds
-    int     slot = -1;       // picture-pool slot; < 0 when invalid
+    FrameTiming timing;
+    int slot = -1;       // picture-pool slot; < 0 when invalid
     bool valid() const { return slot >= 0; }
 };
 

@@ -268,11 +268,13 @@ int cmdSensorGaugeTest(int, char**) {
                     rr.up_err_deg, rr.scale_err, rr.calib_err_deg, r.groups[0].fit.mirrored,
                     r.groups[0].fit.gyro_sign, 1000 * r.time_offsets[0].offset, r.gps.ok);
         check(r.applied && r.metric && r.scale_from_imu, "T3 metric from IMU");
+        check(std::fabs(rr.scale_err) < 0.02, "T3 scale within 2%");
         check(!r.scale_from_gps && r.gps_frames == 0, "T3 stale GPS refused");
         check(r.groups[0].fit.mirrored, "T3 mirror detected");
         check(rr.calib_err_deg < 1.0, "T3 extrinsic within 1 deg");
         check(std::fabs(r.time_offsets[0].offset - 0.037) < 0.004, "T3 clock offset recovered");
-        check(std::fabs(rr.scale_err) < 0.02, "T3 scale within 2%");
+        check(r.time_offsets[0].rate == 1.0 && !r.time_offsets[0].rate_estimated,
+              "T3 offset fit does not fabricate drift");
     }
     // ---- T4: a camera that turns on the spot: up, no scale --------------------
     {
@@ -350,6 +352,25 @@ int cmdSensorGaugeTest(int, char**) {
         check(rr.up_err_deg < 1.0, "T7 up within 1 deg");
         check(rr.calib_err_deg < 1.0, "T7 extrinsic within 1 deg");
         check(std::fabs(r.groups[0].g_norm - 9.81) < 0.3, "T7 gravity norm");
+    }
+    // ---- T8: portable offset+rate mapping stays inside telemetry support -----
+    {
+        Scenario sc;
+        sc.gps = false;
+        Telemetry t = synthesize(sc, mat3Identity());
+        const TelemetryCheck c = telemetry_check(t);
+        SensorTimeline tl;
+        tl.time_offset = 0.1;
+        tl.time_rate = 2.0;
+        tl.time_rate_estimated = true;
+        std::string err;
+        check(tl.init(t, c, err), "T8 timeline accepts a finite estimated rate");
+        check(tl.coversImu(0.25), "T8 rate maps local time into support");
+        check(!tl.coversImu(1000), "T8 extrapolation is refused");
+        Mat3 R;
+        check(!tl.rotationBetween(-100, -99, R), "T8 out-of-support interpolation is refused");
+        tl.time_rate = 0;
+        check(!tl.rotationBetween(0, 1, R), "T8 invalid rate is refused");
     }
     std::printf("%s\n", fails ? "FAIL" : "PASS");
     return fails ? 1 : 0;

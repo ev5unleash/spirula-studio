@@ -5,6 +5,7 @@
 #include "app/AppPaths.h"
 
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <stdexcept>
@@ -18,6 +19,22 @@ namespace {
 // Bounds the parse: this runs on whatever was dropped on the window, and the
 // parser holds the whole file in memory.
 constexpr uintmax_t kMaxPresetBytes = (uintmax_t)4 << 20;
+constexpr int kPresetSchemaVersion = 1;
+
+bool has_supported_schema(const JsonValue& root) {
+    const JsonValue* schema = nullptr;
+    for (const auto& [key, value] : root.obj) {
+        if (key != "spirula_preset") continue;
+        if (schema) return false;  // duplicate markers are ambiguous
+        schema = &value;
+    }
+    if (!schema) return true;  // files from before the schema marker
+    if (schema->type != JsonValue::Type::Number) return false;
+    const double version = schema->num;
+    return std::isfinite(version) && version > 0.0 &&
+           std::floor(version) == version &&
+           version == (double)kPresetSchemaVersion;
+}
 
 std::optional<PresetKind> kind_of(const JsonValue& root) {
     if (!root.is_object()) return std::nullopt;
@@ -84,6 +101,9 @@ JsonValue read_preset_file(const std::string& path, PresetKind kind,
     JsonValue root = json_parse_file(path);   // throws on unreadable / not JSON
     if (!root.is_object())
         throw std::runtime_error(path + " is not a preset file");
+    if (!has_supported_schema(root))
+        throw std::runtime_error(
+            path + " has an unsupported or malformed spirula_preset version");
     const std::optional<PresetKind> got = kind_of(root);
     if (!got || *got != kind)
         throw std::runtime_error(path + " is not a " +
@@ -101,7 +121,9 @@ std::optional<PresetKind> probe_preset_kind(const std::string& path) {
     if (!fs::is_regular_file(path, ec)) return std::nullopt;
     if (fs::file_size(path, ec) > kMaxPresetBytes) return std::nullopt;
     try {
-        return kind_of(json_parse_file(path));
+        JsonValue root = json_parse_file(path);
+        if (!has_supported_schema(root)) return std::nullopt;
+        return kind_of(root);
     } catch (const std::exception&) {
         return std::nullopt;
     }
@@ -111,7 +133,7 @@ std::optional<PresetKind> probe_preset_kind(const std::string& path) {
 JsonWriter preset_writer(PresetKind kind, const PresetHeader& head) {
     JsonWriter w;
     w.object();
-    w.field("spirula_preset", 1);
+    w.field("spirula_preset", kPresetSchemaVersion);
     w.field("kind", preset_kind_name(kind));
     w.field("name", head.name);
     w.field("description", head.description);

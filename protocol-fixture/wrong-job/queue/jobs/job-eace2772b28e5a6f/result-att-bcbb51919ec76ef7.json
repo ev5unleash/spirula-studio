@@ -1,0 +1,19 @@
+{
+  "schema_version": 2,
+  "job_id": "job-ffffffffffffffff",
+  "attempt_id": "att-bcbb51919ec76ef7",
+  "phase": "geometry",
+  "outcome": "success",
+  "exit_code": 0,
+  "message": "",
+  "partial": false,
+  "metric": true,
+  "registered": 0,
+  "images": 0,
+  "points": 0,
+  "models": 0,
+  "mean_reprojection": 0,
+  "median_reprojection": 0,
+  "sparse_path": "",
+  "outputs": ["C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\wrong-job\\queue\\jobs\\job-eace2772b28e5a6f"]
+}

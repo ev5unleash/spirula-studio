@@ -10,11 +10,13 @@
 #include "app/FrameMask.h"
 #include "app/Pano360.h"
 #include "app/ReconStamp.h"
+#include "video/Demuxer.h"
 
 #include <algorithm>
 #include <cstdint>
 #include <atomic>
 #include <cstdio>
+#include <filesystem>
 #include <functional>
 #include <optional>
 #include <string>
@@ -286,17 +288,53 @@ inline bool reads_photos_in_place(const std::vector<PrepInput>& inputs,
 std::string planned_image_dir(const std::vector<PrepInput>& inputs,
                               const std::string& workspace, PhotoImport mode);
 
-// A video the run extracted frames from, for the manifest's `captures`:
-// the stems carry the source frame index (fps 0, the file's own rate) or,
-// after the ffmpeg fallback, the kept-frame count at `fps`.
+inline constexpr const char* kPrepProvenanceSchema =
+    "spirula-prep-provenance-v1";
+inline constexpr const char* kPrepProvenanceName =
+    "prep-provenance.json";
+inline constexpr const char* kPrepProvenanceFile =
+    ".spirula/prep-provenance.json";
+std::string prep_provenance_path(const std::string& workspace);
+
+// A stream descriptor is written once per original container; frame rows carry
+// only its numeric stream index.
+struct PrepStream {
+    std::string stream_id;
+    std::string media_type = "video";
+    std::string codec;
+    int32_t time_base_num = 0;
+    int32_t time_base_den = 0;
+};
+
+struct PrepFrameSource {
+    std::string output_name;  // normalized path relative to the image root
+    std::string output_source_id;
+    uint64_t export_ordinal = video::kUnknownOrdinal;
+    video::FrameTiming timing;
+};
+
+// A video the run extracted frames from, for the manifest's `captures`.
 struct PrepCapture {
     std::string subdir;
     std::string path;
     double fps = 0;
+    std::string source_id;
+    std::vector<PrepStream> streams;
+    std::vector<PrepFrameSource> frames;
 };
+
+// Writes and verifies frame provenance. A reader never accepts a row whose
+// output bytes no longer match its recorded source identity.
+bool write_prep_provenance(const std::string& workspace,
+                           const std::vector<PrepCapture>& captures,
+                           std::string& error);
+bool read_prep_provenance(const std::string& sidecar,
+                          std::vector<PrepCapture>& captures,
+                          std::string& error);
 
 struct PrepResult {
     std::vector<PrepCapture> captures;
+    std::string provenance_sidecar;
     std::string image_dir;           // absolute; what SfM should index
     std::string image_dir_cfg;       // what the trainer's image_dir should be
     std::string mask_dir;            // "" when there are no masks
@@ -312,14 +350,36 @@ struct PrepResult {
     // images/ came out holding one sub-folder per camera -- several inputs, or
     // a multi-track video -- so intrinsics must not be shared across them.
     bool per_folder_cameras = false;
-    // The frames were extracted again over ones already there, so anything a
-    // reconstruction left describes pictures that are no longer in images/.
+    // The frames were extracted again over ones already there, so anything that
+    // a reconstruction left describes pictures that are no longer in images/.
     bool frames_rebuilt = false;
 };
 // The paths and mask convention a preparation will publish before it runs.
 // DatasetPrep, scheduled SfM and the GUI handoff all use this same decision;
 // actual completed output folders still win when the worker reports them.
 PrepResult planned_prep(const PrepJob& job);
+// Resolve the ordered worker prep outputs (image, optional mask, provenance)
+// without mistaking the provenance sidecar for a mask directory.
+inline PrepResult resolve_prep_outputs(
+    const PrepResult& planned, const std::vector<std::string>& outputs) {
+    if (outputs.empty()) return planned;
+    PrepResult out = planned;
+    out.image_dir.clear();
+    out.mask_dir.clear();
+    out.provenance_sidecar.clear();
+    for (const std::string& path : outputs) {
+        const std::filesystem::path value = std::filesystem::u8path(path);
+        if (value.filename() == kPrepProvenanceName &&
+            value.parent_path().filename() == ".spirula") {
+            out.provenance_sidecar = path;
+        } else if (out.image_dir.empty()) {
+            out.image_dir = path;
+        } else if (out.mask_dir.empty()) {
+            out.mask_dir = path;
+        }
+    }
+    return out;
+}
 
 // Everything that decides which pictures land in images/, and nothing that
 // decides what becomes of them: masking and the reconstruction stamp their own
@@ -513,6 +573,7 @@ struct PrepFrame {
     const uint8_t* rgb = nullptr;
     int width = 0, height = 0;
     const uint8_t* mask = nullptr;
+    video::FrameTiming timing;
 };
 
 struct PrepScanRow {
@@ -561,49 +622,46 @@ class DatasetPrep {
 public:
     DatasetPrep(const std::atomic<bool>& cancel, DatasetPrepSinks sinks = {})
         : _sinks(std::move(sinks)), _cancel(cancel) {}
-
     // Called before masking so UI edits to mask options are applied after frame
     // extraction has completed.
     using RefreshFn = std::function<void(PrepJob&)>;
 
-    // False with `error` set on failure ("cancelled" when the token was set).
     bool run(const PrepJob& job, PrepResult& out, std::string& error,
              const RefreshFn& refresh_masks = {});
 
-    // Recursive image count matching COLMAP; skip nested masks so their PNGs are
-    // not mistaken for views.
     static int count_images(const std::string& dir, const std::string& skip = "");
-    // Dimensions of the first image found, for the focal-length prior.
     static bool first_image_dims(const std::string& dir, int& w, int& h);
-    // Every image under `dir`, named relative to it, with its pixel size --
-    // zero when nothing here reads that format's header (stb has no TIFF or
-    // WebP decoder; COLMAP's FreeImage does).
-    struct ImageSize { std::string name; int w = 0, h = 0; };
+    struct ImageSize {
+        std::string name;
+        int w = 0, h = 0;
+    };
     static std::vector<ImageSize> image_sizes(const std::string& dir,
                                               const std::string& skip = "");
 
 private:
     void log(const std::string& s, bool detail = true);
     void enter(Stage s, const std::string& text);
+    bool load_resume_provenance(const PrepJob& job, std::string& error);
 
-    // One input's frames. `images` / `masks` are that input's own folders
-    // (images/<subdir>, masks/<subdir>); `masked` comes back true only when a
-    // resumed run found masks already sitting beside them.
+    // False with `error` set on failure ("cancelled" when the token was set).
     bool extract_video(const PrepJob& job, const PrepInput& in,
                        const std::string& images, const std::string& masks,
                        PrepResult& out, bool& masked, std::string& error);
     bool extract_video_builtin(const PrepJob& job, const PrepInput& in,
+                               const std::string& source_id,
                                const std::string& images,
                                PrepResult& out, std::string& error);
     bool extract_video_ffmpeg(const PrepJob& job, const PrepInput& in,
-                              const std::string& images, PrepResult& out,
-                              std::string& error);
+                              const std::string& source_id,
+                              const std::string& images,
+                              PrepCapture& capture, std::string& error);
     // A 360 capture through ffmpeg: one decode writing the EAC canvas, frame
     // selection over those, then our own resampler into the views. ffmpeg is
     // never asked to warp -- see app/Pano360.h.
     bool extract_360_ffmpeg(const PrepJob& job, const PrepInput& in,
-                            const std::string& images, PrepResult& out,
-                            std::string& error);
+                            const std::string& source_id,
+                            const std::string& images,
+                            PrepCapture& capture, std::string& error);
     // Photos into the dataset's own images/<subdir>, by whichever of
     // PhotoImport the job asked for -- and the masks they came with into the
     // matching masks/<subdir>, so the two trees still mirror each other.
@@ -649,6 +707,9 @@ private:
     Stage _stage = Stage::Frames;
     const std::atomic<bool>& _cancel;
     bool _frames_stale = false;
+    bool _resume_provenance_loaded = false;
+    bool _resume_provenance_present = false;
+    std::vector<PrepCapture> _resume_captures;
     // The spacing chosen per input, and which of them have one: an adaptive
     // plan covers a whole rate group, so it is made before any of the group is
     // extracted rather than per video.

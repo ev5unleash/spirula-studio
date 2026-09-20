@@ -29,6 +29,7 @@
 #include <vector>
 
 namespace app::sched {
+using ProjectReference = app::worker::ProjectReference;
 
 enum class JobState {
     Queued,
@@ -45,7 +46,7 @@ enum class JobState {
 // Fixed workflow phase.  `phase` is deliberately a string at this boundary:
 // the worker allowlist is the one place that knows how to dispatch it.
 struct Phase {
-    std::string phase;             // prep -> sfm -> geometry -> train -> publish
+    std::string phase;  // prep -> sfm-extract -> sfm -> geometry -> train -> publish
     bool optional = false;
     std::string planned_device;
     std::string planned_device_name;
@@ -72,7 +73,7 @@ struct PathClaim {
 std::string canonical_claim_path(const std::string& path);
 bool path_claims_conflict(const PathClaim& a, const PathClaim& b);
 
-struct Job {
+struct Job : app::worker::ProjectReference {
     uint64_t order = 0;
     std::string job_id;
     std::string phase;        // current phase for old UI callers
@@ -99,7 +100,7 @@ struct Job {
     int last_exit_code = -1;
 };
 
-struct SubmitOpts {
+struct SubmitOpts : app::worker::ProjectReference {
     std::string phase;
     std::string device;
     std::string device_name;
@@ -110,7 +111,7 @@ struct SubmitOpts {
     std::vector<PathClaim> path_claims;
 };
 
-struct WorkflowSubmitOpts {
+struct WorkflowSubmitOpts : app::worker::ProjectReference {
     std::string work_dir;
     std::string workspace;
     std::string source;
@@ -128,6 +129,9 @@ struct Event {
     std::string line;         // one log line, if any
     std::string error;
 };
+using FeatureResultValidator =
+    std::function<bool(const Job&, const Phase&, const std::string&,
+                       std::string&)>;
 
 class JobScheduler {
 public:
@@ -160,6 +164,7 @@ public:
 
     void set_event_callback(std::function<void(const Event&)> cb);
     void drain_events();
+    void set_feature_result_validator(FeatureResultValidator validator);
 
     // Queue control. All are no-ops for unknown job_id.
     void stop_and_save(const std::string& job_id);
@@ -234,6 +239,7 @@ private:
     DeviceValidator _device_validator;
 
     std::function<void(const Event&)> _on_event;
+    FeatureResultValidator _feature_result_validator;
     std::atomic<bool> _paused{false};
     std::atomic<bool> _shutdown{false};
     uint64_t _next_order = 0;

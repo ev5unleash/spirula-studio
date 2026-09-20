@@ -1,0 +1,13 @@
+{
+  "schema_version": 2,
+  "job_id": "job-eace2772b28e5a6f",
+  "attempt_id": "att-bcbb51919ec76ef7",
+  "phase": "geometry",
+  "device": "protocol-device",
+  "device_name": "",
+  "work_dir": "C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\wrong-job",
+  "workspace": "C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\wrong-job",
+  "result_path": "C:\\Users\\Evan\\Documents\\Codex\\spirula-studio\\protocol-fixture\\wrong-job\\queue\\jobs\\job-eace2772b28e5a6f\\result-att-bcbb51919ec76ef7.json",
+  "args": ["wrong-job"],
+  "payload": "{}"
+}

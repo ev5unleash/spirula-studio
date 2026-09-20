@@ -18,10 +18,13 @@
 //
 // The self-checks are separate binaries (src/sfm/tests/, one per area).
 #include "app/Tools.h"
+#include "app/OutputLease.h"
 #include "sfm/Pipeline.h"
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
+#include <cstdlib>
 #include <atomic>
 #include <csignal>
 #include <cmath>
@@ -39,6 +42,7 @@
 #include <vector>
 
 #include "core/ColorSpace.h"
+#include "data/Json.h"
 #include "core/Env.h"
 #include "core/ExrImage.h"
 #include "sfm/SfmConfig.h"
@@ -110,6 +114,11 @@ static const char* kProgram = "spirula sfm";
 // device instead of dying inside a Vulkan submit. A second one is the user
 // saying they meant it: restore the default and let it kill the process.
 static std::atomic<bool> g_interrupted{false};
+static const std::atomic<bool>* g_external_interrupt = nullptr;
+
+void spirula_sfm_set_cancel_token(const std::atomic<bool>* token) {
+    g_external_interrupt = token;
+}
 
 extern "C" void sfmOnInterrupt(int sig) {
     if (g_interrupted.exchange(true)) {
@@ -161,16 +170,20 @@ static void ownOptionsAuto(FILE* out) {
     helpLine(out, "--rig PREFIX,PREFIX,...", "", H::opt_rig.get());
     helpLine(out, "--no-masks", "", H::opt_no_masks.get());
     helpLine(out, "--no-manage", "", H::opt_no_manage_auto.get());
+    helpLine(out, "--feature-plan FILE", "", H::opt_feature_plan.get());
     helpLine(out, "--progress-dir DIR", "", H::opt_progress_dir.get());
     helpLine(out, "-h, --help", "", H::opt_help.get());
 }
 static void ownOptionsExtract(FILE* out) {
     helpLine(out, "-o, --output DIR|FILE", "features", H::opt_extract_output.get());
+    helpLine(out, "--feature-request FILE", "", H::opt_feature_request.get());
+    helpLine(out, "--adopt-from DIR", "", H::opt_adopt_from.get());
     helpLine(out, "-h, --help", "", H::opt_help.get());
 }
 static void ownOptionsMatch(FILE* out) {
     helpLine(out, "-o, --output FILE", "", H::opt_match_output.get());
     helpLine(out, "--progress-dir DIR", "", H::opt_progress_dir.get());
+    helpLine(out, "--feature-plan FILE", "", H::opt_feature_plan.get());
     helpLine(out, "-h, --help", "", H::opt_help.get());
 }
 static void ownOptionsMap(FILE* out) {
@@ -179,10 +192,42 @@ static void ownOptionsMap(FILE* out) {
     helpLine(out, "--audit", "", H::opt_map_audit.get());
     helpLine(out, "--no-manage", "", H::opt_no_manage_map.get());
     helpLine(out, "--progress-dir DIR", "", H::opt_progress_dir.get());
+    helpLine(out, "--feature-plan FILE", "", H::opt_feature_plan.get());
     helpLine(out, "-h, --help", "", H::opt_help.get());
 }
 static void ownOptionsMerge(FILE* out) {
     helpLine(out, "-o, --output DIR", "", H::opt_merge_output.get());
+    helpLine(out, "-h, --help", "", H::opt_help.get());
+}
+static void ownOptionsPlan(FILE* out) {
+    helpLine(out, "-o, --output DIR", H::word_required.get(),
+             H::opt_plan_output.get());
+    helpLine(out, "--shards COUNT", H::word_required.get(),
+             H::opt_plan_shards.get());
+    helpLine(out, "--chunk-memberships FILE", "",
+             H::opt_plan_chunk_memberships.get());
+    helpLine(out, "--chunk-window SIZE", "", H::opt_plan_chunk_window.get());
+    helpLine(out, "--chunk-overlap COUNT", "",
+             H::opt_plan_chunk_overlap.get());
+    helpLine(out, "-h, --help", "", H::opt_help.get());
+}
+static void ownOptionsRequest(FILE* out) {
+    helpLine(out, "-o, --output FILE", H::word_required.get(),
+             H::opt_request_output.get());
+    helpLine(out, "--shard INDEX", "", H::opt_request_shard.get());
+    helpLine(out, "--attempt ID", "", H::opt_request_attempt.get());
+    helpLine(out, "--supersedes REQUEST", "",
+             H::opt_request_supersedes.get());
+    helpLine(out, "--cancel REQUEST", "", H::opt_request_cancel.get());
+    helpLine(out, "-h, --help", "", H::opt_help.get());
+}
+static void ownOptionsCollect(FILE* out) {
+    helpLine(out, "-o, --output WORKSPACE", H::word_required.get(),
+             H::opt_collect_output.get());
+    helpLine(out, "--requests DIR", H::word_required.get(),
+             H::opt_collect_requests.get());
+    helpLine(out, "--adopt-from FEATURE_DIR", "",
+             H::opt_adopt_from.get());
     helpLine(out, "-h, --help", "", H::opt_help.get());
 }
 
@@ -197,6 +242,33 @@ static const CommandInfo kCommands[] = {
      "  spirula-sfm auto images/ -o ws/ --camera-model opencv-fisheye --focal 520\n"
      "  spirula-sfm auto images/ -o ws/ --camera-model cam0=thin-prism-fisheye",
      /*exit_status=*/true},
+
+    {"plan", CMD_EXTRACT | CMD_PLAN, &H::sum_plan,
+     "<IMAGE_DIR> -o PLAN_DIR --shards COUNT [options]",
+     {&H::desc_plan_1, &H::desc_plan_2, nullptr},
+     ownOptionsPlan,
+     "  spirula-sfm plan images/ -o feature-plan/ --shards 4 --quality high\n"
+     "  spirula-sfm plan images/ -o feature-plan/ --shards 2 --masks masks/\n"
+     "  spirula-sfm plan images/ -o feature-plan/ --shards 4 --chunk-window 80 --chunk-overlap 20",
+     false},
+
+    {"request", 0, &H::sum_request,
+     "<PLAN> -o FILE [--shard INDEX] [options]",
+     {&H::desc_request_1, nullptr},
+     ownOptionsRequest,
+     "  spirula-sfm request feature-plan/plan.json -o feature-plan/request-retry.json \\\n"
+     "                      --supersedes feature-plan/request-shard-0000-attempt-0001.json\n"
+     "  spirula-sfm request feature-plan/plan.json -o feature-plan/cancel.json \\\n"
+     "                      --cancel feature-plan/request-shard-0000-attempt-0001.json",
+     false},
+
+    {"collect", 0, &H::sum_collect,
+     "<PLAN> RESULT_DIR... -o WORKSPACE --requests DIR",
+     {&H::desc_collect_1, &H::desc_collect_2, nullptr},
+     ownOptionsCollect,
+     "  spirula-sfm collect feature-plan/plan.json workers/a workers/b \\\n"
+     "                      -o workspace/ --requests feature-plan/",
+     false},
 
     {"extract", CMD_EXTRACT, &H::sum_extract,
      "<IMAGE|DIR> [-o OUT] [options]",
@@ -571,6 +643,318 @@ static bool readModels(const std::string& dir, std::vector<Reconstruction>& mode
 
 
 
+static bool parseU32(const std::string& text, uint32_t& value) {
+    if (text.empty() ||
+        !std::all_of(text.begin(), text.end(),
+                     [](unsigned char c) { return c >= '0' && c <= '9'; }))
+        return false;
+    char* end = nullptr;
+    errno = 0;
+    const unsigned long parsed = std::strtoul(text.c_str(), &end, 10);
+    if (errno || !end || *end || parsed > UINT32_MAX) return false;
+    value = (uint32_t)parsed;
+    return true;
+}
+
+static std::string generatedAttemptId() {
+    const auto ticks = std::chrono::steady_clock::now()
+                           .time_since_epoch()
+                           .count();
+    char text[40];
+    std::snprintf(text, sizeof text, "attempt-%016llx",
+                  (unsigned long long)ticks);
+    return text;
+}
+
+static bool acquireOutputLease(const fs::path& output, app::OutputLease& lease,
+                               std::string& error) {
+    return spirula::env_on("OUTPUT_LEASE_HELD") ||
+           lease.acquire(output, error);
+}
+
+static int cmdPlan(int argc, char** argv) {
+    SfmConfig cfg;
+    std::set<std::string> seen;
+    FeaturePlanOptions options;
+    std::string image_root, output, manifest_path;
+    for (int i = 0; i < argc; ++i) {
+        const std::string argument = argv[i];
+        if (argument == "--help" || argument == "-h") {
+            printCommandHelp(*findCommand("plan"));
+            return 0;
+        }
+        if (argument == "--output" || argument == "-o") {
+            if (++i >= argc) return usageError("plan", "--output: missing value");
+            output = argv[i];
+            continue;
+        }
+        if (argument == "--shards") {
+            if (++i >= argc ||
+                !parseU32(argv[i], options.shards) || !options.shards)
+                return usageError("plan", "--shards: expected a positive integer");
+            continue;
+        }
+        if (argument == "--chunk-memberships") {
+            if (++i >= argc)
+                return usageError("plan", "--chunk-memberships: missing value");
+            options.chunk_memberships = argv[i];
+            continue;
+        }
+        if (argument == "--chunk-window") {
+            if (++i >= argc || !parseU32(argv[i], options.chunk_window))
+                return usageError("plan", "--chunk-window: expected an integer");
+            continue;
+        }
+        if (argument == "--chunk-overlap") {
+            if (++i >= argc || !parseU32(argv[i], options.chunk_overlap))
+                return usageError("plan", "--chunk-overlap: expected an integer");
+            continue;
+        }
+        if (argument == "--manifest") {
+            if (++i >= argc)
+                return usageError("plan", "--manifest: missing value");
+            manifest_path = argv[i];
+            continue;
+        }
+        if (argument == "--rig") {
+            if (++i >= argc) return usageError("plan", "--rig: missing value");
+            RigDef rig;
+            if (std::string error = parseRigArg(argv[i], rig); !error.empty())
+                return usageError("plan", error);
+            cfg.rigs.push_back(std::move(rig));
+            continue;
+        }
+        const int parsed = tableFlag(cfg, CMD_EXTRACT | CMD_PLAN, "plan",
+                                     argument, argc, argv, i, seen);
+        if (parsed < 0) return 1;
+        if (parsed > 0) continue;
+        if (!argument.empty() && argument[0] == '-')
+            return usageError("plan", "unknown option " + argument);
+        if (!image_root.empty())
+            return usageError("plan", "unexpected argument '" + argument + "'");
+        image_root = argument;
+    }
+    if (image_root.empty() || output.empty())
+        return usageError("plan", "an image directory and --output are required");
+    std::vector<PresetChange> moved;
+    if (std::string error = applyPresets(cfg, seen, moved); !error.empty())
+        return usageError("plan", error);
+    if (!manifest_path.empty()) {
+        Manifest manifest = manifest_read(manifest_path);
+        if (std::string error =
+                manifest_apply(manifest, cfg, seen, image_root);
+            !error.empty())
+            return usageError("plan", manifest_path + ": " + error);
+    }
+    if (std::string error = cfg.finalize(CMD_EXTRACT); !error.empty())
+        return usageError("plan", error);
+    adoptExrColorSpace(cfg, image_root, seen);
+
+    app::OutputLease lease;
+    std::string lease_error;
+    if (!acquireOutputLease(output, lease, lease_error))
+        return usageError("plan", lease_error);
+    const fs::path root = fs::absolute(fs::u8path(output));
+    const fs::path plan_path = root / "plan.json";
+    if (fs::exists(plan_path))
+        return usageError("plan", "destination already contains plan.json");
+    const feature_work::FeaturePlan plan =
+        makeFeaturePlan(image_root, cfg, options);
+    feature_work::writePlanFile(plan_path.string(), plan);
+    for (uint32_t shard = 0; shard < options.shards; ++shard) {
+        feature_work::FeatureRequest request =
+            makeFeatureRequest(plan, shard, "attempt-0001");
+        char name[80];
+        std::snprintf(name, sizeof name,
+                      "request-shard-%04u-attempt-0001.json", shard);
+        const fs::path path = root / name;
+        feature_work::writeRequestFile(path.string(), request);
+        L::out(Tag::Run, M::request_written,
+               {(long long)shard, request.attempt_id, path.string()});
+        L::out(Tag::Run, M::plan_shard,
+               {(long long)shard,
+                (long long)request.image_indices.size(),
+                (long long)request.image_indices.size()});
+    }
+    size_t memberships = 0;
+    for (const auto& chunk : plan.chunks)
+        memberships += chunk.image_indices.size();
+    if (!plan.chunks.empty())
+        L::out(Tag::Run, M::plan_chunks,
+               {(long long)plan.chunks.size(), (long long)memberships,
+                (long long)plan.images.size()});
+    L::out(Tag::Run, M::plan_written,
+           {plan_path.string(), (long long)plan.images.size(),
+            (long long)options.shards, plan.dataset_digest});
+    return 0;
+}
+
+static int cmdRequest(int argc, char** argv) {
+    std::string plan_path, output, attempt, supersedes_path, cancel_path;
+    uint32_t shard = UINT32_MAX;
+    for (int i = 0; i < argc; ++i) {
+        const std::string argument = argv[i];
+        if (argument == "--help" || argument == "-h") {
+            printCommandHelp(*findCommand("request"));
+            return 0;
+        }
+        auto value = [&](const char* flag) -> const char* {
+            if (++i >= argc) throw std::runtime_error(
+                std::string(flag) + ": missing value");
+            return argv[i];
+        };
+        if (argument == "--output" || argument == "-o")
+            output = value("--output");
+        else if (argument == "--shard") {
+            const std::string text = value("--shard");
+            if (!parseU32(text, shard))
+                return usageError("request", "--shard: expected an integer");
+        } else if (argument == "--attempt")
+            attempt = value("--attempt");
+        else if (argument == "--supersedes")
+            supersedes_path = value("--supersedes");
+        else if (argument == "--cancel")
+            cancel_path = value("--cancel");
+        else if (!argument.empty() && argument[0] == '-')
+            return usageError("request", "unknown option " + argument);
+        else if (plan_path.empty())
+            plan_path = argument;
+        else
+            return usageError("request", "unexpected argument '" + argument + "'");
+    }
+    if (plan_path.empty() || output.empty())
+        return usageError("request", "a plan and --output are required");
+    if (!cancel_path.empty() && !supersedes_path.empty())
+        return usageError("request", "--cancel and --supersedes are exclusive");
+    const feature_work::FeaturePlan plan =
+        feature_work::readPlanFile(plan_path);
+    app::OutputLease lease;
+    std::string lease_error;
+    fs::path output_path = fs::absolute(fs::u8path(output));
+    fs::path output_parent = output_path.parent_path();
+    if (!acquireOutputLease(output_parent, lease, lease_error))
+        return usageError("request", lease_error);
+
+    if (!cancel_path.empty()) {
+        const feature_work::FeatureRequest target =
+            feature_work::readRequestFile(cancel_path);
+        feature_work::validateRequest(plan, target);
+        feature_work::FeatureCancellation cancellation;
+        cancellation.plan_digest = plan.digest;
+        cancellation.request_digest = target.digest;
+        cancellation.shard = target.shard;
+        cancellation.reason = "cancelled by coordinator";
+        cancellation.cancellation_digest =
+            feature_work::cancellationDigest(cancellation);
+        feature_work::validateCancellation(plan, target, cancellation);
+        feature_work::writeCancellationFile(output_path.string(), cancellation);
+        L::out(Tag::Run, M::request_cancelled,
+               {target.digest, output_path.string()});
+        return 0;
+    }
+
+    std::string supersedes;
+    if (!supersedes_path.empty()) {
+        const feature_work::FeatureRequest previous =
+            feature_work::readRequestFile(supersedes_path);
+        feature_work::validateRequest(plan, previous);
+        supersedes = previous.digest;
+        if (shard != UINT32_MAX && shard != previous.shard)
+            return usageError("request", "--shard disagrees with --supersedes");
+        shard = previous.shard;
+    }
+    if (shard == UINT32_MAX)
+        return usageError("request", "--shard or --supersedes is required");
+    if (attempt.empty()) attempt = generatedAttemptId();
+    feature_work::FeatureRequest request =
+        makeFeatureRequest(plan, shard, attempt, supersedes);
+    const fs::path absolute_plan = fs::absolute(fs::u8path(plan_path));
+    if (absolute_plan.parent_path() != output_parent)
+        return usageError(
+            "request",
+            "request output must share the plan directory for portable paths");
+    request.plan_path = feature_work::normalizeRelativePath(
+        absolute_plan.filename().generic_string());
+    request.digest = feature_work::requestDigest(request);
+    feature_work::validateRequest(plan, request);
+    feature_work::writeRequestFile(output_path.string(), request);
+    L::out(Tag::Run, M::request_written,
+           {(long long)shard, request.attempt_id, output_path.string()});
+    return 0;
+}
+
+static int cmdCollect(int argc, char** argv) {
+    std::string plan_path, output, requests_root;
+    std::vector<std::string> result_roots;
+    std::vector<fs::path> adopt_from;
+    for (int i = 0; i < argc; ++i) {
+        const std::string argument = argv[i];
+        if (argument == "--help" || argument == "-h") {
+            printCommandHelp(*findCommand("collect"));
+            return 0;
+        }
+        if (argument == "--output" || argument == "-o") {
+            if (++i >= argc)
+                return usageError("collect", "--output: missing value");
+            output = argv[i];
+        } else if (argument == "--requests") {
+            if (++i >= argc)
+                return usageError("collect", "--requests: missing value");
+            requests_root = argv[i];
+        } else if (argument == "--adopt-from") {
+            if (++i >= argc)
+                return usageError("collect", "--adopt-from: missing value");
+            adopt_from.push_back(fs::u8path(argv[i]));
+        } else if (!argument.empty() && argument[0] == '-') {
+            return usageError("collect", "unknown option " + argument);
+        } else if (plan_path.empty()) {
+            plan_path = argument;
+        } else {
+            result_roots.push_back(argument);
+        }
+    }
+    if (plan_path.empty() || output.empty() || requests_root.empty())
+        return usageError(
+            "collect", "a plan, --output, and --requests are required");
+    const feature_work::FeaturePlan plan =
+        feature_work::readPlanFile(plan_path);
+    std::vector<std::string> requests, cancellations;
+    std::vector<fs::path> records;
+    for (const auto& entry :
+         fs::recursive_directory_iterator(fs::u8path(requests_root)))
+        if (entry.is_regular_file() && entry.path().extension() == ".json")
+            records.push_back(entry.path());
+    std::sort(records.begin(), records.end());
+    for (const fs::path& path : records) {
+        const JsonValue json = json_parse_file(path.string());
+        if (json.find("image_indices"))
+            requests.push_back(path.string());
+        else if (json.find("cancellation_digest"))
+            cancellations.push_back(path.string());
+    }
+    app::OutputLease lease;
+    std::string lease_error;
+    const fs::path workspace = fs::absolute(fs::u8path(output));
+    const fs::path feature_dir = workspace / "features";
+    if (!acquireOutputLease(workspace, lease, lease_error))
+        return usageError("collect", lease_error);
+    const feature_work::CollectionIndex index =
+        collectFeatureResults(plan, requests, cancellations, result_roots,
+                              feature_dir, adopt_from);
+    L::out(Tag::Run, M::collect_status,
+           {(long long)index.rows.size(), (long long)plan.images.size(),
+            (long long)(plan.images.size() - index.rows.size())});
+    if (!index.complete) {
+        L::out(Tag::Run, M::collect_waiting,
+               {(long long)(plan.images.size() - index.rows.size())});
+        return 1;
+    }
+    L::out(Tag::Run, M::collect_sealed,
+           {(long long)index.rows.size(), index.collection_digest,
+            (feature_dir / "index.json").string()});
+    return 0;
+}
+
 // -----------------------------------------------------------------------
 // extract
 // -----------------------------------------------------------------------
@@ -582,13 +966,25 @@ static bool readModels(const std::string& dir, std::vector<Reconstruction>& mode
 static int cmdExtract(int argc, char** argv) {
     SfmConfig cfg;
     std::set<std::string> seen;
-    std::string image, output;
+    std::string image, output, feature_request, adopt_from;
     for (int i = 0; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--help" || a == "-h") { printCommandHelp(*findCommand("extract")); return 0; }
         if (a == "--output" || a == "-o") {
             if (i + 1 >= argc) return usageError("extract", "--output: missing value");
             output = argv[++i];
+            continue;
+        }
+        if (a == "--feature-request") {
+            if (i + 1 >= argc)
+                return usageError("extract", "--feature-request: missing value");
+            feature_request = argv[++i];
+            continue;
+        }
+        if (a == "--adopt-from") {
+            if (i + 1 >= argc)
+                return usageError("extract", "--adopt-from: missing value");
+            adopt_from = argv[++i];
             continue;
         }
         int r = tableFlag(cfg, CMD_EXTRACT, "extract", a, argc, argv, i, seen);
@@ -599,6 +995,18 @@ static int cmdExtract(int argc, char** argv) {
             return usageError("extract", "unexpected argument '" + a + "'");
         image = a;
     }
+    if (!feature_request.empty()) {
+        const fs::path request_path = fs::absolute(fs::u8path(feature_request));
+        const feature_work::FeatureRequest request =
+            feature_work::readRequestFile(request_path.string());
+        const feature_work::FeaturePlan plan = feature_work::readPlanFile(
+            (request_path.parent_path() /
+             fs::u8path(request.plan_path)).string());
+        if (seen.count("features") && cfg.features != plan.extraction.frontend)
+            return usageError(
+                "extract", "--features disagrees with --feature-request");
+        cfg.features = plan.extraction.frontend;
+    }
     if (std::string err = cfg.finalize(CMD_EXTRACT); !err.empty())
         return usageError("extract", err);
     if (std::string err = cfg.resolveDevice(); !err.empty())
@@ -606,10 +1014,33 @@ static int cmdExtract(int argc, char** argv) {
     installEventPrinter(cfg);
     if (image.empty())
         return usageError("extract", "an image or a directory of images is required");
+    if (!feature_request.empty() && !fs::is_directory(image))
+        return usageError("extract",
+                          "--feature-request requires an image directory");
 
     // ---- directory (batch) ----
     if (fs::is_directory(image)) {
         adoptExrColorSpace(cfg, image, seen);
+        if (!feature_request.empty()) {
+            if (output.empty())
+                return usageError(
+                    "extract", "--feature-request requires --output");
+            app::OutputLease lease;
+            std::string lease_error;
+            if (!acquireOutputLease(output, lease, lease_error))
+                return usageError("extract", lease_error);
+            const feature_work::FeatureRequest request =
+                feature_work::readRequestFile(feature_request);
+            ExtractStats stats;
+            const int rc =
+                extractFeatureRequest(image, cfg.mask_dir, feature_request,
+                                      output, cfg, stats, adopt_from);
+            L::out(Tag::Extract, M::extract_request_done,
+                   {(long long)request.shard, (long long)stats.images,
+                    (long long)stats.reused,
+                    (fs::u8path(output) / "result.json").string()});
+            return rc;
+        }
         fs::path outdir = output.empty() ? fs::path("features") : fs::path(output);
         ExtractStats st;
         int rc = extractDirectory(image, outdir, cfg, st);
@@ -673,13 +1104,19 @@ static int cmdExtract(int argc, char** argv) {
 static int cmdMatch(int argc, char** argv) {
     SfmConfig cfg;
     std::set<std::string> seen;
-    std::string featdir, output;
+    std::string featdir, output, feature_plan_path;
     for (int i = 0; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--help" || a == "-h") { printCommandHelp(*findCommand("match")); return 0; }
         if (a == "--output" || a == "-o") {
             if (i + 1 >= argc) return usageError("match", "--output: missing value");
             output = argv[++i];
+            continue;
+        }
+        if (a == "--feature-plan") {
+            if (i + 1 >= argc)
+                return usageError("match", "--feature-plan: missing value");
+            feature_plan_path = argv[++i];
             continue;
         }
         if (a == "--progress-dir") {
@@ -701,20 +1138,35 @@ static int cmdMatch(int argc, char** argv) {
         if (!featdir.empty()) return usageError("match", "unexpected argument '" + a + "'");
         featdir = a;
     }
+    std::optional<feature_work::FeaturePlan> feature_plan;
+    std::optional<feature_work::CollectionIndex> feature_index;
+    if (!feature_plan_path.empty()) {
+        feature_plan = feature_work::readPlanFile(feature_plan_path);
+        if (seen.count("features") &&
+            cfg.features != feature_plan->extraction.frontend)
+            return usageError("match",
+                              "--features disagrees with --feature-plan");
+        cfg.features = feature_plan->extraction.frontend;
+    }
     if (std::string err = cfg.finalize(CMD_MATCH); !err.empty())
         return usageError("match", err);
     if (std::string err = cfg.resolveDevice(); !err.empty())
         return usageError("match", err);
     installEventPrinter(cfg);
     if (featdir.empty()) return usageError("match", "a feature directory is required");
+    if (feature_plan)
+        feature_index = feature_work::readCollectionIndexFile(
+            (fs::u8path(featdir) / "index.json").string());
 
     VerifyCalibration calib;
     calib.setup = cfg.camera;
     std::vector<FeatureSet> feats;
     MatchesDatabase db;
     MatchStats stats;
-    if (int rc = matchFeatureDir(featdir, cfg, cfg.pairMode(), cfg.verify, feats, db, stats,
-                                 &calib))
+    if (int rc = matchFeatureDir(
+            featdir, cfg, cfg.pairMode(), cfg.verify, feats, db, stats, &calib,
+            nullptr, feature_plan ? &*feature_plan : nullptr,
+            feature_index ? &*feature_index : nullptr))
         return rc;
     if (cfg.verify)
         L::out(Tag::Match, M::match_done_inliers,
@@ -739,10 +1191,17 @@ static int cmdMatch(int argc, char** argv) {
 static int cmdMap(int argc, char** argv) {
     SfmConfig cfg;
     std::set<std::string> seen;
-    std::string matchesPath, output;
+    std::string matchesPath, output, feature_plan_path;
+    app::OutputLease feature_output_lease;
     bool audit_first = false;
     for (int i = 0; i < argc; i++) {
         std::string a = argv[i];
+        if (a == "--feature-plan") {
+            if (i + 1 >= argc)
+                return usageError("map", "--feature-plan: missing value");
+            feature_plan_path = argv[++i];
+            continue;
+        }
         if (a == "--help" || a == "-h") { printCommandHelp(*findCommand("map")); return 0; }
         if (a == "--output" || a == "-o") {
             if (i + 1 >= argc) return usageError("map", "--output: missing value");
@@ -786,6 +1245,12 @@ static int cmdMap(int argc, char** argv) {
         else if (cfg.feature_dir.empty()) cfg.feature_dir = a;
         else return usageError("map", "unexpected argument '" + a + "'");
     }
+    std::optional<feature_work::FeaturePlan> feature_plan;
+    std::optional<feature_work::CollectionIndex> feature_index;
+    if (!feature_plan_path.empty()) {
+        feature_plan = feature_work::readPlanFile(feature_plan_path);
+        cfg.features = feature_plan->extraction.frontend;
+    }
     if (std::string err = cfg.finalize(CMD_MAP); !err.empty()) return usageError("map", err);
     if (std::string err = cfg.resolveDevice(); !err.empty()) return usageError("map", err);
     if (matchesPath.empty() || cfg.feature_dir.empty())
@@ -794,11 +1259,51 @@ static int cmdMap(int argc, char** argv) {
     MapperOptions& opt = cfg.mapper;
     ManagerOptions& mgopt = cfg.manager;
     const std::string& featdir = cfg.feature_dir;
+    if (feature_plan) {
+        feature_index = feature_work::readCollectionIndexFile(
+            (fs::u8path(featdir) / "index.json").string());
+        if (cfg.image_dir.empty())
+            return usageError("map",
+                              "--feature-plan requires --images");
+        validateFeaturePlanInputs(*feature_plan, cfg.image_dir, cfg.mask_dir);
+        if (output.empty())
+            return usageError("map",
+                              "--feature-plan requires --output");
+        if (fs::exists(fs::u8path(output)))
+            return usageError(
+                "map", "imported-feature reconstruction requires a fresh output");
+        std::string lease_error;
+        fs::path lease_root = fs::absolute(fs::u8path(output)).parent_path();
+        if (!acquireOutputLease(lease_root, feature_output_lease, lease_error))
+            return usageError("map", lease_error);
+    }
 
     MatchesDatabase db = readMatches(matchesPath);
     std::optional<FeatureCompactionPlan> compaction;
     if (cfg.compact_unused_features) compaction.emplace(buildFeatureCompactionPlan(db));
-    std::vector<FeatureSet> feats(db.images.size());
+    std::vector<FeatureSet> feats;
+    if (feature_plan) {
+        MatchesDatabase feature_db;
+        if (int rc = loadFeatureCollection(
+                fs::u8path(featdir), *feature_plan, *feature_index, cfg, false,
+                feats, feature_db))
+            return rc;
+        if (feature_db.images.size() != db.images.size())
+            throw std::runtime_error(
+                "matches image count disagrees with feature collection");
+        for (size_t i = 0; i < db.images.size(); ++i)
+            if (feature_db.images[i].name != db.images[i].name ||
+                feature_db.images[i].num_features !=
+                    db.images[i].num_features)
+                throw std::runtime_error(
+                    "matches image order disagrees with feature collection");
+        if (compaction)
+            for (size_t i = 0; i < feats.size(); ++i)
+                feats[i] = compactFeatureSet(
+                    std::move(feats[i]), compaction->old_to_new[i],
+                    compaction->compact_counts[i]);
+    } else {
+        feats.resize(db.images.size());
     {
         // Descriptors are skipped: matching is over, and on a 5000-image
         // capture they are several gigabytes of file that nothing downstream
@@ -833,6 +1338,7 @@ static int cmdMap(int argc, char** argv) {
             L::err_raw(Tag::Map, first_error);
             return 1;
         }
+    }
     }
     if (compaction) {
         remapMatches(db, *compaction, feats);
@@ -996,7 +1502,8 @@ static int cmdMap(int argc, char** argv) {
     }
     printAssembly(ast, models.size());
 
-    resolveImageNames(models, cfg.image_dir);
+    if (feature_plan) resolveImageNames(models, *feature_plan);
+    else resolveImageNames(models, cfg.image_dir);
     // The mapper reported its own stage when run() returned; the passes that
     // assemble its models add to the same counters.
     g_map_prof.report(0, "map");
@@ -1020,7 +1527,22 @@ static int cmdMap(int argc, char** argv) {
     const bool map_metric = fixGauge(models, cfg, cfg.image_dir, opt.verbose, map_gauge);
     recolorPoints(models, cfg);
     splitCamerasBySize(models, feats);
-    if (!output.empty()) writeModels(models, output, opt.verbose, map_gauge, &rigs);
+    if (feature_plan) {
+        validateFeaturePlanInputs(*feature_plan, cfg.image_dir, cfg.mask_dir);
+        const fs::path destination = fs::absolute(fs::u8path(output));
+        const fs::path staging = fs::u8path(
+            destination.string() + ".import-" +
+            feature_plan->digest.substr(0, 12));
+        std::error_code error;
+        fs::remove_all(staging, error);
+        writeModels(models, staging, opt.verbose, map_gauge, &rigs);
+        fs::rename(staging, destination, error);
+        if (error)
+            throw std::runtime_error("cannot publish sparse model: " +
+                                     error.message());
+    } else if (!output.empty()) {
+        writeModels(models, output, opt.verbose, map_gauge, &rigs);
+    }
     return map_metric ? 0 : 4;
 }
 
@@ -1168,7 +1690,9 @@ int spirula_sfm_main(int argc, char** argv) {
     app::set_program_name(argc > 0 ? argv[0] : nullptr, "spirula sfm");
     kProgram = app::program_name().c_str();
     std::signal(SIGINT, sfmOnInterrupt);
-    sfm::cancel::set_token(&g_interrupted);
+    g_interrupted.store(false);
+    sfm::cancel::set_token(g_external_interrupt ? g_external_interrupt
+                                                : &g_interrupted);
     if (argc < 2) {
         printTopHelp(stderr);
         return 1;
@@ -1219,6 +1743,9 @@ int spirula_sfm_main(int argc, char** argv) {
     // who typed the command, not by a terminate handler.
     try {
         if (cmd == "auto") return cmdAuto(argc - 2, argv + 2);
+        if (cmd == "plan") return cmdPlan(argc - 2, argv + 2);
+        if (cmd == "request") return cmdRequest(argc - 2, argv + 2);
+        if (cmd == "collect") return cmdCollect(argc - 2, argv + 2);
         if (cmd == "extract") return cmdExtract(argc - 2, argv + 2);
         if (cmd == "match") return cmdMatch(argc - 2, argv + 2);
         if (cmd == "map") return cmdMap(argc - 2, argv + 2);

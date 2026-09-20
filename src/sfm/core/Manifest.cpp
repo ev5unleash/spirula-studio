@@ -4,7 +4,7 @@
 
 #include "data/Yaml.h"
 #include "sfm/core/CameraSetup.h"
-
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 
@@ -171,9 +171,17 @@ Manifest manifest_read(const std::string& path) {
                 mc.fps = v->num;
             }
             if (const JsonValue* v = c.find("time_offset")) {
-                if (v->type != JsonValue::Type::Number) bad(path, "time_offset: expected a number");
+                if (v->type != JsonValue::Type::Number || !std::isfinite(v->num))
+                    bad(path, "time_offset: expected a finite number");
                 mc.time_offset = v->num;
             }
+            if (const JsonValue* v = c.find("source_export_mapping"))
+                mc.source_export_mapping = str_of(*v, path, "source_export_mapping");
+            if (const JsonValue* v = c.find("timing_estimate"))
+                mc.timing_estimate = str_of(*v, path, "timing_estimate");
+            if (const JsonValue* v = c.find("synchronization_decision"))
+                mc.synchronization_decision = str_of(*v, path, "synchronization_decision");
+            if (!mc.timing_estimate.empty()) mc.time_offset = 0;
             m.captures.push_back(std::move(mc));
         }
     }
@@ -274,7 +282,15 @@ std::string manifest_write(const Manifest& m, bool json) {
             e.obj.emplace_back("prefix", text(c.prefix));
             e.obj.emplace_back("telemetry", text(c.telemetry));
             if (c.fps > 0) e.obj.emplace_back("fps", number(c.fps));
-            if (c.time_offset != 0) e.obj.emplace_back("time_offset", number(c.time_offset));
+            if (c.time_offset != 0 && c.timing_estimate.empty())
+                e.obj.emplace_back("time_offset", number(c.time_offset));
+            if (!c.source_export_mapping.empty())
+                e.obj.emplace_back("source_export_mapping", text(c.source_export_mapping));
+            if (!c.timing_estimate.empty())
+                e.obj.emplace_back("timing_estimate", text(c.timing_estimate));
+            if (!c.synchronization_decision.empty())
+                e.obj.emplace_back("synchronization_decision",
+                                   text(c.synchronization_decision));
             caps.arr.push_back(std::move(e));
         }
         root.obj.emplace_back("captures", std::move(caps));
@@ -331,7 +347,9 @@ std::string manifest_apply(const Manifest& m, SfmConfig& cfg,
         cfg.camera.overrides.push_back(o);
     }
     for (const ManifestCapture& c : m.captures)
-        cfg.telemetry_inputs.push_back({c.prefix, resolve(c.telemetry, base), c.fps, c.time_offset});
+        cfg.telemetry_inputs.push_back({c.prefix, resolve(c.telemetry, base), c.fps,
+                                        c.time_offset, c.source_export_mapping,
+                                        c.timing_estimate, c.synchronization_decision});
     for (const RigDef& r : m.rigs) cfg.rigs.push_back(r);
     return {};
 }

@@ -5,6 +5,7 @@
 #include "app/Subprocess.h"
 #include "checkpoint/Resume.h"
 #include "data/Json.h"
+#include "data/ProjectManifest.h"
 
 #include <algorithm>
 #include <chrono>
@@ -70,6 +71,15 @@ std::string json_escape(const std::string& s) {
 }
 
 std::string quote(const std::string& s) { return "\"" + json_escape(s) + "\""; }
+std::string string_array_json(const std::vector<std::string>& values) {
+    std::string out = "[";
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i) out += ',';
+        out += quote(values[i]);
+    }
+    out += ']';
+    return out;
+}
 
 uint64_t nonce() {
     static std::mt19937_64 rng{std::random_device{}()};
@@ -234,7 +244,7 @@ void set_arg_value(std::vector<std::string>& args, const char* key, const std::s
 void bind_prep_masks(std::vector<std::string>& args,
                      const std::vector<std::string>& prep_outputs) {
     const std::string mask_dir =
-        prep_outputs.size() > 1 ? prep_outputs[1] : std::string();
+        app::resolve_prep_outputs({}, prep_outputs).mask_dir;
     const bool have_masks = !mask_dir.empty();
     bool explicit_no_masks = false;
     bool flip_mask = false;
@@ -312,6 +322,7 @@ bool validate_output(const Job& job, const std::string& output,
 
 bool validate_phase_result(const Job& job, const Phase& phase,
                            const app::worker::Result& result,
+                           const FeatureResultValidator& feature_validator,
                            std::string& error) {
     const bool usable = result.outcome == "success" ||
                         result.outcome == "partial" ||
@@ -344,6 +355,20 @@ bool validate_phase_result(const Job& job, const Phase& phase,
         }
         if (!validate_output(job, sparse, error)) return false;
     }
+    if (phase.phase == "sfm-extract") {
+        if (result.outputs.size() != 1) {
+            error = "SfM extraction worker produced no unique result directory";
+            return false;
+        }
+        if (!validate_output(job, result.outputs.front(), error))
+            return false;
+        if (!feature_validator) {
+            error = "SfM extraction result validator is unavailable";
+            return false;
+        }
+        if (!feature_validator(job, phase, result.outputs.front(), error))
+            return false;
+    }
     if (phase.phase == "geometry" && result.outputs.empty()) {
         error = "geometry worker produced no validated output";
         return false;
@@ -352,6 +377,79 @@ bool validate_phase_result(const Job& job, const Phase& phase,
         if (!validate_output(job, output, error)) return false;
     return true;
 }
+
+void append_rebind_output(std::vector<fs::path>& outputs,
+                          const std::string& value,
+                          const fs::path& work_dir) {
+    if (value.empty()) return;
+    fs::path path = fs::u8path(value);
+    if (path.is_relative()) path = work_dir / path;
+    std::error_code ec;
+    path = fs::canonical(path, ec);
+    if (ec)
+        throw std::runtime_error("cannot resolve worker output: " +
+                                 path.u8string() + ": " + ec.message());
+    const std::string key = canonical_claim_path(path.u8string());
+    for (const fs::path& existing : outputs)
+        if (canonical_claim_path(existing.u8string()) == key) return;
+    outputs.push_back(std::move(path));
+}
+
+bool path_inside(const fs::path& root, const fs::path& path) {
+    const fs::path normalized_root =
+        fs::u8path(canonical_claim_path(root.u8string()));
+    const fs::path normalized_path =
+        fs::u8path(canonical_claim_path(path.u8string()));
+    if (normalized_root.empty() || normalized_path.empty()) return false;
+    auto parent = normalized_root.begin();
+    auto child = normalized_path.begin();
+    for (; parent != normalized_root.end() && child != normalized_path.end();
+         ++parent, ++child) {
+        if (*parent != *child) return false;
+    }
+    return parent == normalized_root.end() && child != normalized_path.end();
+}
+
+bool rebind_project_reference(
+    const Job& job, const Phase& phase, const app::worker::Result& result,
+    bool outputs_consumed, bool publish_outputs,
+    app::worker::ProjectReference& rebound, std::string& error) {
+    if (job.project_root.empty()) {
+        rebound = static_cast<const app::worker::ProjectReference&>(job);
+        return true;
+    }
+    try {
+        const fs::path root = fs::canonical(fs::u8path(job.project_root));
+        std::vector<fs::path> outputs;
+        for (const std::string& output : result.outputs)
+            append_rebind_output(outputs, output, fs::u8path(job.work_dir));
+        if (phase.phase == "sfm")
+            append_rebind_output(
+                outputs,
+                result.sparse_path.empty() ? phase.output : result.sparse_path,
+                fs::u8path(job.work_dir));
+        else if (phase.phase == "prep" && result.outputs.empty())
+            append_rebind_output(outputs, phase.output, fs::u8path(job.work_dir));
+        else if (phase.phase == "train")
+            append_rebind_output(outputs, job.output_dir, fs::u8path(job.work_dir));
+
+        std::vector<fs::path> artifacts;
+        for (const fs::path& output : outputs)
+            if (path_inside(root, output))
+                artifacts.push_back(output);
+        const spirula::project::ProjectRevision revision =
+            spirula::project::migrate_legacy_workspace(
+                root, outputs_consumed ? outputs : std::vector<fs::path>{},
+                publish_outputs ? artifacts : std::vector<fs::path>{});
+        rebound = app::worker::make_project_reference(root.u8string(),
+                                                       revision.name);
+        return true;
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    }
+}
+
 
 std::string phase_json(const Phase& p) {
     std::ostringstream out;
@@ -397,7 +495,13 @@ void write_request_file(const app::worker::Request& r, const fs::path& path) {
     std::ofstream f(path, std::ios::binary | std::ios::trunc);
     if (!f) throw std::runtime_error("cannot write request file");
     f << "{\n"
-      << "  \"schema_version\": 2,\n"
+      << "  \"schema_version\": " << r.schema_version << ",\n"
+      << "  \"project_root\": " << quote(r.project_root) << ",\n"
+      << "  \"project_revision\": " << quote(r.project_revision) << ",\n"
+      << "  \"project_revision_digest\": "
+      << quote(r.project_revision_digest) << ",\n"
+      << "  \"metadata_paths\": " << string_array_json(r.metadata_paths) << ",\n"
+      << "  \"artifact_paths\": " << string_array_json(r.artifact_paths) << ",\n"
       << "  \"job_id\": " << quote(r.job_id) << ",\n"
       << "  \"attempt_id\": " << quote(r.attempt_id) << ",\n"
       << "  \"phase\": " << quote(r.phase) << ",\n"
@@ -406,9 +510,8 @@ void write_request_file(const app::worker::Request& r, const fs::path& path) {
       << "  \"work_dir\": " << quote(r.work_dir) << ",\n"
       << "  \"workspace\": " << quote(r.workspace) << ",\n"
       << "  \"result_path\": " << quote(r.result_path) << ",\n"
-      << "  \"args\": [";
-    for (size_t i = 0; i < r.args.size(); ++i) f << (i ? ", " : "") << quote(r.args[i]);
-    f << "],\n  \"payload\": " << quote(r.payload) << "\n}\n";
+      << "  \"args\": " << string_array_json(r.args) << ",\n"
+      << "  \"payload\": " << quote(r.payload) << "\n}\n";
     f.flush();
     if (!f) throw std::runtime_error("cannot flush request file");
 }
@@ -572,6 +675,12 @@ void JobScheduler::set_event_callback(std::function<void(const Event&)> cb) {
     std::lock_guard<std::mutex> lk(_mu); _on_event = std::move(cb);
 }
 
+void JobScheduler::set_feature_result_validator(
+    FeatureResultValidator validator) {
+    std::lock_guard<std::mutex> lk(_mu);
+    _feature_result_validator = std::move(validator);
+}
+
 void JobScheduler::drain_events() {
     std::deque<Event> events; std::function<void(const Event&)> cb;
     { std::lock_guard<std::mutex> lk(_mu); cb = _on_event; events.swap(_events); }
@@ -592,9 +701,10 @@ bool JobScheduler::valid_phase_order(const std::vector<Phase>& phases, std::stri
     if (phases.empty()) { error = "workflow has no phases"; return false; }
     int previous = -1;
     for (const Phase& p : phases) {
-        int rank = p.phase == "prep" ? 0 : p.phase == "sfm" ? 1 :
-                   p.phase == "geometry" ? 2 : p.phase == "train" ? 3 :
-                   p.phase == "publish" ? 4 : -1;
+        int rank = p.phase == "prep" ? 0 :
+                   p.phase == "sfm-extract" ? 1 :
+                   p.phase == "sfm" ? 2 : p.phase == "geometry" ? 3 :
+                   p.phase == "train" ? 4 : p.phase == "publish" ? 5 : -1;
         if (rank < 0) { error = "unsupported workflow phase: " + p.phase; return false; }
         if (rank <= previous) { error = "workflow phases are not ordered"; return false; }
         previous = rank;
@@ -616,10 +726,11 @@ static bool migrate_legacy_publish_order(std::vector<Phase>& phases) {
     int previous = -1;
     for (const Phase& phase : phases) {
         const int rank = phase.phase == "prep" ? 0 :
-                         phase.phase == "sfm" ? 1 :
-                         phase.phase == "geometry" ? 2 :
-                         phase.phase == "train" ? 3 :
-                         phase.phase == "publish" ? 4 : -1;
+                         phase.phase == "sfm-extract" ? 1 :
+                         phase.phase == "sfm" ? 2 :
+                         phase.phase == "geometry" ? 3 :
+                         phase.phase == "train" ? 4 :
+                         phase.phase == "publish" ? 5 : -1;
         if (rank <= previous || (phase.phase == "publish" && phase.optional))
             return false;
         previous = rank;
@@ -675,22 +786,30 @@ bool JobScheduler::acquire_claim_leases_locked(const Job& job,
     _claim_leases[job.job_id] = std::move(leases);
     return true;
 }
-
 void JobScheduler::release_claim_leases_locked(const std::string& job_id) {
     _claim_leases.erase(job_id);
 }
-
 std::string JobScheduler::submit(const SubmitOpts& o) {
     if (o.device.empty() || o.device == "auto") return {};
     WorkflowSubmitOpts w;
+    static_cast<app::worker::ProjectReference&>(w) =
+        static_cast<const app::worker::ProjectReference&>(o);
     w.work_dir = o.work_dir;
     w.path_claims = o.path_claims;
-    if (!o.output_dir.empty()) w.path_claims.push_back({o.output_dir, true});
+    auto add_claim = [&](const PathClaim& claim) {
+        const std::string key = canonical_claim_path(claim.path);
+        for (const PathClaim& existing : w.path_claims)
+            if (existing.write == claim.write &&
+                canonical_claim_path(existing.path) == key)
+                return;
+        w.path_claims.push_back(claim);
+    };
+    if (!o.output_dir.empty()) add_claim({o.output_dir, true});
     for (const char* key : {"--data", "--resume"}) {
         const std::string source = arg_value(o.args, key);
         if (!source.empty()) {
             w.source_paths.push_back(source);
-            w.path_claims.push_back({source, false});
+            add_claim({source, false});
         }
     }
     Phase p;
@@ -703,6 +822,13 @@ std::string JobScheduler::submit(const SubmitOpts& o) {
 
 std::string JobScheduler::submit(const WorkflowSubmitOpts& o) {
     if (o.phases.empty()) return {};
+    try {
+        app::worker::validate_project_reference(
+            static_cast<const app::worker::ProjectReference&>(o));
+    } catch (...) {
+        return {};
+    }
+
     std::vector<Phase> phases = o.phases;
     bool publish_seen = false;
     for (const Phase& phase : phases)
@@ -715,6 +841,8 @@ std::string JobScheduler::submit(const WorkflowSubmitOpts& o) {
     std::string phase_error;
     if (!valid_phase_order(phases, phase_error)) return {};
     auto j = std::make_shared<Job>();
+    static_cast<app::worker::ProjectReference&>(*j) =
+        static_cast<const app::worker::ProjectReference&>(o);
     j->job_id = new_job_id();
     std::error_code cwd_ec;
     const fs::path cwd = fs::current_path(cwd_ec);
@@ -739,6 +867,20 @@ std::string JobScheduler::submit(const WorkflowSubmitOpts& o) {
     j->options_payload = o.options_payload;
     j->phases = std::move(phases);
     j->path_claims = o.path_claims;
+    if (!j->project_root.empty()) {
+        const fs::path project_root = fs::u8path(j->project_root);
+        auto add_project_claim = [&](const std::string& relative) {
+            const std::string path = canonical_claim_path(
+                (project_root / fs::u8path(relative)).u8string());
+            for (const PathClaim& claim : j->path_claims)
+                if (canonical_claim_path(claim.path) == path) return;
+            j->path_claims.push_back({path, false});
+        };
+        for (const std::string& path : j->metadata_paths)
+            add_project_claim(path);
+        for (const std::string& path : j->artifact_paths)
+            add_project_claim(path);
+    }
     for (Phase& phase : j->phases) {
         if (phase.phase == "train") {
             set_arg_value(phase.args, "--output-dir-name", j->job_id);
@@ -924,6 +1066,14 @@ void JobScheduler::retry(const std::string& job_id) {
         auto jit = _jobs.find(job_id); if (jit == _jobs.end()) return;
         Job& j = *jit->second;
         if (j.state != JobState::Interrupted && j.state != JobState::Failed && j.state != JobState::Stopped && j.state != JobState::Blocked) return;
+        try {
+            app::worker::validate_project_reference(
+                static_cast<const app::worker::ProjectReference&>(j));
+        } catch (const std::exception& e) {
+            transition_locked(j, JobState::Blocked, e.what());
+            save_locked();
+            return;
+        }
         std::string claim_error;
         if (!claim_paths_locked(j, claim_error) ||
             !acquire_claim_leases_locked(j, claim_error)) {
@@ -973,18 +1123,24 @@ bool JobScheduler::save_locked() {
     {
         std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
         if (!f) return fail("cannot write scheduler state");
-        f << "{\n  \"schema_version\": 2,\n  \"jobs\": [\n";
+        f << "{\n  \"schema_version\": 3,\n  \"jobs\": [\n";
         bool first_job = true;
         for (const auto& [_, jp] : _jobs) {
             const Job& j = *jp;
             if (!first_job) f << ",\n"; first_job = false;
             f << "    {\"order\":" << j.order << ",\"job_id\":" << quote(j.job_id)
+              << ",\"project_root\":" << quote(j.project_root)
+              << ",\"project_revision\":" << quote(j.project_revision)
+              << ",\"project_revision_digest\":"
+              << quote(j.project_revision_digest)
+              << ",\"metadata_paths\":" << string_array_json(j.metadata_paths)
+              << ",\"artifact_paths\":" << string_array_json(j.artifact_paths)
               << ",\"phase\":" << quote(j.phase) << ",\"device\":" << quote(j.device)
               << ",\"device_name\":" << quote(j.device_name) << ",\"work_dir\":" << quote(j.work_dir)
               << ",\"run_dir\":" << quote(j.run_dir) << ",\"output_dir\":" << quote(j.output_dir)
-              << ",\"workspace\":" << quote(j.workspace) << ",\"source_paths\":[";
-            for (size_t i = 0; i < j.source_paths.size(); ++i) f << (i ? "," : "") << quote(j.source_paths[i]);
-            f << "],\"options_payload\":" << quote(j.options_payload)
+              << ",\"workspace\":" << quote(j.workspace) << ",\"source_paths\":"
+              << string_array_json(j.source_paths);
+            f << ",\"options_payload\":" << quote(j.options_payload)
               << ",\"created_at\":" << quote(j.created_at) << ",\"state\":" << quote(to_string(j.state))
               << ",\"attempt_id\":" << quote(j.attempt_id) << ",\"error\":" << quote(j.error)
               << ",\"pending_resume\":" << (j.pending_resume ? "true" : "false")
@@ -1028,7 +1184,11 @@ void JobScheduler::load() {
         if (root.type != JsonValue::Type::Object) { error = "scheduler state root is not an object"; return false; }
         try {
         const JsonValue* schema = root.find("schema_version");
-        if (!schema || schema->type != JsonValue::Type::Number || !finite_integer(schema->num) || (schema->num != 1 && schema->num != 2)) { error = "unsupported scheduler state schema"; return false; }
+        if (!schema || schema->type != JsonValue::Type::Number || !finite_integer(schema->num) ||
+            (schema->num != 1 && schema->num != 2 && schema->num != 3)) {
+            error = "unsupported scheduler state schema";
+            return false;
+        }
         loaded_schema = (int)schema->num;
         const JsonValue* jobs = root.find("jobs");
         if (!jobs || jobs->type != JsonValue::Type::Array) { error = "scheduler state has no jobs array"; return false; }
@@ -1039,12 +1199,17 @@ void JobScheduler::load() {
             const std::string id = string_field(el, "job_id");
             if (!finite_integer(order) || order < 0 || order >= std::ldexp(1.0, 64) || !ids.insert(id).second || !orders.insert((uint64_t)order).second) { error = "scheduler state has an invalid job"; return false; }
             const std::string phase = string_field(el, "phase");
-            if (phase != "prep" && phase != "sfm" && phase != "geometry" && phase != "publish" && phase != "train") { error = "scheduler state has an invalid job"; return false; }
-            if (string_field(el, "device").empty() || raw_string_field(el, "run_dir").empty() || string_field(el, "created_at").empty()) { error = "scheduler state has an invalid job"; return false; }
+            if (phase != "prep" && phase != "sfm-extract" && phase != "sfm" && phase != "geometry" && phase != "publish" && phase != "train") { error = "scheduler state has an invalid job"; return false; }
             const std::string state = string_field(el, "state"); try { state_from_string(state); } catch (...) { error = "scheduler state has an invalid job"; return false; }
             if (!finite_integer(number_field(el, "last_exit_code"))) { error = "scheduler state has an invalid job"; return false; }
-            (void)string_array(el, "args");
-            if (loaded_schema == 2) {
+            if (loaded_schema >= 2) {
+                if (loaded_schema == 3) {
+                    (void)string_field(el, "project_revision_digest");
+                    (void)string_field(el, "project_root");
+                    (void)string_field(el, "project_revision");
+                    (void)string_array(el, "metadata_paths");
+                    (void)string_array(el, "artifact_paths");
+                }
                 const JsonValue* phases = el.find("phases");
                 if (!phases || phases->type != JsonValue::Type::Array || phases->arr.empty()) { error = "scheduler state has no phases"; return false; }
                 const double completed = number_field(el, "completed_prefix");
@@ -1064,7 +1229,23 @@ void JobScheduler::load() {
                     error = "scheduler state has invalid phase order";
                     return false;
                 }
-                (void)path_array(el, "source_paths", false);
+                const std::string persisted_root =
+                    string_field(el, "project_root", false);
+                const std::string persisted_revision =
+                    string_field(el, "project_revision", false);
+                const std::string persisted_digest =
+                    string_field(el, "project_revision_digest", false);
+                const std::vector<std::string> persisted_metadata =
+                    string_array(el, "metadata_paths", false);
+                const std::vector<std::string> persisted_artifacts =
+                    string_array(el, "artifact_paths", false);
+                if (loaded_schema == 2 &&
+                    (!persisted_root.empty() || !persisted_revision.empty() ||
+                     !persisted_digest.empty() || !persisted_metadata.empty() ||
+                     !persisted_artifacts.empty())) {
+                    error = "scheduler state project reference requires schema 3";
+                    return false;
+                }
                 const JsonValue* claims = el.find("path_claims");
                 if (!claims || claims->type != JsonValue::Type::Array) { error = "scheduler state has invalid path claims"; return false; }
                 for (const JsonValue& c : claims->arr) { if (c.type != JsonValue::Type::Object || raw_string_field(c, "path").empty() || c.find("write") == nullptr) { error = "scheduler state has invalid path claim"; return false; } (void)bool_field(c, "write"); }
@@ -1084,17 +1265,26 @@ void JobScheduler::load() {
     if (!found_state) { std::lock_guard<std::mutex> lk(_mu); _state_error = load_error.empty() ? "cannot load scheduler state" : load_error; _paused.store(true); return; }
     const JsonValue* jobs = root.find("jobs");
     std::lock_guard<std::mutex> lk(_mu);
-    bool load_changed = loaded_schema == 1;
+    bool load_changed = loaded_schema < 3;
     for (const JsonValue& el : jobs->arr) {
         auto j = std::make_shared<Job>();
         j->order = (uint64_t)number_field(el, "order"); _next_order = std::max(_next_order, j->order + 1);
-        j->job_id = string_field(el, "job_id"); j->phase = string_field(el, "phase"); j->device = string_field(el, "device");
+        j->job_id = string_field(el, "job_id");
+        if (loaded_schema >= 2) {
+            j->project_root = string_field(el, "project_root", false);
+            j->project_revision = string_field(el, "project_revision", false);
+            j->project_revision_digest =
+                string_field(el, "project_revision_digest", false);
+            j->metadata_paths = string_array(el, "metadata_paths", false);
+            j->artifact_paths = string_array(el, "artifact_paths", false);
+        }
+        j->phase = string_field(el, "phase"); j->device = string_field(el, "device");
         j->device_name = string_field(el, "device_name", false); j->work_dir = raw_string_field(el, "work_dir"); j->run_dir = raw_string_field(el, "run_dir");
         j->output_dir = raw_string_field(el, "output_dir"); j->workspace = raw_string_field(el, "workspace", false); j->source_paths = path_array(el, "source_paths", false);
         j->options_payload = string_field(el, "options_payload", false); j->created_at = string_field(el, "created_at"); j->attempt_id = string_field(el, "attempt_id"); j->error = string_field(el, "error");
         j->args = string_array(el, "args");
         j->last_exit_code = int_field(el, "last_exit_code");
-        j->pending_resume = loaded_schema == 2 ? bool_field(el, "pending_resume") : false;
+        j->pending_resume = loaded_schema >= 2 ? bool_field(el, "pending_resume") : false;
         const JobState loaded_job_state = state_from_string(string_field(el, "state"));
         if (loaded_schema == 1) {
             Phase p; p.phase = j->phase; p.planned_device = j->device; p.planned_device_name = j->device_name; p.actual_device = j->device; p.actual_device_name = j->device_name; p.output = j->output_dir; p.args = j->args;
@@ -1142,8 +1332,21 @@ void JobScheduler::load() {
             load_changed = true;
         }
         std::string path_error, normalized;
-        bool paths_ok = normalize_path(j->work_dir, fs::u8path(_config_dir),
-                                       normalized, path_error, true);
+        bool paths_ok = true;
+        if (!j->project_root.empty() || !j->project_revision.empty() ||
+            !j->project_revision_digest.empty() ||
+            !j->metadata_paths.empty() || !j->artifact_paths.empty()) {
+            try {
+                app::worker::validate_project_reference(
+                    static_cast<const app::worker::ProjectReference&>(*j));
+            } catch (const std::exception& e) {
+                paths_ok = false;
+                path_error = e.what();
+            }
+        }
+        if (paths_ok)
+            paths_ok = normalize_path(j->work_dir, fs::u8path(_config_dir),
+                                      normalized, path_error, true);
         if (paths_ok) j->work_dir = normalized;
         if (paths_ok) {
             paths_ok = normalize_path(j->run_dir, fs::u8path(_config_dir),
@@ -1185,6 +1388,23 @@ void JobScheduler::load() {
                                           normalized, path_error);
                 if (paths_ok) output = normalized;
             }
+        }
+        if (paths_ok && !j->project_root.empty()) {
+            const fs::path project_root = fs::u8path(j->project_root);
+            auto add_project_claim = [&](const std::string& relative) {
+                const std::string path =
+                    canonical_claim_path((project_root / fs::u8path(relative)).u8string());
+                bool present = false;
+                for (const PathClaim& claim : j->path_claims)
+                    present = present ||
+                        canonical_claim_path(claim.path) == path;
+                if (!present) {
+                    j->path_claims.push_back({path, false});
+                    load_changed = true;
+                }
+            };
+            for (const std::string& path : j->metadata_paths) add_project_claim(path);
+            for (const std::string& path : j->artifact_paths) add_project_claim(path);
         }
         if (!paths_ok) {
             load_changed = true;
@@ -1337,6 +1557,18 @@ void JobScheduler::dispatch_one() {
                 if (p.phase != "publish" && (_leases.count(p.planned_device) || p.planned_device == _foreground_device)) continue;
                 std::string claim_error;
                 if (!claim_paths_locked(candidate_job, claim_error)) { _queue.erase(_queue.begin() + (ptrdiff_t)i); p.error = claim_error; transition_locked(candidate_job, JobState::Blocked, claim_error); release_claim_leases_locked(candidate_job.job_id); save_locked(); discarded = true; break; }
+                try {
+                    app::worker::validate_project_reference(
+                        static_cast<const app::worker::ProjectReference&>(candidate_job));
+                } catch (const std::exception& e) {
+                    _queue.erase(_queue.begin() + (ptrdiff_t)i);
+                    p.error = e.what();
+                    transition_locked(candidate_job, JobState::Blocked, p.error);
+                    release_claim_leases_locked(candidate_job.job_id);
+                    save_locked();
+                    discarded = true;
+                    break;
+                }
                 if (p.phase != "publish" && (p.planned_device.empty() || p.planned_device == "auto")) { _queue.erase(_queue.begin() + (ptrdiff_t)i); p.error = "device must be resolved before dispatch"; transition_locked(candidate_job, JobState::Blocked, p.error); release_claim_leases_locked(candidate_job.job_id); save_locked(); discarded = true; break; }
                 if (p.phase != "publish" && _device_validator) {
                     std::string error; bool valid = false; try { valid = _device_validator(p.planned_device, error); } catch (const std::exception& e) { error = e.what(); }
@@ -1394,6 +1626,7 @@ void JobScheduler::dispatch_one() {
 void JobScheduler::supervisor_main(std::shared_ptr<Attempt> att) {
     std::shared_ptr<Job> j;
     Phase phase;
+    FeatureResultValidator feature_validator;
     std::vector<std::string> prep_outputs;
     bool completed_prep = false;
     {
@@ -1406,6 +1639,7 @@ void JobScheduler::supervisor_main(std::shared_ptr<Attempt> att) {
         }
         j = it->second;
         phase = j->phases[att->phase_index];
+        feature_validator = _feature_result_validator;
         if (phase.phase == "sfm" && att->phase_index > 0) {
             const Phase& prep = j->phases[att->phase_index - 1];
             if (prep.phase == "prep" && prep.completed) {
@@ -1420,8 +1654,26 @@ void JobScheduler::supervisor_main(std::shared_ptr<Attempt> att) {
         }
     }
     const fs::path run_dir = fs::u8path(j->run_dir); const fs::path req_path = run_dir / ("request-" + att->id + ".json"); const fs::path res_path = run_dir / ("result-" + att->id + ".json"); const fs::path log_path = run_dir / ("log-" + att->id + ".txt");
-    app::worker::Request request; request.schema_version = 2; request.request_path = req_path.u8string(); request.job_id = j->job_id; request.attempt_id = att->id; request.phase = phase.phase; request.device = phase.planned_device; request.device_name = phase.planned_device_name; request.work_dir = j->work_dir; request.workspace = j->workspace; request.result_path = res_path.u8string(); request.args = phase.args; request.payload = phase.payload;
-    try { if (completed_prep) bind_prep_masks(request.args, prep_outputs); write_request_file(request, req_path); app::worker::validate_request(request); }
+    app::worker::Request request;
+    request.schema_version = j->project_root.empty() ? 2 : 3;
+    static_cast<app::worker::ProjectReference&>(request) =
+        static_cast<const app::worker::ProjectReference&>(*j);
+    request.request_path = req_path.u8string();
+    request.job_id = j->job_id;
+    request.attempt_id = att->id;
+    request.phase = phase.phase;
+    request.device = phase.planned_device;
+    request.device_name = phase.planned_device_name;
+    request.work_dir = j->work_dir;
+    request.workspace = j->workspace;
+    request.result_path = res_path.u8string();
+    request.args = phase.args;
+    request.payload = phase.payload;
+    try {
+        if (completed_prep) bind_prep_masks(request.args, prep_outputs);
+        app::worker::validate_request(request);
+        write_request_file(request, req_path);
+    }
     catch (const std::exception& e) { std::lock_guard<std::mutex> lk(_mu); if (att->phase_index < j->phases.size()) { j->phases[att->phase_index].outcome = "failed"; j->phases[att->phase_index].error = e.what(); } transition_locked(*j, JobState::Failed, e.what()); _leases.erase(phase.planned_device); release_claim_leases_locked(j->job_id); att->finished.store(true); save_locked(); _cv.notify_all(); return; }
     std::ofstream log_file(log_path, std::ios::binary | std::ios::trunc);
     proc::ProcessOptions opts; opts.argv = {_exe_path, "worker", "--request", req_path.u8string()}; opts.cwd = j->work_dir; opts.cancel = &att->cancel; opts.stop = &att->stop; opts.stop_token = "STOP\n"; opts.grace_period_ms = phase.phase == "train" ? 300000 : 30000; opts.env_overrides = {{"SS_WORKER_CONTROL", "1"}, {"SS_CRASH_DIR", j->run_dir}, {"SS_STATE_LOCK_HELD", "1"}};
@@ -1451,7 +1703,32 @@ void JobScheduler::supervisor_main(std::shared_ptr<Attempt> att) {
     try { result = app::worker::parse_result(res_path.u8string()); result_ok = result.job_id == att->job_id && result.attempt_id == att->id && result.phase == phase.phase; if (result_ok) { message = result.message.empty() ? message : result.message; exit_code = result.exit_code; } } catch (...) {}
     std::string artifact_error;
     if (result_ok && (result.outcome == "success" || result.outcome == "partial" || result.outcome == "nonmetric")) {
-        if (!validate_phase_result(*j, phase, result, artifact_error)) { result_ok = false; message = artifact_error; }
+        if (!validate_phase_result(*j, phase, result, feature_validator,
+                                   artifact_error)) {
+            result_ok = false;
+            message = artifact_error;
+        }
+    }
+    const bool has_next_phase = att->phase_index + 1 < j->phases.size();
+    const bool outputs_consumed =
+        has_next_phase && j->phases[att->phase_index + 1].phase != "publish";
+    const bool publish_outputs =
+        has_next_phase && j->phases[att->phase_index + 1].phase == "publish";
+    const bool needs_rebind = outputs_consumed || publish_outputs;
+    app::worker::ProjectReference rebound_reference;
+    const bool successful_result =
+        result_ok &&
+        (result.outcome == "success" || result.outcome == "partial" ||
+         result.outcome == "nonmetric") &&
+        process.outcome == proc::ProcessOutcome::Success &&
+        (exit_code == 0 || (phase.phase == "sfm" &&
+                            (exit_code == 3 || exit_code == 4)));
+    if (successful_result && needs_rebind &&
+        !rebind_project_reference(*j, phase, result, outputs_consumed,
+                                  publish_outputs, rebound_reference,
+                                  artifact_error)) {
+        result_ok = false;
+        message = "project reference rebind failed: " + artifact_error;
     }
     {
         std::lock_guard<std::mutex> lk(_mu); auto it = _jobs.find(att->job_id);
@@ -1460,7 +1737,48 @@ void JobScheduler::supervisor_main(std::shared_ptr<Attempt> att) {
             const bool cancelled = process.outcome == proc::ProcessOutcome::Cancelled; const bool stopped = process.outcome == proc::ProcessOutcome::Stopped; const bool spawn = process.outcome == proc::ProcessOutcome::SpawnFailed;
             if (cancelled) { saved.outcome = "interrupted"; saved.error = "force-stopped"; transition_locked(job, JobState::Interrupted, saved.error); job.pending_resume = true; }
             else if (result_ok && (result.outcome == "success" || result.outcome == "partial" || result.outcome == "nonmetric") && process.outcome == proc::ProcessOutcome::Success && (exit_code == 0 || (phase.phase == "sfm" && (exit_code == 3 || exit_code == 4)))) {
-                saved.outcome = result.outcome; saved.completed = true; saved.error.clear(); saved.outputs = result.outputs; if (!result.sparse_path.empty()) { saved.output = result.sparse_path; saved.outputs.push_back(result.sparse_path); } job.completed_prefix = std::max(job.completed_prefix, att->phase_index + 1); job.current_phase = att->phase_index + 1; job.attempt_id.clear(); job.pending_resume = false; if (advance_local_phase_locked(job)) { if (job.state != JobState::Succeeded) { job.state = JobState::Queued; _queue.push_back(job.job_id); } else release_claim_leases_locked(job.job_id); queue_event_locked(job); } else { saved.error = "workflow could not advance"; transition_locked(job, JobState::Failed, saved.error); release_claim_leases_locked(job.job_id); }
+                if (needs_rebind && !job.project_root.empty()) {
+                    static_cast<app::worker::ProjectReference&>(job) =
+                        rebound_reference;
+                    const fs::path project_root = fs::u8path(job.project_root);
+                    auto add_project_claim = [&](const std::string& relative) {
+                        const std::string path = canonical_claim_path(
+                            (project_root / fs::u8path(relative)).u8string());
+                        for (const PathClaim& claim : job.path_claims)
+                            if (canonical_claim_path(claim.path) == path) return;
+                        job.path_claims.push_back({path, false});
+                    };
+                    for (const std::string& path : job.metadata_paths)
+                        add_project_claim(path);
+                    for (const std::string& path : job.artifact_paths)
+                        add_project_claim(path);
+                }
+                saved.outcome = result.outcome;
+                saved.completed = true;
+                saved.error.clear();
+                saved.outputs = result.outputs;
+                if (!result.sparse_path.empty()) {
+                    saved.output = result.sparse_path;
+                    saved.outputs.push_back(result.sparse_path);
+                }
+                job.completed_prefix =
+                    std::max(job.completed_prefix, att->phase_index + 1);
+                job.current_phase = att->phase_index + 1;
+                job.attempt_id.clear();
+                job.pending_resume = false;
+                if (advance_local_phase_locked(job)) {
+                    if (job.state != JobState::Succeeded) {
+                        job.state = JobState::Queued;
+                        _queue.push_back(job.job_id);
+                    } else {
+                        release_claim_leases_locked(job.job_id);
+                    }
+                    queue_event_locked(job);
+                } else {
+                    saved.error = "workflow could not advance";
+                    transition_locked(job, JobState::Failed, saved.error);
+                    release_claim_leases_locked(job.job_id);
+                }
             } else if (result_ok && result.outcome == "stopped" && (process.outcome == proc::ProcessOutcome::Success || stopped)) { saved.outcome = "stopped"; saved.error = result.message; transition_locked(job, JobState::Stopped, saved.error); job.pending_resume = true; }
             else { saved.outcome = spawn ? "spawn_failed" : "failed"; saved.error = message.empty() ? "worker exited " + std::to_string(exit_code) : message; transition_locked(job, JobState::Failed, saved.error); release_claim_leases_locked(job.job_id); }
             job.last_exit_code = exit_code; if (job.current_phase < job.phases.size()) { job.phase = job.phases[job.current_phase].phase; job.device = job.phases[job.current_phase].planned_device; job.device_name = job.phases[job.current_phase].planned_device_name; job.args = job.phases[job.current_phase].args; job.output_dir = job.phases[job.current_phase].output; }

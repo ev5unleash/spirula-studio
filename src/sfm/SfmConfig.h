@@ -53,7 +53,9 @@ enum CmdMask : uint32_t {
     CMD_MATCH   = 1u << 2,
     CMD_MAP     = 1u << 3,
     CMD_MERGE   = 1u << 4,
-    CMD_ALL     = CMD_AUTO | CMD_EXTRACT | CMD_MATCH | CMD_MAP | CMD_MERGE,
+    CMD_PLAN    = 1u << 5,
+    CMD_ALL     = CMD_AUTO | CMD_EXTRACT | CMD_MATCH | CMD_MAP | CMD_MERGE |
+                  CMD_PLAN,
 };
 
 // Basic is what a first-time user has to think about and what the GUI shows
@@ -61,12 +63,14 @@ enum CmdMask : uint32_t {
 // already listed (parsed, but not printed twice or offered to the GUI).
 enum class Tier { Basic, Advanced, Alias };
 
-// One video whose IMU and GPS cover the images under `prefix` ("" = all).
 struct TelemetryInput {
     std::string prefix;
     std::string path;
     double fps = 0;           // stem index -> seconds; 0 = the file's own rate
-    double time_offset = 0;   // seconds added to every frame time
+    double time_offset = 0;   // legacy CLI value; project timing records are authoritative
+    std::string source_export_mapping;
+    std::string timing_estimate;
+    std::string synchronization_decision;
 };
 
 // The aggregate. Sub-option structs are held unchanged so that library callers
@@ -278,9 +282,9 @@ struct SfmConfig {
 // printed that way. Keep the name positive.
 #define SFM_CONFIG_FIELDS(F)                                                                       \
     /* ---- pipeline ---- */                                                                       \
-    F(quality, "quality", CMD_AUTO, Tier::Basic, "pipeline", 0, 0, "low|medium|high|extreme",      \
-      quality)                                                                                     \
-    F(data_type, "data-type", CMD_AUTO, Tier::Basic, "pipeline", 0, 0,                             \
+    F(quality, "quality", CMD_AUTO | CMD_PLAN, Tier::Basic, "pipeline", 0, 0,                     \
+      "low|medium|high|extreme", quality)                                                          \
+    F(data_type, "data-type", CMD_AUTO | CMD_PLAN, Tier::Basic, "pipeline", 0, 0,                 \
       "individual|video|internet", data_type)                                                      \
     F(pairs, "pairs", CMD_AUTO | CMD_MATCH, Tier::Basic, "pipeline", 0, 0,                         \
       "auto|exhaustive|sequential|prefilter", pairs)                                               \
@@ -292,8 +296,10 @@ struct SfmConfig {
       100, "", max_error)                                                                          \
     F(max_image_size, "max-image-size", CMD_AUTO | CMD_EXTRACT, Tier::Advanced, "pipeline", 0,     \
       20000, "", max_image_size)                                                                   \
-    F(mask_dir, "masks", CMD_AUTO | CMD_EXTRACT, Tier::Basic, "pipeline", 0, 0, "", masks)         \
-    F(mask_dir, "mask-dir", CMD_AUTO | CMD_EXTRACT, Tier::Alias, "pipeline", 0, 0, "", mask_dir)   \
+    F(mask_dir, "masks", CMD_AUTO | CMD_EXTRACT | CMD_MAP, Tier::Basic, "pipeline", 0, 0, "",       \
+      masks)                                                                                       \
+    F(mask_dir, "mask-dir", CMD_AUTO | CMD_EXTRACT | CMD_MAP, Tier::Alias, "pipeline", 0, 0, "",   \
+      mask_dir)                                                                                    \
     F(flip_mask, "flip-mask", CMD_AUTO | CMD_EXTRACT, Tier::Advanced, "pipeline", 0, 0, "",        \
       flip_mask)                                                                                   \
     /* ---- colour ---- */                                                                         \
