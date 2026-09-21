@@ -363,7 +363,7 @@ void apply_pano_lens(std::vector<PrepInput>& sources, SfmJob& sfm,
 
 void apply_capture_defaults(std::vector<PrepInput>& sources, SfmJob& sfm,
                             ColmapJob& colmap) {
-    normalize_source_fps(sources, sfm.prep.video_fps);
+    normalize_source_fps(sources, sfm.prep.selection.video_fps);
     if (sources.empty()) return;
     const bool video = sources[0].is_video;
     const bool fisheye = is_dual_fisheye_path(sources[0].path);

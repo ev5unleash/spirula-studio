@@ -58,6 +58,7 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <set>
@@ -131,13 +132,6 @@ bool is_image_file(const fs::path& p) {
            e == ".tif" || e == ".tiff" || e == ".bmp" || e == ".exr";
 }
 
-// Candidates ffmpeg resamples per frame kept. Adaptive selection picks from
-// them, so there have to be enough for the fastest rate it may ask for.
-int candidate_group(const PrepJob& job) {
-    const int window = std::max(job.sharp_window, 1);
-    return job.adaptive_fps ? std::max(window, (int)std::ceil(job.adaptive_range))
-                            : window;
-}
 
 // Throw away what a previous run generated, for a step being re-done. Only
 // under the workspace: photos read where they are belong to the user, and a
@@ -568,9 +562,9 @@ int64_t expected_frames(const PrepJob& job, float fps, double src_fps,
     int64_t expect = src_frames > 0
                          ? (src_frames / frame_skip(fps, src_fps)) * (int64_t)tracks
                          : 0;
-    if (job.max_frames > 0 &&
-        (expect == 0 || expect > (int64_t)job.max_frames * tracks))
-        expect = (int64_t)job.max_frames * tracks;
+    if (job.selection.max_frames > 0 &&
+        (expect == 0 || expect > (int64_t)job.selection.max_frames * tracks))
+        expect = (int64_t)job.selection.max_frames * tracks;
     return expect;
 }
 
@@ -1237,7 +1231,8 @@ bool sync_sidecar_file(const fs::path& path, std::string& error) {
 bool append_fallback_row(PrepCapture& capture, const fs::path& image_root,
                          const FrameSelectOutput& selected,
                          const std::string& original_source_id,
-                         uint32_t stream_index, std::string& error) {
+                         uint32_t stream_index,
+                         std::string& error) {
     try {
         const std::string name = under_root(fs::path(selected.path), image_root)
                                      .generic_string();
@@ -1803,12 +1798,12 @@ bool DatasetPrep::run(const PrepJob& job_in, PrepResult& out, std::string& error
             planned[i] = estimate_frames(job, in, p.images);
             _frames_tally.plan(planned[i]);
         }
-        _plans.assign(job.inputs.size(), std::vector<int64_t>());
+        _plans.assign(job.inputs.size(), app::FramePlan());
         _planned.assign(job.inputs.size(), false);
         // The panel that watches the measuring pass wants the whole list, so
         // a folder of photographs among the clips is a row that says so rather
         // than a gap. A video's length arrives with its first measured step.
-        if (job.adaptive_fps) {
+        if (job.selection.adaptive) {
             std::vector<PrepScanRow> rows(job.inputs.size());
             for (size_t i = 0; i < job.inputs.size(); i++) {
                 rows[i].name = leaf_name(job.inputs[i].path);
@@ -1976,21 +1971,50 @@ bool DatasetPrep::extract_video(const PrepJob& job, const PrepInput& in,
     // Resume: frames are moved into place in one batch after selection, so a
     // non-empty folder means a previous extraction of THIS input finished.
     if (frames_stale(job)) clear_generated(images, job.workspace);
+    const bool sync_resume =
+        job.selection.sync_tracks && is_dual_fisheye_path(in.path) &&
+        !in.pano360.valid();
+    auto valid_sync_resume = [&](const PrepCapture& resumed) {
+        if (!sync_resume) return true;
+        const std::vector<std::string> folders = camera_subfolders(images);
+        if (folders.size() < 2 || resumed.frames.size() !=
+                                      (size_t)count_images(images))
+            return false;
+        for (size_t i = 0; i < folders.size(); i++)
+            if (folders[i] != "cam" + std::to_string(i)) return false;
+        std::vector<std::set<uint64_t>> ordinals(folders.size());
+        for (const PrepFrameSource& row : resumed.frames) {
+            if (row.timing.stream_index >= ordinals.size() ||
+                row.export_ordinal == video::kUnknownOrdinal)
+                return false;
+            const fs::path output =
+                fs::path(job.workspace) / "images" / row.output_name;
+            std::error_code ec;
+            if (!fs::is_regular_file(output, ec)) return false;
+            const fs::path rel = output.lexically_relative(images);
+            if (rel.empty() || rel.begin() == rel.end() ||
+                *rel.begin() !=
+                    fs::path("cam" +
+                             std::to_string(row.timing.stream_index)))
+                return false;
+            ordinals[row.timing.stream_index].insert(row.export_ordinal);
+        }
+        if (ordinals.front().empty()) return false;
+        for (size_t i = 1; i < ordinals.size(); i++)
+            if (ordinals[i] != ordinals.front()) return false;
+        return true;
+    };
     if (job.resume && !frames_stale(job)) {
         const int have = count_images(images);
         if (have > 0) {
-            log(fmt(lmsg::resume_keep_frames, {(long long)have, images}),
-                /*detail=*/false);
-            std::error_code ec;
-            if (fs::is_directory(fs::path(images) / "cam1", ec))
-                out.per_folder_cameras = true;
             PrepCapture capture;
             capture.subdir = in.subdir;
             capture.path = in.path;
             capture.source_id = source_id;
             if (!load_resume_provenance(job, error)) return false;
+            bool found = !_resume_provenance_present;
             if (_resume_provenance_present) {
-                bool found = false;
+                found = false;
                 for (const PrepCapture& candidate : _resume_captures) {
                     if (candidate.subdir == in.subdir &&
                         candidate.path == in.path &&
@@ -2000,23 +2024,36 @@ bool DatasetPrep::extract_video(const PrepJob& job, const PrepInput& in,
                         break;
                     }
                 }
-                if (!found) {
-                    error = "provenance sidecar has no resumed capture";
-                    return false;
-                }
-                out.provenance_sidecar = prep_provenance_path(job.workspace);
             }
-            out.captures.push_back(std::move(capture));
-            // Masks a previous run left. Not when this one is re-doing them:
-            // `masked` is what makes run() skip the masking pass entirely.
-            if (job.mask_enable && !job.redo_masks) {
-                std::error_code mec;
-                if (fs::is_directory(masks, mec) && !fs::is_empty(masks, mec)) {
-                    log(fmt(lmsg::resume_keep_masks, {masks}), /*detail=*/false);
-                    masked = true;
+            const bool valid = found && valid_sync_resume(capture);
+            if (valid) {
+                log(fmt(lmsg::resume_keep_frames, {(long long)have, images}),
+                    /*detail=*/false);
+                std::error_code ec;
+                if (fs::is_directory(fs::path(images) / "cam1", ec))
+                    out.per_folder_cameras = true;
+                if (_resume_provenance_present)
+                    out.provenance_sidecar = prep_provenance_path(job.workspace);
+                out.captures.push_back(std::move(capture));
+                // Masks a previous run left. Not when this one is re-doing
+                // them: `masked` is what makes run() skip the masking pass.
+                if (job.mask_enable && !job.redo_masks) {
+                    std::error_code mec;
+                    if (fs::is_directory(masks, mec) &&
+                        !fs::is_empty(masks, mec)) {
+                        log(fmt(lmsg::resume_keep_masks, {masks}),
+                            /*detail=*/false);
+                        masked = true;
+                    }
                 }
+                return true;
+            } else if (!sync_resume) {
+                clear_generated(images, job.workspace);
+                error = "provenance sidecar has no resumed capture";
+                return false;
+            } else {
+                clear_generated(images, job.workspace);
             }
-            return true;
         }
     }
 
@@ -2058,14 +2095,16 @@ static bool builtin_job(const PrepJob& job, const PrepInput& in,
     }
     if (frames) *frames = probe.frame_count;
     const double src_fps = probe.fps > 1.0 ? probe.fps : 30.0;
-    const int window = std::max(job.sharp_window, 1);
+    const int window = std::max(job.selection.sharp_window, 1);
     fx.input = in.path;
     fx.skip = frame_skip(input_fps(job, in), src_fps);
     fx.keep = window > 1 ? window : 0;
-    fx.max_frames = job.max_frames;
-    fx.sync_tracks = job.sync_tracks;
-    fx.adaptive = job.adaptive_fps;
-    fx.adaptive_range = job.adaptive_range;
+    fx.max_frames = job.selection.max_frames;
+    fx.minimum_sharpness = job.selection.minimum_sharpness;
+    fx.rescue_frames = job.selection.rescue_frames;
+    fx.sync_tracks = job.selection.sync_tracks;
+    fx.adaptive = job.selection.adaptive;
+    fx.adaptive_range = job.selection.adaptive_range;
     fx.auto_rotate = job.auto_rotate;
     fx.quality = 95;
     if (in.pano360.valid()) {
@@ -2088,7 +2127,7 @@ bool DatasetPrep::plan_group(const PrepJob& job, size_t at, std::string& error) 
     (void)job; (void)at; (void)error;
     return true;
 #else
-    if (!job.adaptive_fps || _plans.size() != job.inputs.size()) return true;
+    if (!job.selection.adaptive || _plans.size() != job.inputs.size()) return true;
     if (_planned[at]) return true;
     const size_t g = fps_group(job.inputs, at);
     std::vector<size_t> rows;
@@ -2117,8 +2156,13 @@ bool DatasetPrep::plan_group(const PrepJob& job, size_t at, std::string& error) 
     for (size_t k = 0; k < rows.size(); k++) {
         scan.begin(leaf_name(job.inputs[rows[k]].path));
         if (_sinks.scan_open) _sinks.scan_open(rows[k]);
-        sinks.measured = [this, row = rows[k]](int64_t at, int64_t of, float c) {
+        sinks.measured = [this, row = rows[k]](
+                              const FramePosition& at, int64_t of, float c) {
             if (_sinks.scan_step) _sinks.scan_step(row, at, of, c);
+        };
+        sinks.spans = [this, row = rows[k]](
+                          const std::vector<FrameSegmentSpan>& spans) {
+            if (_sinks.scan_spans) _sinks.scan_spans(row, spans);
         };
         app::FrameExtractStats stats;
         if (!app::scan_motion(jobs[k], sinks, measured[k], stats, error))
@@ -2126,8 +2170,8 @@ bool DatasetPrep::plan_group(const PrepJob& job, size_t at, std::string& error) 
         fps[k] = measured[k].fps;
         scan.finish(lengths[k] > 0 ? lengths[k] : measured[k].frames);
     }
-    const std::vector<std::vector<int64_t>> plans =
-        app::plan_by_motion(measured, job.adaptive_range);
+    const std::vector<app::FramePlan> plans =
+        app::plan_by_motion(measured, job.selection.adaptive_range);
     for (size_t k = 0; k < rows.size() && k < plans.size(); k++) {
         if (plans[k].empty()) {
             error = lmsg::err_capture_too_short.get();
@@ -2135,9 +2179,8 @@ bool DatasetPrep::plan_group(const PrepJob& job, size_t at, std::string& error) 
         }
         _plans[rows[k]] = plans[k];
         _planned[rows[k]] = true;
-        if (_sinks.scan_kept)
-            _sinks.scan_kept(rows[k], plans[k], measured[k].frames);
-        sinks.planned = nullptr;
+        if (_sinks.scan_plan)
+            _sinks.scan_plan(rows[k], plans[k], measured[k].frames);
         app::report_plan(sinks, plans[k], measured[k].frames, fps[k]);
     }
     return true;
@@ -2206,8 +2249,19 @@ bool DatasetPrep::extract_video_builtin(const PrepJob& job, const PrepInput& in,
             scan.update(done, total);
         };
     }
-    sinks.measured = [this, row](int64_t at, int64_t of, float c) {
+    sinks.measured = [this, row](
+                           const FramePosition& at, int64_t of, float c) {
         if (_sinks.scan_step) _sinks.scan_step(row, at, of, c);
+    };
+    sinks.spans = [this, row](
+                       const std::vector<FrameSegmentSpan>& spans) {
+        if (_sinks.scan_spans) _sinks.scan_spans(row, spans);
+    };
+    sinks.planned = [this, row](const FramePlan& plan, int64_t frames) {
+        if (_sinks.scan_plan) _sinks.scan_plan(row, plan, frames);
+    };
+    sinks.decision = [this, row](const FrameSelectionDecision& decision) {
+        if (_sinks.scan_decision) _sinks.scan_decision(row, decision);
     };
     const fs::path root(images);
     const fs::path provenance_root = fs::path(job.workspace) / "images";
@@ -2271,8 +2325,9 @@ bool DatasetPrep::extract_video_ffmpeg(const PrepJob& job, const PrepInput& in,
                                        const std::string& images,
                                        PrepCapture& capture,
                                        std::string& error) {
-    if (job.sync_tracks) log(lmsg::sync_needs_builtin.get(), /*detail=*/false);
     const fs::path ws = job.workspace;
+    remove_tree(ws / "frames_tmp");
+    remove_tree(ws / "canvas_tmp");
     if (!command_exists(job.ffmpeg_exe)) {
         error = fmt(lmsg::err_ffmpeg_missing, {job.ffmpeg_exe});
         return false;
@@ -2284,122 +2339,217 @@ bool DatasetPrep::extract_video_ffmpeg(const PrepJob& job, const PrepInput& in,
     // stream list, which calls an attached cover picture a video track.
     VideoFacts facts;
     ffmpeg_probe_video(job.ffmpeg_exe, in.path, facts, _cancel);
+    if (_cancel.load()) {
+        error = lmsg::err_cancelled.get();
+        return false;
+    }
     size_t streams = 1;
     if (is_dual_fisheye_path(in.path) && facts.tracks.size() > 1)
         streams = facts.tracks.size();
-    const int window = std::max(job.sharp_window, 1);
-    const int group = candidate_group(job);
+    const int window = std::max(job.selection.sharp_window, 1);
+    int group = 0;
+    if (job.selection.max_frames < 0 ||
+        !checked_candidate_group(job.selection, group)) {
+        error = "invalid frame selection candidate group";
+        return false;
+    }
+    uint64_t candidate_cap = 0;
+    if (!checked_candidate_cap((uint64_t)job.selection.max_frames,
+                               (uint64_t)group, candidate_cap)) {
+        error = "frame selection candidate cap overflow";
+        return false;
+    }
+    double candidate_rate = 0.0;
+    if (!checked_candidate_rate(
+            (double)input_fps(job, in) * (double)group, facts.duration,
+            candidate_cap, candidate_rate)) {
+        error = "invalid frame selection candidate rate";
+        return false;
+    }
     const bool fisheye = streams > 1 && !facts.tracks.empty() &&
                          facts.tracks[0].first == facts.tracks[0].second;
-    for (size_t tr = 0; tr < streams; tr++) {
-        std::string track_path = in.path;
-        const fs::path out_dir = streams > 1
-            ? fs::path(images) / ("cam" + std::to_string(tr))
-            : fs::path(images);
-        if (job.resume && !frames_stale(job) &&
-            count_images(out_dir.string()) > 0) {
-            log(fmt(lmsg::resume_keep_frames_dir, {out_dir.string()}),
-                /*detail=*/false);
-            continue;
+
+    enter(Stage::Frames, window > 1 ? lmsg::stage_extract_candidates.get()
+                                    : lmsg::stage_extract_ffmpeg.get());
+    RateLimitedProgress progress(_sinks, Stage::Frames,
+                                 lmsg::noun_frames_written, _frames_tally);
+    progress.update(0, /*force=*/true);
+    const fs::path cand_root = ws / "frames_tmp";
+    std::error_code ec;
+    auto cleanup = [&] {
+        remove_tree(cand_root);
+        const size_t stale_tracks = std::max<size_t>(streams, 2);
+        for (size_t tr = 0; tr < stale_tracks; tr++) {
+            std::error_code cleanup_ec;
+            fs::remove(ws / ("track_cam" + std::to_string(tr) + ".mp4"),
+                       cleanup_ec);
         }
+    };
+    std::vector<FrameSelectTrack> tracks;
+    tracks.reserve(streams);
+    for (size_t tr = 0; tr < streams; tr++) {
+        const fs::path cand = streams > 1
+                                  ? cand_root / ("cam" + std::to_string(tr))
+                                  : cand_root;
+        const fs::path out_dir = streams > 1
+                                     ? fs::path(images) /
+                                           ("cam" + std::to_string(tr))
+                                     : fs::path(images);
+        fs::create_directories(cand, ec);
+        if (ec) {
+            cleanup();
+            error = "cannot create frame candidate directory";
+            return false;
+        }
+        tracks.push_back({cand.string(), out_dir.string(), ""});
+    }
+
+    // One multi-output command avoids temporary split files. Every map is explicit.
+    char vf[96];
+    std::snprintf(vf, sizeof vf, "fps=%.17g", candidate_rate);
+    std::vector<std::string> argv{job.ffmpeg_exe, "-nostdin", "-y"};
+    if (!job.auto_rotate) argv.push_back("-noautorotate");
+    argv.insert(argv.end(), {"-i", in.path});
+    for (size_t tr = 0; tr < streams; tr++) {
         if (streams > 1) {
-            enter(Stage::Frames, fmt(lmsg::stage_split_track, {(long long)tr}));
-            const fs::path tmp_track =
-                ws / ("track_cam" + std::to_string(tr) + ".mp4");
-            int rc = exec({job.ffmpeg_exe, "-nostdin", "-y", "-i", in.path,
-                           "-map", "0:v:" + std::to_string(tr), "-c", "copy",
-                           tmp_track.string()});
-            if (rc == kCancelled) { error = lmsg::err_cancelled.get(); return false; }
-            if (rc != 0) {
-                error = lmsg::err_ffmpeg_split_failed.get();
+            argv.push_back("-map");
+            argv.push_back("0:v:" + std::to_string(tr));
+        }
+        argv.push_back("-vf");
+        argv.push_back(vf);
+        if (candidate_cap != 0) {
+            argv.push_back("-frames:v");
+            argv.push_back(std::to_string(candidate_cap));
+        }
+        argv.insert(argv.end(),
+                    {"-qscale:v", "2",
+                     (fs::path(tracks[tr].cand_dir) / "c_%06d.jpg").string()});
+    }
+    const int max_frames = job.selection.max_frames;
+    const int rc = exec(argv, [&progress, window, max_frames](
+                                  const std::string& line) {
+        const size_t at = line.find_first_not_of(" \t");
+        if (at == std::string::npos || line.compare(at, 6, "frame=") != 0)
+            return;
+        const char* first = line.c_str() + at + 6;
+        char* end = nullptr;
+        const long long frame = std::strtoll(first, &end, 10);
+        if (end == first || frame < 0) return;
+        int64_t projected = (frame + window - 1) / window;
+        if (max_frames > 0)
+            projected = std::min<int64_t>(projected, max_frames);
+        progress.update(projected);
+    });
+    if (rc == kCancelled) {
+        cleanup();
+        error = lmsg::err_cancelled.get();
+        return false;
+    }
+    if (rc != 0) {
+        cleanup();
+        error = lmsg::err_ffmpeg_extract_failed.get();
+        return false;
+    }
+
+    FrameSelectOptions so;
+    so.group = group;
+    so.max_frames = job.selection.max_frames;
+    so.minimum_sharpness = job.selection.minimum_sharpness;
+    so.rescue_frames = job.selection.rescue_frames;
+    so.adaptive = job.selection.adaptive;
+    so.range = job.selection.adaptive_range;
+    so.window = window;
+    if (fisheye) so.view = app::MotionView::Fisheye;
+    so.out_fov = fisheye ? 3.4034f : 1.5708f;
+    ScanProgress scan(_sinks, 0);
+    scan.begin(leaf_name(in.path));
+    const size_t row = input_index(job, in);
+    if (_sinks.scan_open) _sinks.scan_open(row);
+    so.scanning = [&](int64_t done, int64_t total) {
+        scan.update(done, total);
+    };
+    so.measured = [this, row](
+                        const FramePosition& at, int64_t of, float c) {
+        if (_sinks.scan_step) _sinks.scan_step(row, at, of, c);
+    };
+    so.spans = [this, row](
+                     const std::vector<FrameSegmentSpan>& spans) {
+        if (_sinks.scan_spans) _sinks.scan_spans(row, spans);
+    };
+    so.planned = [this, row](const FramePlan& plan, int64_t frames) {
+        if (_sinks.scan_plan) _sinks.scan_plan(row, plan, frames);
+    };
+    so.decision = [this, row](const FrameSelectionDecision& decision) {
+        if (_sinks.scan_decision) _sinks.scan_decision(row, decision);
+    };
+
+    const bool synchronized = job.selection.sync_tracks && streams > 1;
+    std::string provenance_error;
+    auto append_selected = [&](size_t tr, const FrameSelectOutput& selected) {
+        if (provenance_error.empty() &&
+            !append_fallback_row(capture, fs::path(job.workspace) / "images",
+                                 selected, source_id, (uint32_t)tr,
+                                 provenance_error)) {
+            // append_fallback_row supplies the reason; no later callback may
+            // publish another row after the first failure.
+        }
+    };
+
+    int kept_total = 0;
+    if (synchronized) {
+        so.selected_track = append_selected;
+        kept_total = select_synchronized_frames(
+            tracks, so, [this](const std::string& l) { log(l); }, _cancel);
+    } else {
+        for (size_t tr = 0; tr < tracks.size(); tr++) {
+            so.selected = [&, tr](const FrameSelectOutput& selected) {
+                append_selected(tr, selected);
+            };
+            const int kept = select_sharpest_frames(
+                tracks[tr].cand_dir, tracks[tr].out_dir, tracks[tr].prefix, so,
+                [this](const std::string& l) { log(l); }, _cancel);
+            progress.update(std::max<int64_t>(kept, 0), /*force=*/true);
+            if (kept < 0) {
+                cleanup();
+                clear_generated(images, ws);
+                error = _cancel.load() ? lmsg::err_cancelled.get()
+                                       : "frame selection failed";
                 return false;
             }
-            track_path = tmp_track.string();
+            if (!provenance_error.empty()) {
+                cleanup();
+                clear_generated(images, ws);
+                error = provenance_error;
+                return false;
+            }
+            kept_total += kept;
+            log(fmt(lmsg::kept_frames,
+                    {(long long)kept, tracks[tr].out_dir}),
+                /*detail=*/false);
         }
-        enter(Stage::Frames, window > 1 ? lmsg::stage_extract_candidates.get()
-                                       : lmsg::stage_extract_ffmpeg.get());
-        RateLimitedProgress progress(_sinks, Stage::Frames,
-                                     lmsg::noun_frames_written, _frames_tally);
-        progress.update(0, /*force=*/true);
-        const fs::path cand = ws / "frames_tmp";
-        remove_tree(cand);
-        std::error_code ec;
-        fs::create_directories(cand, ec);
-        char vf[64];
-        std::snprintf(vf, sizeof vf, "fps=%g", (double)input_fps(job, in) * group);
-        // ffmpeg turns the picture by the container's matrix unless told not
-        // to, which is what the built-in decoder's auto_rotate matches.
-        std::vector<std::string> argv{job.ffmpeg_exe, "-nostdin", "-y"};
-        if (!job.auto_rotate) argv.push_back("-noautorotate");
-        argv.insert(argv.end(), {"-i", track_path, "-vf", vf, "-qscale:v", "2",
-                                 (cand / "c_%06d.jpg").string()});
-        const int max_frames = job.max_frames;
-        int rc = exec(argv, [&progress, window, max_frames](const std::string& line) {
-            const size_t at = line.find_first_not_of(" \t");
-            if (at == std::string::npos || line.compare(at, 6, "frame=") != 0)
-                return;
-            const char* first = line.c_str() + at + 6;
-            char* end = nullptr;
-            const long long frame = std::strtoll(first, &end, 10);
-            if (end == first || frame < 0) return;
-            int64_t projected = (frame + window - 1) / window;
-            if (max_frames > 0) projected = std::min<int64_t>(projected, max_frames);
-            progress.update(projected);
-        });
-        if (rc == kCancelled) { error = lmsg::err_cancelled.get(); return false; }
-        if (rc != 0) {
-            error = lmsg::err_ffmpeg_extract_failed.get();
-            return false;
-        }
-
-        if (window > 1) enter(Stage::Frames, lmsg::stage_select_sharpest.get());
-        fs::create_directories(out_dir, ec);
-        FrameSelectOptions so;
-        so.group = group;
-        so.max_frames = job.max_frames;
-        so.adaptive = job.adaptive_fps;
-        so.range = job.adaptive_range;
-        so.window = window;
-        if (fisheye) so.view = app::MotionView::Fisheye;
-        so.out_fov = fisheye ? 3.4034f : 1.5708f;
-        ScanProgress scan(_sinks, 0);
-        scan.begin(leaf_name(in.path));
-        const size_t row = input_index(job, in);
-        if (_sinks.scan_open) _sinks.scan_open(row);
-        so.scanning = [&](int64_t done, int64_t total) {
-            scan.update(done, total);
-        };
-        so.measured = [this, row](int64_t at, int64_t of, float c) {
-            if (_sinks.scan_step) _sinks.scan_step(row, at, of, c);
-        };
-        so.planned = [this, row](const std::vector<int64_t>& plan,
-                                 int64_t frames) {
-            if (_sinks.scan_kept) _sinks.scan_kept(row, plan, frames);
-        };
-        std::string provenance_error;
-        so.selected = [&](const FrameSelectOutput& selected) {
-            if (provenance_error.empty())
-                append_fallback_row(capture, fs::path(job.workspace) / "images",
-                                    selected, source_id, (uint32_t)tr,
-                                    provenance_error);
-        };
-        const int kept = select_sharpest_frames(
-            cand.string(), out_dir.string(), "", so,
-            [this](const std::string& l) { log(l); }, _cancel);
-        progress.update(std::max<int64_t>(kept, 0), /*force=*/true);
-        remove_tree(cand);
-        if (streams > 1) fs::remove(track_path, ec);
-        if (kept < 0) {
-            error = _cancel.load() ? "cancelled" : "frame selection failed";
-            return false;
-        }
-        if (!provenance_error.empty()) {
-            error = provenance_error;
-            return false;
-        }
-        log(fmt(lmsg::kept_frames, {(long long)kept, out_dir.string()}),
-            /*detail=*/false);
     }
+    progress.update(std::max<int64_t>(kept_total, 0), /*force=*/true);
+    cleanup();
+    if (kept_total < 0) {
+        clear_generated(images, ws);
+        error = _cancel.load() ? lmsg::err_cancelled.get()
+                               : "frame selection failed";
+        return false;
+    }
+    if (synchronized && kept_total == 0) {
+        clear_generated(images, ws);
+        error = "no synchronized frame passed the sharpness floor";
+        return false;
+    }
+    if (!provenance_error.empty()) {
+        clear_generated(images, ws);
+        error = provenance_error;
+        return false;
+    }
+    if (synchronized)
+        log(fmt(lmsg::kept_frames,
+                {(long long)kept_total, tracks.front().out_dir}),
+            /*detail=*/false);
     return true;
 }
 namespace {
@@ -2474,6 +2624,9 @@ bool DatasetPrep::extract_360_ffmpeg(const PrepJob& job, const PrepInput& in,
                                      const std::string& images,
                                      PrepCapture& capture,
                                      std::string& error) {
+    const fs::path ws = job.workspace;
+    remove_tree(ws / "frames_tmp");
+    remove_tree(ws / "canvas_tmp");
     if (!command_exists(job.ffmpeg_exe)) {
         error = fmt(lmsg::err_ffmpeg_missing, {job.ffmpeg_exe});
         return false;
@@ -2488,9 +2641,32 @@ bool DatasetPrep::extract_360_ffmpeg(const PrepJob& job, const PrepInput& in,
     log(fmt(lmsg::pano360_plan, {(long long)views.size(), views[0].width,
                                  views[0].height}), /*detail=*/false);
 
-    const fs::path ws = job.workspace;
-    const int window = std::max(job.sharp_window, 1);
-    const int group = candidate_group(job);
+    const int window = std::max(job.selection.sharp_window, 1);
+    int group = 0;
+    if (job.selection.max_frames < 0 ||
+        !checked_candidate_group(job.selection, group)) {
+        error = "invalid frame selection candidate group";
+        return false;
+    }
+    uint64_t candidate_cap = 0;
+    if (!checked_candidate_cap((uint64_t)job.selection.max_frames,
+                               (uint64_t)group, candidate_cap)) {
+        error = "frame selection candidate cap overflow";
+        return false;
+    }
+    VideoFacts facts;
+    ffmpeg_probe_video(job.ffmpeg_exe, in.path, facts, _cancel);
+    if (_cancel.load()) {
+        error = lmsg::err_cancelled.get();
+        return false;
+    }
+    double candidate_rate = 0.0;
+    if (!checked_candidate_rate(
+            (double)input_fps(job, in) * (double)group, facts.duration,
+            candidate_cap, candidate_rate)) {
+        error = "invalid frame selection candidate rate";
+        return false;
+    }
     std::error_code ec;
 
     // ffmpeg decodes both tracks and cuts the overlap strips out; the warp is
@@ -2500,18 +2676,36 @@ bool DatasetPrep::extract_360_ffmpeg(const PrepJob& job, const PrepInput& in,
                                     : lmsg::stage_extract_ffmpeg.get());
     const fs::path cand = ws / "frames_tmp";
     remove_tree(cand);
+    auto cleanup_candidates = [&] { remove_tree(cand); };
     fs::create_directories(cand, ec);
-    char pre[64];
-    std::snprintf(pre, sizeof pre, "fps=%g", (double)input_fps(job, in) * group);
+    if (ec) {
+        cleanup_candidates();
+        error = "cannot create frame candidate directory";
+        return false;
+    }
+    char pre[96];
+    std::snprintf(pre, sizeof pre, "fps=%.17g", candidate_rate);
     const std::string graph = app::pano360_graph(in.pano360, pre);
     // A 360 capture's geometry is the EAC layout, not the display matrix: the
     // built-in path leaves it alone and so must this one.
-    int rc = exec({job.ffmpeg_exe, "-nostdin", "-y", "-noautorotate", "-i", in.path,
-                   "-filter_complex", graph,
-                   "-map", std::string("[") + app::pano360_canvas_pad() + "]",
-                   "-qscale:v", "2", (cand / "c_%06d.jpg").string()});
-    if (rc == kCancelled) { error = lmsg::err_cancelled.get(); return false; }
+    std::vector<std::string> argv{
+        job.ffmpeg_exe, "-nostdin", "-y", "-noautorotate", "-i", in.path,
+        "-filter_complex", graph,
+        "-map", std::string("[") + app::pano360_canvas_pad() + "]"};
+    if (candidate_cap != 0) {
+        argv.push_back("-frames:v");
+        argv.push_back(std::to_string(candidate_cap));
+    }
+    argv.insert(argv.end(),
+                {"-qscale:v", "2", (cand / "c_%06d.jpg").string()});
+    const int rc = exec(argv);
+    if (rc == kCancelled) {
+        cleanup_candidates();
+        error = lmsg::err_cancelled.get();
+        return false;
+    }
     if (rc != 0) {
+        cleanup_candidates();
         error = lmsg::err_ffmpeg_extract_failed.get();
         return false;
     }
@@ -2521,12 +2715,13 @@ bool DatasetPrep::extract_360_ffmpeg(const PrepJob& job, const PrepInput& in,
     if (window > 1) enter(Stage::Frames, lmsg::stage_select_sharpest.get());
     const fs::path kept = ws / "canvas_tmp";
     remove_tree(kept);
-    fs::create_directories(kept, ec);
     FrameSelectOptions so;
     so.group = group;
-    so.max_frames = job.max_frames;
-    so.adaptive = job.adaptive_fps;
-    so.range = job.adaptive_range;
+    so.max_frames = job.selection.max_frames;
+    so.minimum_sharpness = job.selection.minimum_sharpness;
+    so.rescue_frames = job.selection.rescue_frames;
+    so.adaptive = job.selection.adaptive;
+    so.range = job.selection.adaptive_range;
     so.window = window;
     so.view = app::MotionView::Packed360;
     so.eac = in.pano360;
@@ -2538,12 +2733,19 @@ bool DatasetPrep::extract_360_ffmpeg(const PrepJob& job, const PrepInput& in,
     so.scanning = [&](int64_t done, int64_t total) {
         scan.update(done, total);
     };
-    so.measured = [this, row](int64_t at, int64_t of, float c) {
+    so.measured = [this, row](
+                        const FramePosition& at, int64_t of, float c) {
         if (_sinks.scan_step) _sinks.scan_step(row, at, of, c);
     };
-    so.planned = [this, row](const std::vector<int64_t>& plan,
-                             int64_t frames) {
-        if (_sinks.scan_kept) _sinks.scan_kept(row, plan, frames);
+    so.spans = [this, row](
+                     const std::vector<FrameSegmentSpan>& spans) {
+        if (_sinks.scan_spans) _sinks.scan_spans(row, spans);
+    };
+    so.planned = [this, row](const FramePlan& plan, int64_t frames) {
+        if (_sinks.scan_plan) _sinks.scan_plan(row, plan, frames);
+    };
+    so.decision = [this, row](const FrameSelectionDecision& decision) {
+        if (_sinks.scan_decision) _sinks.scan_decision(row, decision);
     };
     std::map<fs::path, uint64_t> kept_ordinals;
     so.selected = [&](const FrameSelectOutput& selected) {
@@ -2552,9 +2754,10 @@ bool DatasetPrep::extract_360_ffmpeg(const PrepJob& job, const PrepInput& in,
     const int n = select_sharpest_frames(
         cand.string(), kept.string(), "", so,
         [this](const std::string& l) { log(l); }, _cancel);
-    remove_tree(cand);
+    cleanup_candidates();
     if (n < 0) {
         remove_tree(kept);
+        clear_generated(images, ws);
         error = _cancel.load() ? lmsg::err_cancelled.get()
                                : lmsg::err_ffmpeg_extract_failed.get();
         return false;
@@ -2580,7 +2783,10 @@ bool DatasetPrep::extract_360_ffmpeg(const PrepJob& job, const PrepInput& in,
         },
         error);
     remove_tree(kept);
-    if (!ok) return false;
+    if (!ok) {
+        clear_generated(images, ws);
+        return false;
+    }
     log(fmt(lmsg::kept_frames, {(long long)n * (long long)views.size(), images}),
         /*detail=*/false);
     return true;

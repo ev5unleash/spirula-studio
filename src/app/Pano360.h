@@ -62,6 +62,20 @@ bool pano360_unsupported(int tracks, int width, int height,
 struct Eac360Slice {
     int src_x = 0, dst_x = 0, width = 0;
 };
+
+// Source rectangles concatenated into one metric canvas. Fixed capacity keeps
+// native sharpness allocation-free per candidate.
+constexpr int kPano360MaxScoreRegions = 3;
+struct Pano360ScoreRegion {
+    int x = 0, y = 0, width = 0, height = 0;
+};
+struct Pano360ScoreRegions {
+    int count = 0;
+    int packed_width = 0, packed_height = 0;
+    Pano360ScoreRegion regions[kPano360MaxScoreRegions] = {};
+};
+Pano360ScoreRegions pano360_score_regions(const Pano360Layout& l, int track);
+
 std::vector<Eac360Slice> eac360_slices(const Pano360Layout& l);
 
 // A track pixel's viewing direction, unit, in the frame Pano360View::rot maps

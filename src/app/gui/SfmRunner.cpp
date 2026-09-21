@@ -92,15 +92,23 @@ app::DatasetPrepSinks make_prep_sinks(RunProgress& progress, RunFilms films) {
         progress.scan_reset(std::move(rows));
     };
     sinks.scan_open = [&progress](size_t row) { progress.scan_open(row); };
-    sinks.scan_step = [&progress](size_t row, int64_t at, int64_t of,
-                                  float cost) {
+    sinks.scan_step = [&progress](size_t row, const app::FramePosition& at,
+                                  int64_t of, float cost) {
         progress.scan_step(row, at, of, cost);
     };
-    sinks.scan_kept = [&progress](size_t row,
-                                  const std::vector<int64_t>& plan,
+    sinks.scan_spans = [&progress](
+                           size_t row,
+                           const std::vector<app::FrameSegmentSpan>& spans) {
+        progress.scan_spans(row, spans);
+    };
+    sinks.scan_plan = [&progress](size_t row, const app::FramePlan& plan,
                                   int64_t frames) {
-        progress.scan_kept(row, scan_plan_bars(plan, frames),
-                           (int64_t)plan.size());
+        progress.scan_plan(row, plan, frames);
+    };
+    sinks.scan_decision = [&progress](
+                              size_t row,
+                              const app::FrameSelectionDecision& decision) {
+        progress.scan_decision(row, decision);
     };
     return sinks;
 }
@@ -291,7 +299,7 @@ std::vector<std::string> SfmRunner::scheduler_args(
         if (!input.is_video) continue;
         prep.captures.push_back(
             {input.subdir, input.path, job.prep.force_external_decode
-                                      ? (double)job.prep.video_fps
+                                      ? (double)job.prep.selection.video_fps
                                       : 0.0});
     }
     const std::vector<std::string> model_args = recon_args(job, prep, false);

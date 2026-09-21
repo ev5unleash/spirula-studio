@@ -182,9 +182,10 @@ void uint8_normal_to_float_raw(const uint8_t* d_in, float* d_out, int B,
 }
 
 void uint16_depth_to_float_raw(const uint16_t* d_in, float* d_out, int B,
-                               int H, int W, int C) {
-    run_bytes_to_float(d_in, d_out, (int64_t)B * H * W * C, kElemU16, 1.0f,
-                       0.0f);
+                               int H, int W, int C,
+                               float depth_unit_scale_factor) {
+    run_bytes_to_float(d_in, d_out, (int64_t)B * H * W * C, kElemU16,
+                       depth_unit_scale_factor, 0.0f);
 }
 
 void uint8_image_to_float_tensor(DeviceTensor3D<uint8_t> img_in,
@@ -303,20 +304,20 @@ void launch_warp_mask_equi(
     vkk::dispatch_flat("warp.warp_mask_equi", {}, words, 256, &p, sizeof(p),
                        &p.wgs_per_row);
 }
-
 void launch_warp_depth_wide(
     std::string camera_model,
     std::string distortion,
     const float* d_intrins,
     const float* d_dist_coeffs,
-    const int*   d_source_models,
+    const int* d_source_models,
     const float* d_source_params,
     const void* d_depth, uint32_t elem_size,
     int B, int Hin, int Win,
     int in_H, int in_W,
     float* d_float_out, int K, int Hout, int Wout,
     const float* d_post_intrins,
-    const float* d_axes, bool input_is_ray_depth)
+    const float* d_axes, bool input_is_ray_depth,
+    float depth_unit_scale_factor)
 {
     const vkk::CamDistSpec cd = vkk::cam_dist_spec(camera_model, distortion);
     dispatch_warp("warp.warp_depth_wide",
@@ -327,7 +328,7 @@ void launch_warp_depth_wide(
                       B, Hin, Win, 1, K, Hout, Wout,
                       resolve_depth_kind(elem_size, "launch_warp_depth_wide"),
                       (CameraModelType)cd.cam, in_H, in_W, input_is_ray_depth,
-                      1.0f, 0.0f),
+                      elem_size == 2 ? depth_unit_scale_factor : 1.0f, 0.0f),
                   {cd.dist, from_source_spec(d_source_models)});
 }
 
@@ -336,7 +337,8 @@ void launch_warp_depth_equi(
     int B, int Hin, int Win,
     float* d_float_out, int K, int Hout, int Wout,
     const float* d_post_intrins,
-    const float* d_axes, bool input_is_ray_depth)
+    const float* d_axes, bool input_is_ray_depth,
+    float depth_unit_scale_factor)
 {
     dispatch_warp("warp.warp_depth_equi",
                   make_warp_params(
@@ -345,7 +347,8 @@ void launch_warp_depth_equi(
                       B, Hin, Win, 1, K, Hout, Wout,
                       resolve_depth_kind(elem_size, "launch_warp_depth_equi"),
                       CameraModelType::EQUIRECTANGULAR, Hin, Win,
-                      input_is_ray_depth, 1.0f, 0.0f),
+                      input_is_ray_depth,
+                      elem_size == 2 ? depth_unit_scale_factor : 1.0f, 0.0f),
                   {});
 }
 
@@ -431,8 +434,8 @@ void launch_redistort_byte_to_float(
                   {cd.dist});
 }
 
-// Depth is raw counts either way, so norm_inv stays 1 -- same convention as
-// the wide warp.
+// Raw uint16 depth counts use the configured unit scale; float inputs retain
+// scene-unit passthrough semantics.
 void launch_redistort_depth(
     std::string camera_model,
     std::string distortion,
@@ -443,7 +446,8 @@ void launch_redistort_depth(
     const void* d_in, uint32_t elem_size,
     int B, int in_H, int in_W,
     float* d_float_out, int out_H, int out_W,
-    int ref_H, int ref_W)
+    int ref_H, int ref_W,
+    float depth_unit_scale_factor)
 {
     const vkk::CamDistSpec cd = vkk::cam_dist_spec(camera_model, distortion);
     dispatch_warp("warp.redistort_depth",
@@ -452,7 +456,8 @@ void launch_redistort_depth(
                       {d_source_models, d_source_params},
                       d_in, d_float_out, B, in_H, in_W, 1, out_H, out_W,
                       elem_size == 2 ? kElemU16 : kElemF32,
-                      (CameraModelType)cd.cam, ref_H, ref_W, 1.0f, 0.0f,
+                      (CameraModelType)cd.cam, ref_H, ref_W,
+                      elem_size == 2 ? depth_unit_scale_factor : 1.0f, 0.0f,
                       0.0f),
                   {cd.dist});
 }

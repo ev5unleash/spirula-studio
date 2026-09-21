@@ -6,6 +6,8 @@
 #include <fstream>
 #include <limits>
 #include <string>
+#include <vector>
+
 
 #include <stdexcept>
 
@@ -78,11 +80,93 @@ int main() {
         check(frame_a == frame_b, "frame key is deterministic");
         check(frame_a != project::stable_frame_id(source.source_id, "video", 8),
               "presentation ordinal participates in frame key");
+        check(frame_a != project::stable_frame_id(source.source_id, "audio", 7) &&
+                  frame_a != project::stable_frame_id(rewritten.source_id, "video", 7),
+              "source and stream identities participate in frame key");
+        check(frame_a != project::stable_frame_id(
+                             source.source_id, "video",
+                             (std::uint64_t{1} << 32) + 7),
+              "frame key preserves the full presentation ordinal range");
+        project::DatasetPlan groups;
+        groups.members = {
+            {"capture-a/left/frame-0001.jpg", source.source_id, "", "capture-a",
+             "left", "rig-a", "", project::DatasetRole::Train},
+            {"capture-a/right/frame-0001.jpg", source.source_id, "", "capture-a",
+             "right", "rig-a", "", project::DatasetRole::Validation},
+            {"capture-b/left/frame-0001.jpg", source.source_id, "", "capture-b",
+             "left", "rig-a", "", project::DatasetRole::Evaluation},
+            {"capture-b/right/frame-0001.jpg", source.source_id, "", "capture-b",
+             "right", "rig-a", "", project::DatasetRole::Excluded},
+            {"capture-a/derived/view-a.jpg", source.source_id, frame_a, "capture-a",
+             "view-a", "", "", project::DatasetRole::Pending},
+            {"capture-a/derived/view-b.jpg", source.source_id, frame_a, "capture-a",
+             "view-b", "", "", project::DatasetRole::Train},
+            {"capture-a/singleton.jpg", source.source_id, "", "capture-a",
+             "singleton", "", "", project::DatasetRole::Pending},
+        };
+        std::vector<std::string> images;
+        std::vector<project::DatasetRole> roles;
+        for (const auto& member : groups.members) {
+            images.push_back(member.image);
+            roles.push_back(member.role);
+        }
+        project::freeze_exclusion_groups(groups);
+        const project::DatasetPlan frozen_groups = groups;
+        project::freeze_exclusion_groups(groups);
+        bool repeated = groups.members.size() == frozen_groups.members.size();
+        bool order_roles = groups.members.size() == images.size();
+        for (std::size_t i = 0; i < groups.members.size(); ++i) {
+            repeated = repeated &&
+                       groups.members[i].exclusion_group ==
+                           frozen_groups.members[i].exclusion_group;
+            order_roles = order_roles && groups.members[i].image == images[i] &&
+                          groups.members[i].role == roles[i] &&
+                          frozen_groups.members[i].image == images[i] &&
+                          frozen_groups.members[i].role == roles[i];
+        }
+        const auto image_group = [](const project::DatasetPlan& plan,
+                                    const std::string& image) {
+            const auto found = std::find_if(
+                plan.members.begin(), plan.members.end(),
+                [&](const project::DatasetPlanMember& member) {
+                    return member.image == image;
+                });
+            return found == plan.members.end() ? std::string{} : found->exclusion_group;
+        };
+        const auto group_a_left = image_group(groups, images[0]);
+        const auto group_a_right = image_group(groups, images[1]);
+        const auto group_b_left = image_group(groups, images[2]);
+        const auto frame_view_a = image_group(groups, images[4]);
+        const auto frame_view_b = image_group(groups, images[5]);
+        const auto singleton = image_group(groups, images[6]);
+        const bool hash_ids = std::all_of(
+            groups.members.begin(), groups.members.end(),
+            [](const project::DatasetPlanMember& member) {
+                return member.exclusion_group.size() == 71 &&
+                       member.exclusion_group.compare(0, 7, "sha256:") == 0;
+            });
+        check(hash_ids && repeated && order_roles,
+              "freezing groups preserves order and roles deterministically");
+        check(group_a_left == group_a_right && group_a_left != group_b_left &&
+                  frame_view_a == frame_view_b && singleton != group_a_left &&
+                  singleton != frame_view_a,
+              "group precedence separates captures and shares frames");
+        project::DatasetPlan permuted = frozen_groups;
+        std::reverse(permuted.members.begin(), permuted.members.end());
+        project::freeze_exclusion_groups(permuted);
+        bool permutation_stable = true;
+        for (const auto& member : frozen_groups.members)
+            permutation_stable =
+                permutation_stable &&
+                image_group(permuted, member.image) == member.exclusion_group;
+        check(permutation_stable, "group IDs are independent of member order");
+
         const fs::path exported_path = root / "exported.bin";
         write_bytes(exported_path, "export bytes");
         SourceRecord exported = project::make_source_record(exported_path);
         exported.relation = project::SourceRelation::Export;
         exported.original_source_id = source.source_id;
+        exported.streams.push_back({"export-video", "video", "raw", 1, 30});
         project::validate_source_record(exported);
 
         project::RawClockRecord raw_clock;
@@ -152,6 +236,12 @@ int main() {
         revision.synchronization_decisions = {decision};
         revision.parents = {"root"};
         revision.captures = {frame_a};
+        revision.dataset_plan.members = {
+            {"images/original.jpg", source.source_id, frame_a, "capture-original",
+             "camera-original", "rig-a", "group-a", project::DatasetRole::Train},
+            {"images/exported.jpg", exported.source_id, "", "capture-exported",
+             "camera-exported", "", "group-exported", project::DatasetRole::Evaluation},
+        };
         revision.artifacts = {{"artifact-a", "image", "identity"}};
         revision.protected_regions = {"mask-a"};
         revision.operations = {"capture"};
@@ -160,11 +250,225 @@ int main() {
         const ProjectRevision round_trip = project::parse_revision(encoded);
         check(project::serialize_revision(round_trip) == encoded,
               "revision JSON round-trip is stable");
+        check(round_trip.schema == project::kProjectSchemaVersion &&
+                  round_trip.dataset_plan.schema == project::kDatasetPlanSchemaVersion &&
+                  round_trip.dataset_plan.members.size() == 2 &&
+                  round_trip.dataset_plan.members[0].image == "images/original.jpg" &&
+                  round_trip.dataset_plan.members[0].source_id == source.source_id &&
+                  round_trip.dataset_plan.members[0].role == project::DatasetRole::Train &&
+                  round_trip.dataset_plan.members[1].source_id == exported.source_id &&
+                  round_trip.dataset_plan.members[1].role ==
+                      project::DatasetRole::Evaluation &&
+                  encoded.find("\"role\": \"train\"") != std::string::npos &&
+                  encoded.find("\"role\": \"evaluation\"") != std::string::npos,
+              "dataset plan preserves member order, sources, and roles");
         check(round_trip.raw_clocks[0].raw_fields == raw_clock.raw_fields &&
                   round_trip.raw_clocks[0].timezone == raw_clock.timezone &&
                   round_trip.source_export_mappings[0].anchors[0].exported.num ==
                       mapping.anchors[0].exported.num,
               "raw contradictions and rational anchors survive");
+        ProjectRevision missing_clock_stream = revision;
+        missing_clock_stream.raw_clocks[0].stream_id = "export-video";
+        check(throws([&] { project::validate_revision(missing_clock_stream); }),
+              "raw clock stream must be included in its source");
+
+        const std::string plan_marker = "\"dataset_plan\": {\n    \"schema\"";
+        std::string unknown_plan_field = encoded;
+        const std::size_t plan_marker_pos = unknown_plan_field.find(plan_marker);
+        if (plan_marker_pos == std::string::npos)
+            throw std::runtime_error("dataset plan marker missing from test JSON");
+        unknown_plan_field.replace(
+            plan_marker_pos, plan_marker.size(),
+            "\"dataset_plan\": {\n    \"unexpected\": true,\n    \"schema\"");
+        check(throws([&] { project::parse_revision(unknown_plan_field); }),
+              "unknown dataset plan field is rejected");
+
+        const std::string member_marker = "\"image\": \"images/original.jpg\"";
+        std::string unknown_member_field = encoded;
+        const std::size_t member_marker_pos = unknown_member_field.find(member_marker);
+        if (member_marker_pos == std::string::npos)
+            throw std::runtime_error("dataset plan member marker missing from test JSON");
+        unknown_member_field.replace(
+            member_marker_pos, member_marker.size(),
+            member_marker + ",\n            \"unexpected\": true");
+        check(throws([&] { project::parse_revision(unknown_member_field); }),
+              "unknown dataset plan member field is rejected");
+
+        ProjectRevision duplicate_image = revision;
+        duplicate_image.dataset_plan.members[1].image =
+            duplicate_image.dataset_plan.members[0].image;
+        check(throws([&] { project::validate_revision(duplicate_image); }),
+              "duplicate dataset plan image is rejected");
+        ProjectRevision missing_plan_source = revision;
+        missing_plan_source.dataset_plan.members[0].source_id =
+            "sha256:" + std::string(64, '0');
+        check(throws([&] { project::validate_revision(missing_plan_source); }),
+              "dataset plan source must be included in revision");
+        ProjectRevision missing_plan_frame = revision;
+        missing_plan_frame.dataset_plan.members[0].frame_id =
+            "sha256:" + std::string(64, 'f');
+        check(throws([&] { project::validate_revision(missing_plan_frame); }),
+              "dataset plan frame must be listed in revision captures");
+        ProjectRevision unfrozen_plan = revision;
+        unfrozen_plan.dataset_plan.members[0].exclusion_group.clear();
+        check(throws([&] { project::validate_revision(unfrozen_plan); }),
+              "assigned dataset role requires a frozen exclusion group");
+        ProjectRevision pending_plan = revision;
+        pending_plan.dataset_plan.members[0].role = project::DatasetRole::Pending;
+        pending_plan.dataset_plan.members[0].exclusion_group.clear();
+        check(!throws([&] { project::validate_revision(pending_plan); }),
+              "pending dataset member may omit an exclusion group");
+        const fs::path role_root = root / "role-root";
+        const auto role_image = [&](const char* name) {
+            return (role_root / name).u8string();
+        };
+        project::DatasetPlan role_plan;
+        role_plan.members = {
+            {"train-a.jpg", "", "", "", "", "", "train-a", project::DatasetRole::Train},
+            {"train-b.jpg", "", "", "", "", "", "train-b", project::DatasetRole::Train},
+            {"validation.jpg", "", "", "", "", "", "validation",
+             project::DatasetRole::Validation},
+            {"evaluation.jpg", "", "", "", "", "", "evaluation",
+             project::DatasetRole::Evaluation},
+            {"excluded.jpg", "", "", "", "", "", "excluded",
+             project::DatasetRole::Excluded},
+        };
+        const std::vector<std::string> role_images = {
+            role_image("evaluation.jpg"), role_image("train-b.jpg"),
+            role_image("excluded.jpg"), role_image("validation.jpg"),
+            role_image("train-a.jpg"),
+        };
+        const project::DatasetRoleIndices role_indices =
+            project::resolve_dataset_roles(role_plan, role_root, role_images);
+        check(role_indices.train == std::vector<std::int32_t>{1, 4} &&
+                  role_indices.validation == std::vector<std::int32_t>{3} &&
+                  role_indices.evaluation == std::vector<std::int32_t>{0},
+              "dataset roles map exactly and preserve image order");
+        const std::vector<std::string> relative_role_images = {
+            "evaluation.jpg", "train-b.jpg", "excluded.jpg",
+            "validation.jpg", "train-a.jpg",
+        };
+        const project::DatasetRoleIndices relative_role_indices =
+            project::resolve_dataset_roles(
+                role_plan, role_root, relative_role_images);
+        check(relative_role_indices.train == role_indices.train &&
+                  relative_role_indices.validation == role_indices.validation &&
+                  relative_role_indices.evaluation == role_indices.evaluation,
+              "relative dataset images resolve against the project root");
+        project::DatasetPlan pending_roles = role_plan;
+        pending_roles.members.front().role = project::DatasetRole::Pending;
+        check(throws([&] {
+                  project::resolve_dataset_roles(pending_roles, role_root, role_images);
+              }),
+              "pending dataset role is rejected");
+        project::DatasetPlan empty_plan;
+        check(throws([&] {
+                  project::resolve_dataset_roles(empty_plan, role_root, role_images);
+              }),
+              "empty dataset plan is rejected");
+        std::vector<std::string> unmatched_image = role_images;
+        unmatched_image.push_back(role_image("not-planned.jpg"));
+        check(throws([&] {
+                  project::resolve_dataset_roles(role_plan, role_root, unmatched_image);
+              }),
+              "unmatched dataset image is rejected");
+        std::vector<std::string> duplicate_role_images = role_images;
+        duplicate_role_images.push_back(role_images.front());
+        check(throws([&] {
+                  project::resolve_dataset_roles(
+                      role_plan, role_root, duplicate_role_images);
+              }),
+              "duplicate dataset image is rejected");
+        project::DatasetPlan unmatched_member = role_plan;
+        unmatched_member.members.front().image = "not-parsed.jpg";
+        check(throws([&] {
+                  project::resolve_dataset_roles(unmatched_member, role_root, role_images);
+              }),
+              "unmatched plan member is rejected");
+        ProjectRevision mixed_roles = revision;
+        mixed_roles.dataset_plan.members[1].exclusion_group =
+            mixed_roles.dataset_plan.members[0].exclusion_group;
+        check(throws([&] { project::validate_revision(mixed_roles); }),
+              "exclusion group cannot mix assigned roles");
+        ProjectRevision pending_assigned_group = revision;
+        pending_assigned_group.dataset_plan.members[1].exclusion_group =
+            pending_assigned_group.dataset_plan.members[0].exclusion_group;
+        pending_assigned_group.dataset_plan.members[1].role =
+            project::DatasetRole::Pending;
+        check(throws([&] { project::validate_revision(pending_assigned_group); }),
+              "exclusion group cannot mix pending and assigned roles");
+
+        project::DatasetPlan coverage_plan;
+        coverage_plan.members = {
+            {"scene/left-a.jpg", "", "", "", "", "", "group-left",
+             project::DatasetRole::Pending},
+            {"scene/left-b.jpg", "", "", "", "", "", "group-left",
+             project::DatasetRole::Pending},
+            {"scene/right.jpg", "", "", "", "", "", "group-right",
+             project::DatasetRole::Pending},
+            {"scene/assigned.jpg", "", "", "", "", "", "group-right",
+             project::DatasetRole::Train},
+            {"scene/center.jpg", "", "", "", "", "", "group-center",
+             project::DatasetRole::Pending},
+            {"scene/missing-a.jpg", "", "", "", "", "", "group-missing-a",
+             project::DatasetRole::Pending},
+            {"scene/missing-b.jpg", "", "", "", "", "", "group-missing-b",
+             project::DatasetRole::Pending},
+        };
+        const std::vector<project::DatasetPoseEvidence> coverage_evidence = {
+            {"scene/left-a.jpg", -10.0, 0.0, 0.0},
+            {"scene/./left-b.jpg", -8.0, 0.0, 0.0},
+            {"scene/./right.jpg", 10.0, 0.0, 0.0},
+            {"scene/center.jpg", 1.0, 0.0, 0.0},
+            {"scene/missing-b.jpg", std::numeric_limits<double>::quiet_NaN(), 0.0, 0.0},
+        };
+        const project::DatasetPlan coverage_before = coverage_plan;
+        const std::vector<std::size_t> covered =
+            project::select_training_by_coverage(coverage_plan, coverage_evidence, 7);
+        const std::vector<std::size_t> covered_repeat =
+            project::select_training_by_coverage(coverage_plan, coverage_evidence, 7);
+        const std::vector<std::size_t> expected_covered = {2, 0, 1, 4, 5, 6};
+        bool coverage_unchanged = coverage_plan.members.size() ==
+                                   coverage_before.members.size();
+        for (std::size_t i = 0; coverage_unchanged && i < coverage_plan.members.size(); ++i) {
+            const auto& got = coverage_plan.members[i];
+            const auto& before = coverage_before.members[i];
+            coverage_unchanged = got.image == before.image && got.exclusion_group == before.exclusion_group &&
+                                 got.role == before.role;
+        }
+        check(covered == expected_covered && covered_repeat == covered &&
+                  coverage_unchanged && std::find(covered.begin(), covered.end(), 3) ==
+                                             covered.end(),
+              "coverage selection prefers spread, is deterministic, and preserves roles");
+        check(project::select_training_by_coverage(coverage_plan, coverage_evidence, 3) ==
+                  std::vector<std::size_t>{2, 0, 1},
+              "coverage selection includes whole exclusion groups within budget");
+        check(project::select_training_by_coverage(coverage_plan, coverage_evidence, 0).empty(),
+              "coverage selection honors zero budget");
+
+        project::DatasetPlan oversized_coverage;
+        oversized_coverage.members = {
+            {"wide-a.jpg", "", "", "", "", "", "wide", project::DatasetRole::Pending},
+            {"wide-b.jpg", "", "", "", "", "", "wide", project::DatasetRole::Pending},
+            {"near.jpg", "", "", "", "", "", "near", project::DatasetRole::Pending},
+        };
+        const std::vector<project::DatasetPoseEvidence> oversized_evidence = {
+            {"wide-a.jpg", -1.0, 0.0, 0.0},
+            {"wide-b.jpg", 1.0, 0.0, 0.0},
+            {"near.jpg", 0.0, 0.0, 0.0},
+        };
+        check(project::select_training_by_coverage(oversized_coverage, oversized_evidence, 1) ==
+                  std::vector<std::size_t>{0, 1},
+              "coverage selection allows the first oversized group and tie-breaks by ordinal");
+
+
+        ProjectRevision default_empty;
+        default_empty.name = "default-empty";
+        const ProjectRevision default_round_trip =
+            project::parse_revision(project::serialize_revision(default_empty));
+        check(default_round_trip.dataset_plan.schema == project::kDatasetPlanSchemaVersion &&
+                  default_round_trip.dataset_plan.members.empty(),
+              "default-empty revisions carry an empty dataset plan");
         ProjectRevision missing_origin = revision;
         missing_origin.sources[1].original_source_id =
             "sha256:" + std::string(64, '0');

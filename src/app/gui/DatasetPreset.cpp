@@ -5,6 +5,7 @@
 #include "data/JsonField.h"
 
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <stdexcept>
 
@@ -21,13 +22,15 @@ namespace {
     X("resume",                     sfm.prep.resume)                          \
     X("photo_import",               sfm.prep.photo_import)                    \
     X("use_found_masks",            use_found_masks)                          \
-    X("flip_found_masks",           sfm.prep.flip_found_masks)                \
-    X("video_fps",                  sfm.prep.video_fps)                       \
-    X("adaptive_fps",               sfm.prep.adaptive_fps)                    \
-    X("adaptive_range",             sfm.prep.adaptive_range)                  \
-    X("sharp_window",               sfm.prep.sharp_window)                    \
-    X("sync_tracks",                sfm.prep.sync_tracks)                     \
-    X("max_frames",                 sfm.prep.max_frames)                      \
+    X("flip_found_masks",            sfm.prep.flip_found_masks)                \
+    X("video_fps",                  sfm.prep.selection.video_fps)            \
+    X("adaptive_fps",               sfm.prep.selection.adaptive)              \
+    X("adaptive_range",             sfm.prep.selection.adaptive_range)        \
+    X("sharp_window",               sfm.prep.selection.sharp_window)          \
+    X("minimum_sharpness",          sfm.prep.selection.minimum_sharpness)     \
+    X("rescue_frames",              sfm.prep.selection.rescue_frames)         \
+    X("sync_tracks",                sfm.prep.selection.sync_tracks)            \
+    X("max_frames",                 sfm.prep.selection.max_frames)             \
     X("auto_rotate",                sfm.prep.auto_rotate)                     \
     X("force_external_decode",      sfm.prep.force_external_decode)           \
     X("pano_mode",                  sfm.prep.pano.mode)                       \
@@ -136,6 +139,19 @@ void clamp_choice(std::string& v, const char* const* options, int n) {
     v = options[0];
 }
 
+void validate_selection_schema(const JsonValue& fields,
+                               const std::string& path) {
+    const JsonValue* marker = fields.find("selection_schema_version");
+    if (!marker ||
+        (marker->type == JsonValue::Type::Number &&
+         std::isfinite(marker->num) &&
+         std::floor(marker->num) == marker->num &&
+         marker->num == (double)app::FrameSelectionSettings::kSchemaVersion))
+        return;
+    throw std::runtime_error(
+        path + " has an unsupported selection_schema_version");
+}
+
 }  // namespace
 
 
@@ -199,10 +215,18 @@ void sanitize_dataset_settings(DatasetSettings& s) {
     clamp_enum(p.photo_import, 0, app::kNumPhotoImports - 1);
     clamp_enum(p.pano.mode, 0, (int)app::Pano360Mode::Equirect);
     clamp_to(p.pano.size, 0, 16384);
-    p.video_fps = std::clamp(p.video_fps, 0.0f, 240.0f);
-    p.adaptive_range = std::clamp(p.adaptive_range, 1.0f, 64.0f);
-    clamp_to(p.sharp_window, 1, 1000);
-    clamp_to(p.max_frames, 1, 1000000);
+    p.selection.video_fps = std::clamp(p.selection.video_fps, 0.0f, 240.0f);
+    p.selection.adaptive_range =
+        std::clamp(p.selection.adaptive_range, 1.0f, 64.0f);
+    clamp_to(p.selection.sharp_window, 1, 1000);
+    if (!std::isfinite(p.selection.minimum_sharpness))
+        p.selection.minimum_sharpness = 0.0f;
+    else
+        p.selection.minimum_sharpness =
+            std::clamp(p.selection.minimum_sharpness, 0.0f, 1e9f);
+    clamp_to(p.selection.rescue_frames, 0,
+             app::FrameSelectionSettings::kMaxRescueFrames);
+    clamp_to(p.selection.max_frames, 1, 1000000);
     clamp_to(p.mask_detect_every, 1, 1000);
     clamp_to(p.mask_memory_frames, 0, 64);
 
@@ -265,6 +289,8 @@ void save_dataset_preset(const DatasetPreset& p, const std::string& path) {
     PresetHeader head{p.name, p.description, path};
     JsonWriter w = preset_writer(PresetKind::Dataset, head);
     w.key("settings").object();
+    w.field("selection_schema_version",
+            app::FrameSelectionSettings::kSchemaVersion);
 #define SS_DS_EMIT(key, member) w.field_raw(key, json_field::emit(p.s.member));
     SS_DATASET_PRESET_FIELDS(SS_DS_EMIT)
 #undef SS_DS_EMIT
@@ -280,6 +306,7 @@ DatasetPreset load_dataset_preset(const std::string& path) {
     const JsonValue* fields = root.find("settings");
     if (!fields || !fields->is_object())
         throw std::runtime_error(path + " holds no dataset settings");
+    validate_selection_schema(*fields, path);
 
     DatasetPreset p;
     p.path = path;

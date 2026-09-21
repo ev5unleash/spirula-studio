@@ -494,7 +494,8 @@ void launch_redistort_depth(
     const void* d_in, uint32_t elem_size,   // 2 = uint16 raw counts, 4 = float
     int B, int in_H, int in_W,
     float* d_float_out, int out_H, int out_W,
-    int ref_H, int ref_W);
+    int ref_H, int ref_W,
+    float depth_unit_scale_factor = 1.0f);
 
 
 void launch_redistort_mask(
@@ -535,7 +536,8 @@ void launch_warp_depth_wide(
     int in_H, int in_W,
     float* d_float_out, int K, int Hout, int Wout,
     const float* d_post_intrins,
-    const float* d_axes, bool input_is_ray_depth);
+    const float* d_axes, bool input_is_ray_depth,
+    float depth_unit_scale_factor = 1.0f);
 
 
 void launch_warp_depth_equi(
@@ -543,7 +545,8 @@ void launch_warp_depth_equi(
     int B, int Hin, int Win,
     float* d_float_out, int K, int Hout, int Wout,
     const float* d_post_intrins,
-    const float* d_axes, bool input_is_ray_depth);
+    const float* d_axes, bool input_is_ray_depth,
+    float depth_unit_scale_factor = 1.0f);
 
 
 void launch_warp_normal_wide(

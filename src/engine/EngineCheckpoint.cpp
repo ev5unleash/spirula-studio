@@ -13,12 +13,15 @@
 #include "engine/EngineState.h"
 
 #include "core/CheckpointIO.h"
+#include "data/Json.h"
 #include "external/npy.hpp"
+#include <cerrno>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -133,6 +136,11 @@ static std::string _build_state_json(
           << ", \"num_params\": " << s.ppisp.num_params
           << ", \"use_adagrad\": " << b(s.ppisp.use_adagrad);
     j << "},\n";
+    if (full && s.dm) {
+        j << "  \"sampler\": {\"version\": 1, \"seed\": "
+          << s.dm->initial_seed()
+          << ", \"consumed_steps\": " << s.dm->consumed_steps() << "},\n";
+    }
     j << "  \"arrays\": [";
     for (size_t i = 0; i < slots.size(); ++i) {
         const char* descr =
@@ -171,6 +179,82 @@ static std::string _json_str(const std::string& s, const std::string& key) {
     if (!_json_find(s, key, v) || s[v] != '"') return "";
     size_t e = s.find('"', v + 1);
     return (e == std::string::npos) ? "" : s.substr(v + 1, e - v - 1);
+}
+static bool _json_token_end(const std::string& s, size_t end) {
+    while (end < s.size() &&
+           (s[end] == ' ' || s[end] == '\t' ||
+            s[end] == '\n' || s[end] == '\r'))
+        ++end;
+    return end == s.size() || s[end] == ',' ||
+           s[end] == '}' || s[end] == ']';
+}
+
+static bool _json_i64_exact(const std::string& s, const std::string& key,
+                            int64_t& out) {
+    size_t v;
+    if (!_json_find(s, key, v) || v >= s.size()) return false;
+    if (s[v] != '-' && (s[v] < '0' || s[v] > '9')) return false;
+    errno = 0;
+    char* end = nullptr;
+    const long long value = std::strtoll(s.c_str() + v, &end, 10);
+    if (errno == ERANGE || end == s.c_str() + v ||
+        !_json_token_end(s, (size_t)(end - s.c_str())))
+        return false;
+    out = (int64_t)value;
+    return true;
+}
+
+static bool _json_u64_exact(const std::string& s, const std::string& key,
+                            uint64_t& out) {
+    size_t v;
+    if (!_json_find(s, key, v) || v >= s.size() ||
+        s[v] < '0' || s[v] > '9')
+        return false;
+    errno = 0;
+    char* end = nullptr;
+    const unsigned long long value =
+        std::strtoull(s.c_str() + v, &end, 10);
+    if (errno == ERANGE || end == s.c_str() + v ||
+        !_json_token_end(s, (size_t)(end - s.c_str())))
+        return false;
+    out = (uint64_t)value;
+    return true;
+}
+
+struct _SamplerState {
+    bool     present = false;
+    uint64_t seed = 0;
+    int64_t  consumed_steps = 0;
+};
+
+static _SamplerState _json_sampler(const std::string& s) {
+    const JsonValue root = json_parse(s);
+    const JsonValue* sampler = root.find("sampler");
+    if (!sampler) return {};
+    if (!sampler->is_object())
+        throw std::runtime_error(
+            "engine_load_checkpoint: sampler metadata must be an object");
+
+    const JsonValue* version = sampler->find("version");
+    const JsonValue* seed = sampler->find("seed");
+    const JsonValue* steps = sampler->find("consumed_steps");
+    if (!version || version->type != JsonValue::Type::Number ||
+        !std::isfinite(version->num) || !std::isfinite(seed ? seed->as_double(0) : 0) ||
+        !steps || steps->type != JsonValue::Type::Number ||
+        !std::isfinite(steps->num))
+        throw std::runtime_error(
+            "engine_load_checkpoint: malformed sampler metadata");
+
+    int64_t version_value = 0;
+    uint64_t seed_value = 0;
+    int64_t consumed_steps = 0;
+    if (!_json_i64_exact(s, "version", version_value) ||
+        !_json_u64_exact(s, "seed", seed_value) ||
+        !_json_i64_exact(s, "consumed_steps", consumed_steps) ||
+        version_value != 1 || seed_value == 0 || consumed_steps < 0)
+        throw std::runtime_error(
+            "engine_load_checkpoint: malformed sampler metadata");
+    return {true, seed_value, consumed_steps};
 }
 
 } // anon namespace
@@ -471,6 +555,7 @@ int engine_load_checkpoint(std::string input_dir) {
         throw std::runtime_error("engine_load_checkpoint: state.json missing in "
                                  + tarpath.string());
 
+    const _SamplerState sampler = _json_sampler(sj);
     const int     step          = (int)_json_int(sj, "step", 0);
     const int64_t cur_n         = _json_int(sj, "cur_num_splats", 0);
     const int64_t max_n         = _json_int(sj, "max_num_splats", 0);
@@ -538,5 +623,7 @@ int engine_load_checkpoint(std::string input_dir) {
     }
 
     backend::device_synchronize();
+    if (sampler.present && s.dm)
+        s.dm->restore_sampler(sampler.seed, sampler.consumed_steps);
     return step;
 }

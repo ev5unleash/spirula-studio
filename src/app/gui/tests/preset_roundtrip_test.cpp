@@ -83,14 +83,15 @@ static void test_dataset_preset() {
     s.sfm.prep.resume = false;
     s.sfm.prep.photo_import = gui::PhotoImport::Move;
     s.sfm.prep.flip_found_masks = true;
-    s.sfm.prep.video_fps = 5.5f;
-    s.sfm.prep.adaptive_fps = true;
-    s.sfm.prep.adaptive_range = 2.5f;
-    s.sfm.prep.sharp_window = 7;
-    s.sfm.prep.sync_tracks = false;
-    s.sfm.prep.max_frames = 1234;
+    s.sfm.prep.selection.video_fps = 5.5f;
+    s.sfm.prep.selection.adaptive = true;
+    s.sfm.prep.selection.adaptive_range = 2.5f;
+    s.sfm.prep.selection.sharp_window = 7;
+    s.sfm.prep.selection.minimum_sharpness = 23.5f;
+    s.sfm.prep.selection.rescue_frames = 6;
+    s.sfm.prep.selection.sync_tracks = false;
+    s.sfm.prep.selection.max_frames = 1234;
     s.sfm.prep.auto_rotate = false;
-    s.sfm.prep.force_external_decode = true;
     s.sfm.prep.pano.mode = app::Pano360Mode::Equirect;
     s.sfm.prep.pano.size = 2048;
     s.sfm.prep.pano.yaw = 10.0f;
@@ -181,6 +182,8 @@ static void test_dataset_preset() {
 
     const std::string path = (scratch() / "dataset.json").string();
     gui::save_dataset_preset(p, path);
+    CHECK(read_file_text(path).find("\"selection_schema_version\"") !=
+              std::string::npos);
     const gui::DatasetPreset back = gui::load_dataset_preset(path);
 
     CHECK_EQ(back.name, p.name);
@@ -194,13 +197,15 @@ static void test_dataset_preset() {
 
     CHECK_EQ(b.sfm.prep.resume, s.sfm.prep.resume);
     CHECK(b.sfm.prep.photo_import == s.sfm.prep.photo_import);
-    CHECK_EQ(b.sfm.prep.flip_found_masks, s.sfm.prep.flip_found_masks);
-    CHECK_EQ(b.sfm.prep.video_fps, s.sfm.prep.video_fps);
-    CHECK_EQ(b.sfm.prep.adaptive_fps, s.sfm.prep.adaptive_fps);
-    CHECK_EQ(b.sfm.prep.adaptive_range, s.sfm.prep.adaptive_range);
-    CHECK_EQ(b.sfm.prep.sharp_window, s.sfm.prep.sharp_window);
-    CHECK_EQ(b.sfm.prep.sync_tracks, s.sfm.prep.sync_tracks);
-    CHECK_EQ(b.sfm.prep.max_frames, s.sfm.prep.max_frames);
+    CHECK_EQ(b.sfm.prep.selection.video_fps, s.sfm.prep.selection.video_fps);
+    CHECK_EQ(b.sfm.prep.selection.adaptive, s.sfm.prep.selection.adaptive);
+    CHECK_EQ(b.sfm.prep.selection.adaptive_range, s.sfm.prep.selection.adaptive_range);
+    CHECK_EQ(b.sfm.prep.selection.sharp_window, s.sfm.prep.selection.sharp_window);
+    CHECK_EQ(b.sfm.prep.selection.minimum_sharpness,
+             s.sfm.prep.selection.minimum_sharpness);
+    CHECK_EQ(b.sfm.prep.selection.rescue_frames, s.sfm.prep.selection.rescue_frames);
+    CHECK_EQ(b.sfm.prep.selection.sync_tracks, s.sfm.prep.selection.sync_tracks);
+    CHECK_EQ(b.sfm.prep.selection.max_frames, s.sfm.prep.selection.max_frames);
     CHECK_EQ(b.sfm.prep.auto_rotate, s.sfm.prep.auto_rotate);
     CHECK_EQ(b.sfm.prep.force_external_decode, s.sfm.prep.force_external_decode);
     CHECK(b.sfm.prep.pano.mode == s.sfm.prep.pano.mode);
@@ -354,8 +359,10 @@ static void test_sanitize() {
     s.sfm.camera_model = "not-a-lens";
     s.sfm.features = 0;
     s.sfm.matcher = 1;          // LightGlue without a learned frontend
-    s.sfm.prep.sharp_window = -3;
-    s.sfm.prep.adaptive_range = 0.1f;
+    s.sfm.prep.selection.sharp_window = -3;
+    s.sfm.prep.selection.adaptive_range = 0.1f;
+    s.sfm.prep.selection.minimum_sharpness = -4.0f;
+    s.sfm.prep.selection.rescue_frames = -9;
     s.mask.threshold = 4.0f;
     s.colmap.matcher = 0;
     s.colmap.camera_model = "NONSENSE";
@@ -363,8 +370,10 @@ static void test_sanitize() {
     CHECK(s.sfm.quality >= 0 && s.sfm.quality <= 3);
     CHECK_EQ(s.sfm.camera_model, std::string("opencv"));
     CHECK_EQ(s.sfm.matcher, 0);
-    CHECK(s.sfm.prep.sharp_window >= 1);
-    CHECK(s.sfm.prep.adaptive_range >= 1.0f);
+    CHECK(s.sfm.prep.selection.sharp_window >= 1);
+    CHECK(s.sfm.prep.selection.adaptive_range >= 1.0f);
+    CHECK(s.sfm.prep.selection.minimum_sharpness >= 0.0f);
+    CHECK(s.sfm.prep.selection.rescue_frames >= 0);
     CHECK(s.mask.threshold <= 1.0f);
     CHECK(s.colmap.matcher >= 1);
     CHECK_EQ(s.colmap.camera_model, std::string("OPENCV"));
@@ -461,6 +470,39 @@ static void test_preset_schema() {
         }
     }
 }
+static void test_dataset_selection_schema() {
+    const std::string path = (scratch() / "dataset_selection_schema.json").string();
+    const std::string legacy =
+        "{\"spirula_preset\":1,\"kind\":\"dataset\",\"name\":\"legacy\","
+        "\"description\":\"old\",\"settings\":{\"video_fps\":5.5,"
+        "\"adaptive_fps\":true,\"adaptive_range\":2.5,\"sharp_window\":7,"
+        "\"sync_tracks\":false,\"max_frames\":1234}}";
+    gui::write_preset_file(path, legacy);
+    bool threw = false;
+    try {
+        const gui::DatasetPreset p = gui::load_dataset_preset(path);
+        CHECK_EQ(p.s.sfm.prep.selection.video_fps, 5.5f);
+        CHECK(p.s.sfm.prep.selection.adaptive);
+        CHECK_EQ(p.s.sfm.prep.selection.max_frames, 1234);
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    CHECK(!threw);
+
+    const std::string unsupported =
+        "{\"spirula_preset\":1,\"kind\":\"dataset\",\"name\":\"new\","
+        "\"description\":\"new\",\"settings\":{"
+        "\"selection_schema_version\":2}}";
+    gui::write_preset_file(path, unsupported);
+    threw = false;
+    try {
+        (void)gui::load_dataset_preset(path);
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
 
 // A preset of one kind must not load as another, whatever its name is.
 static void test_kinds_do_not_cross() {
@@ -487,7 +529,7 @@ int main() {
     test_mesh_preset();
     test_sanitize();
     test_preset_schema();
-    test_kinds_do_not_cross();
+    test_dataset_selection_schema();
     if (failures) {
         std::printf("preset_roundtrip_test: %d failure(s)\n", failures);
         return 1;

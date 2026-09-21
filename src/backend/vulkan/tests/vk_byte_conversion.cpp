@@ -37,6 +37,31 @@ int main() {
             return 1;
         }
     }
+    const std::vector<uint16_t> depth = {0, 1, 1000, 65535};
+    auto* device_depth = static_cast<uint16_t*>(
+        backend::device_malloc(depth.size() * sizeof(uint16_t)));
+    auto* device_depth_out = static_cast<float*>(
+        backend::device_malloc(depth.size() * sizeof(float)));
+    backend::memcpy_sync(device_depth, depth.data(),
+                         depth.size() * sizeof(uint16_t),
+                         backend::MemcpyKind::HostToDevice);
+    uint16_depth_to_float_raw(device_depth, device_depth_out, 1, 1,
+                              (int)depth.size(), 1, 0.001f);
+    std::vector<float> scaled_depth(depth.size());
+    backend::memcpy_sync(scaled_depth.data(), device_depth_out,
+                         scaled_depth.size() * sizeof(float),
+                         backend::MemcpyKind::DeviceToHost);
+    backend::device_free(device_depth_out);
+    backend::device_free(device_depth);
+    for (size_t i = 0; i < depth.size(); ++i) {
+        const float expected = (float)depth[i] * 0.001f;
+        if (std::fabs(scaled_depth[i] - expected) > 1e-6f) {
+            std::fprintf(stderr,
+                         "depth %u: got %.9g, expected %.9g\n",
+                         (unsigned)depth[i], scaled_depth[i], expected);
+            return 1;
+        }
+    }
     std::printf("vk_byte_conversion: %d values passed on %s\n", count,
                 backend::device_current_selector().c_str());
     return 0;

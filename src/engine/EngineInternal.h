@@ -24,7 +24,8 @@ void uint16_image_to_float_raw(const uint16_t* d_in, float* d_out,
 void uint8_normal_to_float_raw(const uint8_t*  d_in, float* d_out,
                                int B, int H, int W, int C);
 void uint16_depth_to_float_raw(const uint16_t* d_in, float* d_out,
-                               int B, int H, int W, int C);
+                               int B, int H, int W, int C,
+                               float depth_unit_scale_factor = 1.0f);
 
 // --- Fused bilagrid (image-grad + TV + Adam) kernel (BilagridFusedAdam.cu). ---
 // quant_bits: 4 or 8 -- selects QuantizedAdamState<BITS, 256> codec when

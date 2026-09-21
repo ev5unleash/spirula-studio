@@ -165,6 +165,44 @@ std::vector<Eac360Slice> eac360_slices(const Pano360Layout& l) {
             {2 * l.face + half + 2 * l.strip, 2 * l.face + half, half}};
 }
 
+Pano360ScoreRegions pano360_score_regions(const Pano360Layout& l, int track) {
+    Pano360ScoreRegions out{};
+    if (!l.valid() || track < 0 || track > 1 || l.track_w <= 0 || l.track_h <= 0)
+        return out;
+
+    if (l.sphere()) {
+        const int width = l.canvasW();
+        if (track != 0 || l.margin < 0 || width <= 0 ||
+            l.margin + width > l.track_w)
+            return out;
+        out.count = 1;
+        out.packed_width = width;
+        out.packed_height = l.track_h;
+        out.regions[0] = {l.margin, 0, width, l.track_h};
+        return out;
+    }
+
+    const int canvas_w = l.canvasW();
+    if (canvas_w <= 0) return out;
+    const std::vector<Eac360Slice> slices = eac360_slices(l);
+    if (slices.size() > (size_t)kPano360MaxScoreRegions) return out;
+
+    int packed_x = 0;
+    for (size_t i = 0; i < slices.size(); i++) {
+        const Eac360Slice& s = slices[i];
+        if (s.src_x < 0 || s.width <= 0 || s.src_x + s.width > l.track_w ||
+            s.dst_x != packed_x || s.dst_x + s.width > canvas_w)
+            return Pano360ScoreRegions{};
+        out.regions[i] = {s.src_x, 0, s.width, l.track_h};
+        packed_x += s.width;
+    }
+    if (packed_x != canvas_w) return Pano360ScoreRegions{};
+    out.count = (int)slices.size();
+    out.packed_width = canvas_w;
+    out.packed_height = l.track_h;
+    return out;
+}
+
 namespace {
 
 // Rows the panorama is short of the 2:1 its own scale asks for, per edge.

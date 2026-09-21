@@ -21,6 +21,7 @@
 #include "engine/Engine.h"
 #include "core/ColorSpace.h"
 #include "data/DatasetParser.h"
+#include "data/ProjectManifest.h"
 #include "app/OutputLease.h"
 #include "app/webviewer/RenderWorker.h"
 #include "config/TrainConfig.h"
@@ -184,6 +185,11 @@ public:
     // Human-readable progress/warning messages. Default (unset) = stdout.
     std::function<void(const std::string&)> log_fn;
 
+    // Set an immutable project dataset plan before check_config()/load_dataset().
+    // A project plan is authoritative only when this setter is called.
+    void set_project_dataset_plan(std::filesystem::path project_root,
+                                  project::DatasetPlan plan);
+
     // Output-dir / config.json overrides, for a front-end that owns them.
     std::string out_dir_override;      // "" = derive from cfg
     bool        write_config_json = true;
@@ -249,14 +255,9 @@ public:
 
     void save_checkpoint(int step);
 
-    // Held-out eval: render every frame of the eval split, score it, and write
-    // metrics.json. No-op when eval_mode is "all" (nothing is held out) or the
-    // eval split is empty. Replaces the engine's DataManager with one over the
-    // eval split, so it must run AFTER training.
-    //
-    // Reports l1/psnr/ssim and the cc_ variants of each (computed on the
-    // colour-corrected render). LPIPS is not computed here -- pass
-    // --save-eval-images and run reference/python/eval_lpips.py over the PNGs.
+    // Replaces DataManager, so run only after training.
+    // Writes L1/PSNR/SSIM and colour-corrected variants to metrics.json;
+    // LPIPS consumes the PNG pairs produced by --save-eval-images.
     void eval();
 
     // Restore engine state from cfg.resume; sets start_step. Called by
@@ -297,6 +298,12 @@ private:
     mutable std::mutex _progress_mutex;    // guards the latency window
     std::deque<double> _step_latencies;    // last 100, seconds
     bool _diverged_loss_reported = false;
+
+    void apply_project_roles(ParsedDataset& parsed) const;
+
+    std::optional<std::filesystem::path> _project_root;
+    std::optional<project::DatasetPlan> _dataset_plan;
 };
+
 
 }  // namespace spirula

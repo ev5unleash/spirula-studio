@@ -69,6 +69,54 @@ struct MatchesDatabase {
     }
 };
 
+// Verified inlier evidence grouped by canonical image-group pair.
+struct GroupOverlap {
+    std::string group1, group2;
+    uint64_t verified_pairs = 0;
+    uint64_t verified_inliers = 0;
+};
+
+inline std::vector<GroupOverlap> verifiedGroupOverlap(
+    const MatchesDatabase& db, const std::vector<std::string>& image_groups) {
+    if (image_groups.size() != db.images.size())
+        throw std::invalid_argument("image-group vector size does not match images");
+    for (const std::string& group : image_groups)
+        if (group.empty()) throw std::invalid_argument("image group is empty");
+
+    std::vector<GroupOverlap> overlaps;
+    const uint64_t max = std::numeric_limits<uint64_t>::max();
+    for (const TwoViewMatches& pair : db.pairs) {
+        if (pair.image1 >= db.images.size() || pair.image2 >= db.images.size())
+            throw std::out_of_range("match pair endpoint out of range");
+        if (pair.config == 0 || pair.matches.empty()) continue;
+
+        const std::string* group1 = &image_groups[pair.image1];
+        const std::string* group2 = &image_groups[pair.image2];
+        if (*group1 == *group2) continue;
+        if (*group2 < *group1) std::swap(group1, group2);
+        const uint64_t inliers = (uint64_t)pair.matches.size();
+        auto found = std::find_if(
+            overlaps.begin(), overlaps.end(), [&](const GroupOverlap& overlap) {
+                return overlap.group1 == *group1 && overlap.group2 == *group2;
+            });
+        if (found == overlaps.end()) {
+            overlaps.push_back({*group1, *group2, 1, inliers});
+            continue;
+        }
+        if (found->verified_pairs == max ||
+            inliers > max - found->verified_inliers)
+            throw std::overflow_error("verified overlap count overflow");
+        found->verified_pairs++;
+        found->verified_inliers += inliers;
+    }
+    std::sort(overlaps.begin(), overlaps.end(), [](const GroupOverlap& a,
+                                                   const GroupOverlap& b) {
+        if (a.group1 != b.group1) return a.group1 < b.group1;
+        return a.group2 < b.group2;
+    });
+    return overlaps;
+}
+
 namespace matches_detail {
 
 constexpr uint32_t kOldestVersion = 2;

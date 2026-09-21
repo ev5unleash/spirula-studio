@@ -70,7 +70,7 @@ void set_training_data(
     // RGB: float32 [0,1], uint8 [0,255], or uint16 [0,65535]. uint8/uint16
     // uploaded as raw bytes; converted to float on the GPU.
     TorchTensorView gt_rgb,          // [C, H, W, 3]
-    // Depth: float32 (passthrough) or uint16 (cast on GPU, no scaling). Null OK.
+    // Depth: float32 (passthrough) or uint16 (scaled on GPU). Null OK.
     TorchTensorView gt_depth,        // [C, H, W, 1]
     // Normal: float32 (passthrough) or uint8 (x/127.5 - 1 on GPU). Null OK.
     TorchTensorView gt_normal,       // [C, H, W, 3]
@@ -80,13 +80,13 @@ void set_training_data(
     // When false, the uploaded GT depth is treated as linear (z) depth and
     // converted to ray depth in place (the rasterizer renders ray depth).
     // True = the depth map already stores ray depth, no conversion.
-    bool input_depth_is_ray_depth = true
+    bool input_depth_is_ray_depth = true,
+    float depth_unit_scale_factor = 1.0f
 );
 
 
 // Warp-fused GT upload for a fisheye / equirectangular -> pinhole split: the
 // byte GT is warped on GPU straight into post-split float buffers, through
-// the camera table set_camera_params installed (call it FIRST).
 void set_training_data_warped(
     std::string  input_model_name,    // "FISHEYE" / "EQUISOLID" / "EQUIRECTANGULAR"
     std::string  input_distortion,
@@ -104,7 +104,8 @@ void set_training_data_warped(
     TorchTensorView input_dist_coeffs,// [B_in, 8] float
     TorchTensorView input_source_models,  // [B_in] int32 (nullable)
     TorchTensorView input_source_params,  // [B_in, 16] float
-    TorchTensorView face_axes         // [B_in*K, 3, 3] float (host or device)
+    TorchTensorView face_axes,         // [B_in*K, 3, 3] float (host or device)
+    float depth_unit_scale_factor = 1.0f
 );
 
 // --- Forward ---

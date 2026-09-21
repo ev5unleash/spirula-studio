@@ -20,7 +20,7 @@ void expect(bool ok, const std::string& what) {
 app::PrepJob two_clips() {
     app::PrepJob job;
     job.workspace = "/tmp/x";
-    job.video_fps = 2.0f;
+    job.selection.video_fps = 2.0f;
     app::PrepInput a, b;
     a.path = "/a.360";
     a.is_video = true;
@@ -51,10 +51,16 @@ int main() {
         j.pano.mode = app::Pano360Mode::Equirect;
     });
     moves("orientation", [](app::PrepJob& j) { j.pano.roll = 180.0f; });
-    moves("rate", [](app::PrepJob& j) { j.video_fps = 4.0f; });
+    moves("rate", [](app::PrepJob& j) { j.selection.video_fps = 4.0f; });
     moves("per-video rate", [](app::PrepJob& j) { j.inputs[1].fps = 6.0f; });
-    moves("adaptive switch", [](app::PrepJob& j) { j.adaptive_fps = true; });
-    moves("sharpness window", [](app::PrepJob& j) { j.sharp_window = 5; });
+    moves("adaptive switch", [](app::PrepJob& j) { j.selection.adaptive = true; });
+    moves("sharpness window", [](app::PrepJob& j) { j.selection.sharp_window = 5; });
+    moves("minimum sharpness", [](app::PrepJob& j) {
+        j.selection.minimum_sharpness = 10.0f;
+    });
+    moves("rescue window", [](app::PrepJob& j) {
+        j.selection.rescue_frames = 2;
+    });
     moves("input list", [](app::PrepJob& j) { j.inputs.pop_back(); });
 
     // And what does NOT: masking and the reconstruction stamp their own
@@ -72,18 +78,18 @@ int main() {
     {
         app::PrepJob j = two_clips();
         j.inputs[0].fps = 6.0f;
-        expect(app::input_fps(j.inputs, j.video_fps, 0) == 6.0f,
+        expect(app::input_fps(j.inputs, j.selection.video_fps, 0) == 6.0f,
                "a row that states a rate uses it");
-        expect(app::input_fps(j.inputs, j.video_fps, 1) == 6.0f,
+        expect(app::input_fps(j.inputs, j.selection.video_fps, 1) == 6.0f,
                "the row below follows it");
         expect(app::fps_group(j.inputs, 1) == 0,
                "and is in its group");
         j.inputs[1].fps = 1.0f;
-        expect(app::input_fps(j.inputs, j.video_fps, 1) == 1.0f,
+        expect(app::input_fps(j.inputs, j.selection.video_fps, 1) == 1.0f,
                "a row that states its own wins");
         expect(app::fps_group(j.inputs, 1) == 1, "and opens a group");
         app::PrepJob plain = two_clips();
-        expect(app::input_fps(plain.inputs, plain.video_fps, 1) == 2.0f,
+        expect(app::input_fps(plain.inputs, plain.selection.video_fps, 1) == 2.0f,
                "a list that states nothing is all on the dataset's rate");
     }
 

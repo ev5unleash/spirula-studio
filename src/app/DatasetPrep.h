@@ -7,6 +7,7 @@
 // Built-in video/masking backends fall back to ffmpeg/Python when unavailable.
 
 #include "app/FrameLook.h"
+#include "app/FrameMotion.h"
 #include "app/FrameMask.h"
 #include "app/Pano360.h"
 #include "app/ReconStamp.h"
@@ -183,17 +184,8 @@ struct PrepJob {
     // panoramas and pinhole faces in one image tree describes no camera rig.
     app::Pano360Options pano;
 
-    // Kept frames per second; PrepInput::fps overrides it per video.
-    float video_fps = 2.0f;
-    // Space them by view change rather than by time (app/FrameMotion.h): the
-    // rate above becomes the average and stays within `adaptive_range` of it.
-    bool  adaptive_fps = false;
-    float adaptive_range = 4.0f;
-    int   sharp_window = 3;          // keep the sharpest of N (1 = off)
-    // Every track of a multi-lens file keeps the same instants (one sharpness
-    // window over all of them), so every frame is a rig frame. Built-in decoder only.
-    bool  sync_tracks = true;
-    int   max_frames = 100000;
+    // Video frame extraction and selection policy.
+    FrameSelectionSettings selection;
     // Turn every extracted frame by the rotation the capture asks for, so a
     // portrait clip lands upright and the written files need no metadata read
     // to be shown the right way up.
@@ -271,7 +263,7 @@ inline size_t input_index(const PrepJob& job, const PrepInput& in) {
 }
 
 inline float input_fps(const PrepJob& job, const PrepInput& in) {
-    return input_fps(job.inputs, job.video_fps, input_index(job, in));
+    return input_fps(job.inputs, job.selection.video_fps, input_index(job, in));
 }
 
 // Images read where they are instead of gathered into the dataset's own
@@ -393,12 +385,14 @@ inline ReconStamp frames_stamp(const PrepJob& job) {
     ReconStamp st;
     st.present = true;
     st.engine = job.force_external_decode ? "ffmpeg" : "builtin";
-    st.args = {"--fps",         num(job.video_fps),
-               "--adaptive",    job.adaptive_fps ? "1" : "0",
-               "--range",       num(job.adaptive_range),
-               "--sharp",       num(job.sharp_window),
-               "--sync",        job.sync_tracks ? "1" : "0",
-               "--max-frames",  num(job.max_frames),
+    st.args = {"--fps",         num(job.selection.video_fps),
+               "--adaptive",    job.selection.adaptive ? "1" : "0",
+               "--range",       num(job.selection.adaptive_range),
+               "--sharp",       num(job.selection.sharp_window),
+               "--minimum-sharpness", num(job.selection.minimum_sharpness),
+               "--rescue-frames",    num(job.selection.rescue_frames),
+               "--sync",        job.selection.sync_tracks ? "1" : "0",
+               "--max-frames",  num(job.selection.max_frames),
                "--rotate",      job.auto_rotate ? "1" : "0",
                "--photos",      num((int)job.photo_import),
                "--360",         num((int)job.pano.mode),
@@ -593,8 +587,10 @@ struct DatasetPrepSinks {
     std::function<void(const PrepFrame&)> frame;
     std::function<void(std::vector<PrepScanRow>)> scan_reset;
     std::function<void(size_t)> scan_open;
-    std::function<void(size_t, int64_t, int64_t, float)> scan_step;
-    std::function<void(size_t, const std::vector<int64_t>&, int64_t)> scan_kept;
+    std::function<void(size_t, const FramePosition&, int64_t, float)> scan_step;
+    std::function<void(size_t, const std::vector<FrameSegmentSpan>&)> scan_spans;
+    std::function<void(size_t, const FramePlan&, int64_t)> scan_plan;
+    std::function<void(size_t, const FrameSelectionDecision&)> scan_decision;
 };
 
 // One tally spans all inputs so a multi-input step does not rewind its bar.
@@ -713,7 +709,7 @@ private:
     // The spacing chosen per input, and which of them have one: an adaptive
     // plan covers a whole rate group, so it is made before any of the group is
     // extracted rather than per video.
-    std::vector<std::vector<int64_t>> _plans;
+    std::vector<FramePlan> _plans;
     std::vector<bool> _planned;
     StageTally _frames_tally, _masks_tally;
 };

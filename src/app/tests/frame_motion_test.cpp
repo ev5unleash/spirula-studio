@@ -1,9 +1,10 @@
-// frame_motion -- the adaptive frame plan (app/FrameMotion.h). Three things
-// have gone wrong here and each is silent, so each is asserted: the count has
-// to land on the budget, the gaps have to stay inside the rate bounds, and a
-// burst of motion must not swallow the budget it cannot spend.
+// frame_motion -- the adaptive frame plan and Pano360's source scoring
+// regions. Motion errors are silent: the count has to land on the budget, the
+// gaps have to stay inside the rate bounds, and a burst of motion must not
+// swallow the budget it cannot spend.
 
 #include "app/FrameMotion.h"
+#include "app/Pano360.h"
 
 #include <cmath>
 #include <cstdio>
@@ -50,6 +51,62 @@ void check_plan(const char* name, const std::vector<float>& cost, int skip,
            tag + ": gaps " + std::to_string(tight) + ".." + std::to_string(wide) +
                " within " + std::to_string(min_gap) + ".." + std::to_string(max_gap));
 }
+void check_pano360_score_regions() {
+    app::Pano360Layout eac;
+    eac.packing = app::Pano360Packing::Eac;
+    eac.track_w = 28;
+    eac.track_h = 8;
+    eac.face = 8;
+    eac.strip = 2;
+    const app::Pano360ScoreRegions eac0 = app::pano360_score_regions(eac, 0);
+    const app::Pano360ScoreRegions eac1 = app::pano360_score_regions(eac, 1);
+    expect(eac0.count == 3 && eac1.count == 3, "EAC: three regions per track");
+    expect(eac0.packed_width == eac.canvasW() &&
+               eac0.packed_height == eac.track_h,
+           "EAC: packed dimensions equal one assembled canvas row");
+    const int want_x[] = {0, 6, 24};
+    const int want_w[] = {4, 16, 4};
+    int covered[28] = {};
+    int area = 0;
+    for (int i = 0; i < eac0.count; i++) {
+        const app::Pano360ScoreRegion& r = eac0.regions[i];
+        expect(r.x == want_x[i] && r.y == 0 && r.width == want_w[i] &&
+                   r.height == eac.track_h,
+               "EAC: source slices match canvas assembly cuts");
+        area += r.width * r.height;
+        for (int x = r.x; x < r.x + r.width; x++) covered[x]++;
+        expect(eac1.regions[i].x == r.x && eac1.regions[i].width == r.width &&
+                   eac1.regions[i].height == r.height,
+               "EAC: both tracks share the same valid slices");
+    }
+    expect(area == eac0.packed_width * eac0.packed_height,
+           "EAC: packed area equals the valid source area");
+    for (int x = 0; x < eac.track_w; x++)
+        expect(covered[x] == ((x < 4 || (x >= 6 && x < 22) || x >= 24) ? 1 : 0),
+               "EAC: overlap halves are excluded exactly");
+
+    app::Pano360Layout sphere;
+    sphere.packing = app::Pano360Packing::Sphere;
+    sphere.track_w = 40;
+    sphere.track_h = 12;
+    sphere.face = 8;
+    sphere.margin = 4;
+    const app::Pano360ScoreRegions s0 = app::pano360_score_regions(sphere, 0);
+    const app::Pano360ScoreRegions s1 = app::pano360_score_regions(sphere, 1);
+    expect(s0.count == 1 && s1.count == 0,
+           "Sphere: only track zero's central crop is valid");
+    if (s0.count == 1) {
+        const app::Pano360ScoreRegion& r = s0.regions[0];
+        expect(r.x == sphere.margin && r.y == 0 && r.width == sphere.canvasW() &&
+                   r.height == sphere.track_h,
+               "Sphere: region is the central canvas crop");
+        expect(r.x > 0 && r.x + r.width < sphere.track_w,
+               "Sphere: side padding is excluded");
+        expect(r.width * r.height == s0.packed_width * s0.packed_height,
+               "Sphere: packed area equals the valid source area");
+    }
+}
+
 
 }  // namespace
 
@@ -115,13 +172,16 @@ int main() {
     {
         std::vector<app::MotionPlanInput> in(2);
         for (int k = 0; k < 2; k++) {
-            in[k].cost.assign(600, k == 0 ? 0.002f : 0.06f);
-            in[k].ends = indices(600);
+            in[k].spans = {{0, 0, 599}};
+            in[k].steps.reserve(600);
+            for (int64_t i = 0; i < 600; i++)
+                in[k].steps.push_back({{0, i}, k == 0 ? 0.002f : 0.06f});
             in[k].frames = 600;
             in[k].skip = 15;
             in[k].window = 3;
         }
-        const std::vector<std::vector<int64_t>> got = app::plan_by_motion(in, 4.0f);
+        const std::vector<app::FramePlan> got =
+            app::plan_by_motion(in, 4.0f);
         const int a = (int)got[0].size(), b = (int)got[1].size();
         expect(a + b <= 80 && a + b >= 70,
                "shared: " + std::to_string(a + b) + " frames for a budget of 80");
@@ -130,10 +190,58 @@ int main() {
         expect(a >= 600 / 60, "shared: the still clip keeps its slowest rate");
         expect(b <= 600 / 3 + 1, "shared: the moving clip keeps its fastest rate");
     }
+    // Adjacent ordinals at a discontinuity stay separate identities. Each
+    // segment has enough frames for its own sharpness window, but no window
+    // may borrow the boundary frame from its neighbour.
+    {
+        app::MotionPlanInput segmented;
+        segmented.spans = {{0, 0, 2}, {1, 3, 5}};
+        segmented.steps = {};
+        segmented.steps.push_back({{0, 2}, 0.9f});
+        segmented.steps.push_back({{1, 5}, 0.9f});
+        segmented.frames = 6;
+        segmented.skip = 1;
+        segmented.window = 3;
+        const std::vector<app::FramePlan> plans =
+            app::plan_by_motion({segmented}, 4.0f);
+        expect(plans.size() == 1 && plans[0].size() == 2,
+               "segments: one plan entry per usable segment");
+        if (!plans.empty() && plans[0].size() == 2) {
+            expect(plans[0][0] == app::FramePosition{0, 2} &&
+                       plans[0][1] == app::FramePosition{1, 5},
+                   "segments: selected identities retain segment and ordinal");
+            expect(plans[0][0].segment != plans[0][1].segment,
+                   "segments: boundary is never flattened into one timeline");
+            expect(plans[0][0].ordinal <= segmented.spans[0].last_ordinal &&
+                       plans[0][1].ordinal >= segmented.spans[1].first_ordinal +
+                                                     segmented.window - 1,
+                   "segments: windows stay inside their segment spans");
+        }
+    }
+
+    // A segment shorter than the sharpness window cannot borrow frames from a
+    // neighbouring segment just because its ordinals are adjacent.
+    {
+        app::MotionPlanInput segmented;
+        segmented.spans = {{0, 0, 1}, {1, 2, 5}};
+        segmented.steps = {};
+        segmented.steps.push_back({{0, 1}, 0.9f});
+        segmented.steps.push_back({{1, 4}, 0.9f});
+        segmented.skip = 1;
+        segmented.window = 3;
+        const std::vector<app::FramePlan> plans =
+            app::plan_by_motion({segmented}, 4.0f);
+        expect(plans.size() == 1 && !plans[0].empty(),
+               "short segment: longer neighbour remains plannable");
+        for (const app::FramePosition& position : plans[0].frames)
+            expect(position.segment == 1 && position.ordinal >= 4,
+                   "short segment: no plan/window crosses its boundary");
+    }
 
     // Nothing to plan from.
     expect(app::plan_by_motion({}, {}, 0, 15, 3, 4.0f, 0).empty(),
            "empty: no samples, no plan");
+    check_pano360_score_regions();
 
     std::printf("%s\n", g_failures ? "FAILED" : "PASSED");
     return g_failures ? 1 : 0;

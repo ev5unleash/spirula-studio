@@ -4,6 +4,7 @@
 #include "app/WorkerRequest.h"
 #include "backend/api/BackendRuntime.h"
 #include "checkpoint/Resume.h"
+#include "checkpoint/SplatPly.h"
 #include "core/Env.h"
 
 #include <algorithm>
@@ -89,8 +90,9 @@ int main(int argc, char** argv) {
             return std::vector<std::string>{"--data", dataset.u8string(), "--data-format", "nerfstudio",
                 "--output-dir-prefix", outputs.u8string(), "--num-iterations", std::to_string(steps),
                 "--steps-per-save", "5", "--save-full-checkpoint", "1", "--save-only-latest-checkpoint", "0",
-                "--disable-viewer", "1", "--keep-viewer-alive", "0", "--sh-degree", "0",
-                "--cap-max", "256", "--eval-mode", "all", "--refine-start-iter", "100000"};
+                "--disable-viewer", "1", "--keep-viewer-alive", "0", "--sh-degree", "1",
+                "--sh-degree-warmup-every", "0", "--cap-max", "256", "--eval-mode", "all",
+                "--refine-start-iter", "100000"};
         };
         auto direct_args = args(12);
         direct_args.insert(direct_args.end(), {"--output-dir-name", "direct", "--device", device});
@@ -128,6 +130,34 @@ int main(int argc, char** argv) {
                 "real CLI training completes");
         const int direct_step = checkpoint_step(outputs / "direct");
         require(direct_step == 12, "full checkpoint records completed direct training step");
+        const auto direct_checkpoint =
+            ckpt::resolve_checkpoint(outputs / "direct");
+        const auto splats = spirula::read_splat_ply(
+            (direct_checkpoint.ckpt_dir / "splat.ply").string());
+        auto all_finite = [](const std::vector<float>& values) {
+            return std::all_of(values.begin(), values.end(),
+                               [](float v) { return std::isfinite(v); });
+        };
+        auto any_nonzero = [](const std::vector<float>& values) {
+            return std::any_of(values.begin(), values.end(),
+                               [](float v) { return v != 0.0f; });
+        };
+        require(splats.num > 0 && splats.sh_degree == 1 &&
+                    splats.means.size() == (size_t)splats.num * 3 &&
+                    splats.quats.size() == (size_t)splats.num * 4 &&
+                    splats.scales.size() == (size_t)splats.num * 3 &&
+                    splats.opacities.size() == (size_t)splats.num &&
+                    splats.features_dc.size() == (size_t)splats.num * 3 &&
+                    splats.features_sh.size() == (size_t)splats.num * 9 &&
+                    all_finite(splats.means) && all_finite(splats.quats) &&
+                    all_finite(splats.scales) && all_finite(splats.opacities) &&
+                    all_finite(splats.features_dc) &&
+                    all_finite(splats.features_sh),
+                "checkpoint splat export reimports finite degree-one fields");
+        require(any_nonzero(splats.means) && any_nonzero(splats.quats) &&
+                    any_nonzero(splats.features_dc) &&
+                    any_nonzero(splats.features_sh),
+                "checkpoint splat export preserves trained field values");
         require(metric_lines > 0 && !nonfinite,
                 "direct training reports finite metrics");
         metric_lines = 0;

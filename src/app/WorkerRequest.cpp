@@ -462,6 +462,7 @@ std::string input_json(const app::PrepInput& in) {
     add_string(out, "subdir", in.subdir, first); add_string(out, "mask_dir", in.mask_dir, first);
     add_string(out, "camera_model", in.camera_model, first);
     add_num(out, "focal_factor", in.focal_factor, first); add_int(out, "rig", in.rig, first);
+    add_num(out, "fps", in.fps, first);
     add_int(out, "video_tracks", in.video_tracks, first);
     if (!first) out += ',';
     first = false; out += "\"subcameras\":[";
@@ -509,11 +510,16 @@ std::string prep_json(const app::PrepJob& job) {
     add_num(pano, "yaw", job.pano.yaw, pf); add_num(pano, "pitch", job.pano.pitch, pf);
     add_num(pano, "roll", job.pano.roll, pf); pano += '}';
     add_json(out, "pano", pano, first);
-    add_num(out, "video_fps", job.video_fps, first);
-    add_bool(out, "adaptive_fps", job.adaptive_fps, first);
-    add_num(out, "adaptive_range", job.adaptive_range, first);
-    add_int(out, "sharp_window", job.sharp_window, first);
-    add_bool(out, "sync_tracks", job.sync_tracks, first); add_int(out, "max_frames", job.max_frames, first);
+    add_int(out, "selection_schema_version",
+            app::FrameSelectionSettings::kSchemaVersion, first);
+    add_num(out, "video_fps", job.selection.video_fps, first);
+    add_bool(out, "adaptive_fps", job.selection.adaptive, first);
+    add_num(out, "adaptive_range", job.selection.adaptive_range, first);
+    add_int(out, "sharp_window", job.selection.sharp_window, first);
+    add_num(out, "minimum_sharpness", job.selection.minimum_sharpness, first);
+    add_int(out, "rescue_frames", job.selection.rescue_frames, first);
+    add_bool(out, "sync_tracks", job.selection.sync_tracks, first);
+    add_int(out, "max_frames", job.selection.max_frames, first);
     add_bool(out, "auto_rotate", job.auto_rotate, first);
     add_bool(out, "force_external_decode", job.force_external_decode, first);
     add_string(out, "ffmpeg_exe", job.ffmpeg_exe, first);
@@ -608,6 +614,7 @@ app::PrepInput decode_input(const JsonValue& v) {
     in.subdir = string_value(v, "subdir"); in.mask_dir = string_value(v, "mask_dir");
     in.camera_model = string_value(v, "camera_model");
     in.focal_factor = float_value(v, "focal_factor", 0.0f, 100.0f);
+    in.fps = optional_float(v, "fps", 0.0f, 0.0f, 100000.0f);
     in.rig = int_value(v, "rig", -100, 100); in.video_tracks = int_value(v, "video_tracks", 0, 1024);
     const JsonValue& subs = array_value(v, "subcameras");
     in.subcameras.reserve(subs.arr.size());
@@ -630,6 +637,10 @@ app::PrepInput decode_input(const JsonValue& v) {
 
 app::PrepJob decode_prep(const JsonValue& root) {
     if (root.type != JsonValue::Type::Object) throw std::runtime_error("payload: prep root must be an object");
+    (void)optional_int(root, "selection_schema_version",
+                       app::FrameSelectionSettings::kSchemaVersion,
+                       app::FrameSelectionSettings::kSchemaVersion,
+                       app::FrameSelectionSettings::kSchemaVersion);
     app::PrepJob job;
     const JsonValue& inputs = array_value(root, "inputs");
     if (inputs.arr.empty() || inputs.arr.size() > 65536) throw std::runtime_error("payload: invalid inputs");
@@ -646,11 +657,19 @@ app::PrepJob decode_prep(const JsonValue& root) {
     job.pano.yaw = float_value(pano, "yaw", -360.0f, 360.0f);
     job.pano.pitch = float_value(pano, "pitch", -360.0f, 360.0f);
     job.pano.roll = float_value(pano, "roll", -360.0f, 360.0f);
-    job.video_fps = float_value(root, "video_fps", 0.0f, 100000.0f);
-    job.adaptive_fps = bool_value(root, "adaptive_fps");
-    job.adaptive_range = float_value(root, "adaptive_range", 1.0f, 16.0f);
-    job.sharp_window = int_value(root, "sharp_window", 1, 100000);
-    job.sync_tracks = bool_value(root, "sync_tracks"); job.max_frames = int_value(root, "max_frames", 1, 1000000000);
+    job.selection.video_fps = float_value(root, "video_fps", 0.0f, 100000.0f);
+    job.selection.adaptive = bool_value(root, "adaptive_fps");
+    job.selection.adaptive_range = float_value(root, "adaptive_range", 1.0f, 16.0f);
+    job.selection.sharp_window = int_value(root, "sharp_window", 1, 100000);
+    // These fields were added after the original flat payload. Missing values
+    // retain the ordinary policy so requests without a marker remain readable.
+    job.selection.minimum_sharpness =
+        optional_float(root, "minimum_sharpness", 0.0f, 0.0f, 1e9f);
+    job.selection.rescue_frames = optional_int(
+        root, "rescue_frames", 0, 0,
+        app::FrameSelectionSettings::kMaxRescueFrames);
+    job.selection.sync_tracks = bool_value(root, "sync_tracks");
+    job.selection.max_frames = int_value(root, "max_frames", 1, 1000000000);
     job.auto_rotate = bool_value(root, "auto_rotate"); job.force_external_decode = bool_value(root, "force_external_decode");
     job.ffmpeg_exe = string_value(root, "ffmpeg_exe"); job.image_gamut = string_value(root, "image_gamut");
     if (const JsonValue* linear = optional(root, "image_is_linear")) {

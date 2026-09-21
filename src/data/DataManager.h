@@ -378,6 +378,16 @@ public:
     // Most render passes one input image costs: 1 unless faces differ in size.
     int max_face_passes() const;
 
+    // The actual nonzero seed used to initialize the sampler.
+    uint64_t initial_seed() const;
+    int64_t consumed_steps() const;
+
+
+    // Reconstruct the training/validation sampler after exactly
+    // `consumed_steps` training steps. DISK mode restarts its prefetch
+    // pipeline after rebuilding the sampler.
+    void restore_sampler(uint64_t initial_seed, int64_t consumed_steps);
+
 private:
     std::unique_ptr<DataManagerImpl> _impl;
 };

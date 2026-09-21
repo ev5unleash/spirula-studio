@@ -245,7 +245,8 @@ void launch_warp_depth_wide(
     int in_H, int in_W,
     float* d_float_out, int K, int Hout, int Wout,
     const float* d_post_intrins,
-    const float* d_axes, bool input_is_ray_depth)
+    const float* d_axes, bool input_is_ray_depth,
+    float depth_unit_scale_factor = 1.0f)
 {
     CameraModelType cm = cmt(camera_model);
     CameraDistortionCoeffsBuffer dcb(const_cast<float*>(d_dist_coeffs));
@@ -259,8 +260,8 @@ void launch_warp_depth_wide(
                 <<<_LAUNCH_ARGS_3D(Wout, Hout, B, 16, 16, 1)>>>(                  \
                     cm, intrins_f4, dcb, d_source_models, d_source_params,        \
                     _make_tv4_in<uint16_t>((const uint16_t*)d_depth, B, Hin, Win, 1), \
-                    out_v, d_post_intrins, d_axes, in_H, in_W, 1.0f,              \
-                    input_is_ray_depth);                                          \
+                    out_v, d_post_intrins, d_axes, in_H, in_W,                    \
+                    depth_unit_scale_factor, input_is_ray_depth);                \
         } else {                                                                  \
             warp_depth_wide_to_pinhole_kernel<D, FROM, float>                     \
                 <<<_LAUNCH_ARGS_3D(Wout, Hout, B, 16, 16, 1)>>>(                  \
@@ -280,14 +281,16 @@ void launch_warp_depth_equi(
     int B, int Hin, int Win,
     float* d_float_out, int K, int Hout, int Wout,
     const float* d_post_intrins,
-    const float* d_axes, bool input_is_ray_depth)
+    const float* d_axes, bool input_is_ray_depth,
+    float depth_unit_scale_factor = 1.0f)
 {
     auto out_v = _make_tv5_out(d_float_out, B, K, Hout, Wout, 1);
     if (elem_size == 2) {
         warp_depth_equirectangular_to_pinhole_kernel<uint16_t>
             <<<_LAUNCH_ARGS_3D(Wout, Hout, B, 16, 16, 1)>>>(
                 _make_tv4_in<uint16_t>((const uint16_t*)d_depth, B, Hin, Win, 1),
-                out_v, d_post_intrins, d_axes, 1.0f, input_is_ray_depth);
+                out_v, d_post_intrins, d_axes, depth_unit_scale_factor,
+                input_is_ray_depth);
     } else if (elem_size == 4) {
         warp_depth_equirectangular_to_pinhole_kernel<float>
             <<<_LAUNCH_ARGS_3D(Wout, Hout, B, 16, 16, 1)>>>(

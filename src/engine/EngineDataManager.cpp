@@ -455,7 +455,8 @@ static int _install_and_forward(const DecodedBatch& b, std::string primitive,
                                 int sh_degree, bool packed,
                                 bool with_geometry = false,
                                 bool input_depth_is_ray_depth = true,
-                                int dist_type = 0, int pass = 0) {
+                                int dist_type = 0, int pass = 0,
+                                float depth_unit_scale_factor = 1.0f) {
     const bool geom = with_geometry;
     if (b.K <= 1 && b.input_source_models.empty()) {
         set_camera_params((int)b.width, (int)b.height,
@@ -465,7 +466,8 @@ static int _install_and_forward(const DecodedBatch& b, std::string primitive,
         set_training_data(b.rgb_view,
                           geom ? b.depth_view : _tv_null(),
                           geom ? b.normal_view : _tv_null(),
-                          b.mask_view, input_depth_is_ray_depth);
+                          b.mask_view, input_depth_is_ray_depth,
+                          depth_unit_scale_factor);
     } else {
         // Faces of unequal size render one pass at a time; the rows of a pass
         // are contiguous, and a fetched batch is one input image.
@@ -499,7 +501,8 @@ static int _install_and_forward(const DecodedBatch& b, std::string primitive,
             input_depth_is_ray_depth,
             b.input_intrins_view, b.input_dist_coeffs_view,
             b.input_source_models_view, b.input_source_params_view,
-            _slice_rows(b.face_axes_view, k0, Kc));
+            _slice_rows(b.face_axes_view, k0, Kc),
+            depth_unit_scale_factor);
         forward_3dgs(std::move(primitive), sh_degree, packed,
                      /*output_median=*/false, dist_type);
         return _batch_views(b, pass);
@@ -580,7 +583,7 @@ int engine_preview_forward(int index, std::string primitive, int sh_degree,
     _install_and_forward(
         b, std::move(primitive), sh_degree, packed,
         /*with_geometry=*/true, loss.input_depth_is_ray_depth, (int)dist_type,
-        pass);
+        pass, loss.depth_unit_scale_factor);
 
     if (apply_color_correction) {
         const bool ppisp_after = engine().ppisp.enabled && !ppisp_in_forward;

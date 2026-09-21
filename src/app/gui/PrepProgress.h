@@ -11,11 +11,12 @@
 // SfmRunner fills it by parsing the child's stdout; when the SfM module
 // becomes a library (docs/notes/sfm-port-plan.md phase 3) only that parser goes.
 
+#include "app/FrameMotion.h"
+
 #include <cstdint>
 #include <mutex>
 #include <string>
 #include <vector>
-
 namespace gui {
 
 // The steps a dataset run goes through, in order. Both engines report through
@@ -47,14 +48,23 @@ struct ScanRow {
     std::vector<int32_t> hits;  // steps that landed in each slice, for the mean
     std::vector<float> kept;    // empty until the plan is made
     int64_t kept_n = 0;         // frames the plan keeps
+    bool plan_received = false;
+    int64_t planned_n = 0;
+    int64_t accepted_n = 0;
+    int64_t rescued_n = 0;
+    int64_t rejected_n = 0;
+    int64_t span_n = 0;
+    std::vector<app::FrameSegmentSpan> spans;
+    std::vector<app::FrameSelectionDecision> decisions;
 };
 
 // Enough that a burst of motion is a spike rather than a wide block, and few
 // enough that a plan of forty frames still fills some of them.
 inline constexpr int kScanSlices = 192;
+inline constexpr size_t kScanMarkerCap = 4096;
+inline constexpr size_t kScanSpanCap = 512;
 
-std::vector<float> scan_plan_bars(const std::vector<int64_t>& plan,
-                                  int64_t frames);
+std::vector<float> scan_plan_bars(const app::FramePlan& plan, int64_t frames);
 
 // A line of a run's output. `detail` is the stream a developer reads; the rest
 // is the handful worth showing without asking for it.
@@ -81,13 +91,13 @@ public:
     void note(const std::string& text, bool detail);
     void note(Stage s, const std::string& text, bool detail);
 
-    // The adaptive pass as the panel watching it draws (ScanRow): the inputs
-    // it will cover, one measured step folded in, and the spacing a row ended
-    // up with. `scanning` is what says the panel is the one worth showing.
     void scan_reset(std::vector<ScanRow> rows);
     void scan_open(size_t row);
-    void scan_step(size_t row, int64_t at, int64_t of, float cost);
-    void scan_kept(size_t row, std::vector<float> bars, int64_t kept);
+    void scan_step(size_t row, const app::FramePosition& at, int64_t of,
+                   float cost);
+    void scan_spans(size_t row, const std::vector<app::FrameSegmentSpan>& spans);
+    void scan_plan(size_t row, const app::FramePlan& plan, int64_t frames);
+    void scan_decision(size_t row, const app::FrameSelectionDecision& decision);
     std::vector<ScanRow> scan() const;
     bool scanning() const;
 

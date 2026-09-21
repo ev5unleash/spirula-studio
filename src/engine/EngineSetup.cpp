@@ -92,10 +92,12 @@ void set_training_data(
     TorchTensorView gt_depth,
     TorchTensorView gt_normal,
     TorchTensorView gt_alpha,
-    bool input_depth_is_ray_depth
+    bool input_depth_is_ray_depth,
+    float depth_unit_scale_factor
 ) {
     engine().gt.rgb    = _hv_to_dt3d_gt<float3>(gt_rgb,    PoolSlot::GtRgb,    "rgb");
-    engine().gt.depth  = _hv_to_dt3d_gt<float>(gt_depth,   PoolSlot::GtDepth,  "depth");
+    engine().gt.depth  = _hv_to_dt3d_gt<float>(
+        gt_depth, PoolSlot::GtDepth, "depth", depth_unit_scale_factor);
     engine().gt.normal = _hv_to_dt3d_gt<float3>(gt_normal, PoolSlot::GtNormal, "normal");
     // gt_alpha: small bool/uint8 buffer (the external mask). No conversion;
     // the slang kernel reads bool per pixel. Drives engine().gt.has_mask.

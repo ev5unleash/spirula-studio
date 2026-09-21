@@ -48,6 +48,8 @@ struct FrameExtractJob : FrameLook {
     int   skip = 1;                // write one frame every n source frames
     int   keep = -1;               // sharpest of the last n; -1 = round(skip/2)
     int   max_frames = 0;          // 0 = no cap
+    float minimum_sharpness = 0.0f;// 0 disables a positive floor
+    int   rescue_frames = 0;       // earlier candidates to try
     int   quality = 95;            // JPEG quality; outside 0..100 writes PNG
     int   track = -1;              // -1 = every track
     int   threads = 0;             // encoder threads; 0 = cores - 1
@@ -63,7 +65,7 @@ struct FrameExtractJob : FrameLook {
     // The spacing to keep, when the caller has already worked it out: several
     // videos on one rate share a budget, and that plan cannot be made from one
     // of them. Empty lets the run measure and plan its own.
-    std::vector<int64_t> plan;
+    FramePlan plan;
 
     // Masking. Empty model = no masks.
     sam::MaskOptions mask;
@@ -75,12 +77,14 @@ struct FrameExtractStats {
     double drain = 0, total = 0, encode_cpu = 0;
     double plan = 0;                 // the adaptive pass, decode included
     int64_t decoded = 0, measured = 0, written = 0, analyzed = 0;
+    int64_t accepted = 0, rescued = 0, rejected = 0;
     int    tracks = 1;
     int    encoder_threads = 0;
     int    write_failures = 0;
     std::string source_id;
     std::vector<video::TrackInfo> streams;
 };
+
 
 struct FrameExtractSinks {
     // One line of human-readable progress. May be called from a worker thread.
@@ -90,13 +94,19 @@ struct FrameExtractSinks {
     // The adaptive pass, which writes nothing and runs before anything else
     // does: (frames looked at, frames in the track). Called as it goes.
     std::function<void(int64_t, int64_t)> scanning;
-    // And the spacing it settled on: the source frame each kept frame ends at,
+    // Segment spans observed while decoding. Positions are source identities,
+    // not presentation ordinals projected into one timeline.
+    std::function<void(const std::vector<FrameSegmentSpan>&)> spans;
+    // The spacing it settled on: source positions each kept frame ends at,
     // over a capture that many frames long.
-    std::function<void(const std::vector<int64_t>&, int64_t)> planned;
+    std::function<void(const FramePlan&, int64_t)> planned;
     // Each step as it is measured, for a panel drawing the curve live: the
-    // frame it ends at, how many the capture holds, and the view change across
-    // it.
-    std::function<void(int64_t, int64_t, float)> measured;
+    // source position it ends at, how many the capture holds, and the view
+    // change across it.
+    std::function<void(const FramePosition&, int64_t, float)> measured;
+    // One outcome for each selection interval. Synchronized tracks call this
+    // once for their common instant, not once per output track.
+    std::function<void(const FrameSelectionDecision&)> decision;
     // A frame worth showing, RGB8 tightly packed, on the extraction thread with
     // the picture still on the host, and the file it is about to be written to
     // (which the writer pool has not reached yet). Copy what you need and
@@ -146,8 +156,9 @@ bool scan_motion(const FrameExtractJob& job, const FrameExtractSinks& sinks,
                  MotionPlanInput& out, FrameExtractStats& stats,
                  std::string& error);
 
-// What a plan came out as: the log line, and `sinks.planned`.
-void report_plan(const FrameExtractSinks& sinks, const std::vector<int64_t>& plan,
+// What a plan came out as: the log line, and `sinks.planned`, with source
+// segment identities intact.
+void report_plan(const FrameExtractSinks& sinks, const FramePlan& plan,
                  int64_t frames, double fps);
 
 // The frames at `indices`, as extract_frames() would write them, served by

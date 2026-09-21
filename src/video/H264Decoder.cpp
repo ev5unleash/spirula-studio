@@ -134,7 +134,8 @@ struct DpbFrame {
     int  frame_num_wrap = 0;
     int  pic_num = 0;
     int  long_term_frame_idx = 0;
-    int  poc = 0;
+    int  top_poc = 0;
+    int  bottom_poc = 0;
     StdVideoDecodeH264ReferenceInfo std_ref{};
 };
 
@@ -984,8 +985,8 @@ bool H264Decoder::decodeFrame(const uint8_t* data, size_t size, int nal_length_s
     for (uint32_t i = 0; i < format_.max_dpb_slots; ++i) {
         if (!dpb_[i].used) continue;
         dpb_[i].std_ref.FrameNum = (uint16_t)dpb_[i].frame_num;
-        dpb_[i].std_ref.PicOrderCnt[0] = dpb_[i].poc;
-        dpb_[i].std_ref.PicOrderCnt[1] = dpb_[i].poc;
+        dpb_[i].std_ref.PicOrderCnt[0] = dpb_[i].top_poc;
+        dpb_[i].std_ref.PicOrderCnt[1] = dpb_[i].bottom_poc;
         out.refs.push_back({(int32_t)i, &dpb_[i].std_ref});
         if (out.refs.size() >= format_.max_active_references) break;
     }
@@ -1036,6 +1037,14 @@ void H264Decoder::commitFrame() {
     if (pending_slot_ < 0 || !pending_sps_) return;
     applyMarking(pending_sh_, *pending_sps_);
 
+    if (prev_mmco5_) {
+        // H.264 8.2.1 rebases the current reference before it enters the DPB.
+        bottom_poc_ -= top_poc_;
+        top_poc_ = 0;
+        prev_frame_num_ = 0;
+        prev_frame_num_offset_ = 0;
+    }
+
     DpbFrame& f = dpb_[(size_t)pending_slot_];
     f = DpbFrame{};
     if (pending_is_ref_) {
@@ -1043,7 +1052,8 @@ void H264Decoder::commitFrame() {
         f.frame_num = (int)pending_sh_.frame_num;
         f.frame_num_wrap = f.frame_num;
         f.pic_num = f.frame_num;
-        f.poc = std::min(top_poc_, bottom_poc_);
+        f.top_poc = top_poc_;
+        f.bottom_poc = bottom_poc_;
         f.long_term = pending_idr_ && pending_sh_.long_term_reference_flag;
         if (!pending_idr_) {
             for (const auto& m : pending_sh_.mmco)
@@ -1054,15 +1064,8 @@ void H264Decoder::commitFrame() {
         }
         f.std_ref.flags.used_for_long_term_reference = f.long_term ? 1 : 0;
         f.std_ref.FrameNum = (uint16_t)f.frame_num;
-        f.std_ref.PicOrderCnt[0] = f.poc;
-        f.std_ref.PicOrderCnt[1] = f.poc;
-    }
-    if (prev_mmco5_) {
-        // 8.2.1: after MMCO 5 the picture's POC is rebased to zero.
-        bottom_poc_ -= top_poc_;
-        top_poc_ = 0;
-        prev_frame_num_ = 0;
-        prev_frame_num_offset_ = 0;
+        f.std_ref.PicOrderCnt[0] = f.top_poc;
+        f.std_ref.PicOrderCnt[1] = f.bottom_poc;
     }
     pending_slot_ = -1;
 }

@@ -872,6 +872,62 @@ SS_MSG(scan_kept_frames,
     NL("{0} beelden gehouden"),
     RU("оставлено кадров: {0}"),
     TR("{0} kare tutuldu"));
+SS_MSG(scan_segments,
+    EN("{0} segments"), JA("{0} セグメント"), ZH_HANS("{0} 个片段"),
+    ZH_HANT("{0} 個片段"), KO("세그먼트 {0}개"), DE("{0} Segmente"),
+    FR("{0} segments"), ES("{0} segmentos"), PT("{0} segmentos"),
+    IT("{0} segmenti"), NL("{0} segmenten"), RU("сегментов: {0}"),
+    TR("{0} segment"));
+
+SS_MSG(scan_segment_boundary,
+    EN("segment boundary"), JA("セグメント境界"), ZH_HANS("片段边界"),
+    ZH_HANT("片段邊界"), KO("세그먼트 경계"), DE("Segmentgrenze"),
+    FR("limite de segment"), ES("límite de segmento"),
+    PT("limite do segmento"), IT("confine del segmento"),
+    NL("segmentgrens"), RU("граница сегмента"), TR("segment sınırı"));
+
+SS_MSG(scan_planned_frames,
+    EN("{0} planned"), JA("{0} 件を計画"), ZH_HANS("计划 {0} 帧"),
+    ZH_HANT("計畫 {0} 影格"), KO("{0}개 계획됨"), DE("{0} geplant"),
+    FR("{0} planifiées"), ES("{0} planificados"), PT("{0} planeados"),
+    IT("{0} pianificati"), NL("{0} gepland"), RU("запланировано: {0}"),
+    TR("{0} planlandı"));
+
+SS_MSG(scan_accepted_frames,
+    EN("{0} accepted"), JA("{0} 件を採用"), ZH_HANS("接受 {0} 帧"),
+    ZH_HANT("接受 {0} 影格"), KO("{0}개 승인됨"), DE("{0} angenommen"),
+    FR("{0} acceptées"), ES("{0} aceptados"), PT("{0} aceites"),
+    IT("{0} accettati"), NL("{0} geaccepteerd"), RU("принято: {0}"),
+    TR("{0} kabul edildi"));
+
+SS_MSG(scan_rescued_frames,
+    EN("{0} rescued"), JA("{0} 件を救済"), ZH_HANS("挽救 {0} 帧"),
+    ZH_HANT("挽救 {0} 影格"), KO("{0}개 복구됨"), DE("{0} gerettet"),
+    FR("{0} récupérées"), ES("{0} rescatados"), PT("{0} recuperados"),
+    IT("{0} recuperati"), NL("{0} gered"), RU("спасено: {0}"),
+    TR("{0} kurtarıldı"));
+
+SS_MSG(scan_rejected_frames,
+    EN("{0} rejected"), JA("{0} 件を除外"), ZH_HANS("拒绝 {0} 帧"),
+    ZH_HANT("拒絕 {0} 影格"), KO("{0}개 거부됨"), DE("{0} abgelehnt"),
+    FR("{0} rejetées"), ES("{0} rechazados"), PT("{0} rejeitados"),
+    IT("{0} rifiutati"), NL("{0} afgewezen"), RU("отклонено: {0}"),
+    TR("{0} reddedildi"));
+
+SS_MSG(scan_marker_help,
+    EN("Markers show planned intervals and the frame selected from each interval."),
+    JA("マーカーは計画した区間と、各区間から選ばれたフレームを示します。"),
+    ZH_HANS("标记显示计划区间以及每个区间选中的帧。"),
+    ZH_HANT("標記顯示計畫區間以及每個區間選取的影格。"),
+    KO("마커는 계획된 구간과 각 구간에서 선택된 프레임을 보여줍니다."),
+    DE("Markierungen zeigen geplante Intervalle und das daraus gewählte Bild."),
+    FR("Les marqueurs montrent les intervalles prévus et l'image choisie dans chacun."),
+    ES("Los marcadores muestran los intervalos previstos y el fotograma elegido en cada uno."),
+    PT("Os marcadores mostram os intervalos planeados e o quadro escolhido em cada um."),
+    IT("Gli indicatori mostrano gli intervalli previsti e il fotogramma scelto da ciascuno."),
+    NL("Markeringen tonen geplande intervallen en het beeld dat uit elk interval is gekozen."),
+    RU("Маркеры показывают запланированные интервалы и кадр, выбранный в каждом."),
+    TR("İşaretler planlanan aralıkları ve her aralıktan seçilen kareyi gösterir."));
 
 SS_MSG(frame_spacing_help,
     EN("Left to right is the length of the capture. A tall bar is a stretch "
@@ -3153,6 +3209,110 @@ SS_MSG(sharpness_window_help,
        "наименее смазанный. 1 отключает отбор."),
     TR("Tutulan her kare için bu kadar aday kareye bakıp en az bulanık olanı "
        "tutar. 1, seçimi kapatır."));
+
+SS_MSG(minimum_sharpness,
+    EN("Minimum sharpness"),
+    JA("最低シャープさ"),
+    ZH_HANS("最低清晰度"),
+    ZH_HANT("最低清晰度"),
+    KO("최소 선명도"),
+    DE("Mindestschärfe"),
+    FR("Netteté minimale"),
+    ES("Nitidez mínima"),
+    PT("Nitidez mínima"),
+    IT("Nitidezza minima"),
+    NL("Minimale scherpte"),
+    RU("Минимальная резкость"),
+    TR("En düşük keskinlik"));
+
+SS_MSG(minimum_sharpness_help,
+    EN("Reject candidates below this sharpness score. 0 disables the floor. "
+       "If the primary window has no candidate at or above the floor, Rescue "
+       "frames checks at most that many earlier candidates."),
+    JA("このシャープさ未満の候補を除外します。0 なら下限なし。主判定窓に下限以上の"
+       "候補がないとき、「救済フレーム」の数まで前の候補を調べます。"),
+    ZH_HANS("拒绝低于此清晰度的候选帧。0 表示不设下限。主窗口中没有达到下限的候选时，"
+            "“救援帧”会限制向前检查的候选数量。"),
+    ZH_HANT("拒絕低於此清晰度的候選影格。0 表示不設下限。主視窗中沒有達到下限的候選時，"
+            "「救援影格」會限制向前檢查的候選數量。"),
+    KO("이 선명도보다 낮은 후보를 제외합니다. 0이면 하한을 끕니다. 기본 창에 하한 이상인 "
+       "후보가 없을 때 ‘구제 프레임’ 수만큼 이전 후보를 확인합니다."),
+    DE("Kandidaten unter diesem Schärfewert verwerfen. 0 deaktiviert die Untergrenze. "
+       "Wenn das Hauptfenster keinen Kandidaten an oder über der Grenze hat, prüft "
+       "„Rettungsbilder“ höchstens so viele frühere Kandidaten."),
+    FR("Rejeter les candidats sous ce score de netteté. 0 désactive le seuil. Si la "
+       "fenêtre principale n'en a aucun au-dessus ou égal au seuil, « Images de "
+       "secours » examine au plus autant de candidats précédents."),
+    ES("Rechaza los candidatos por debajo de esta nitidez. 0 desactiva el umbral. Si "
+       "la ventana principal no tiene ninguno que alcance el umbral, «Fotogramas "
+       "de rescate» comprueba como máximo esa cantidad de candidatos anteriores."),
+    PT("Rejeita candidatos abaixo desta nitidez. 0 desativa o limite. Se a janela "
+       "principal não tiver nenhum que atinja o limite, «Quadros de resgate» "
+       "verifica no máximo essa quantidade de candidatos anteriores."),
+    IT("Scarta i candidati sotto questa nitidezza. 0 disattiva la soglia. Se la "
+       "finestra principale non ne ha alcuno che raggiunga la soglia, «Fotogrammi "
+       "di recupero» controlla al massimo quel numero di candidati precedenti."),
+    NL("Wijs kandidaten onder deze scherpte af. 0 schakelt de ondergrens uit. Als "
+       "het hoofdvenster niets op of boven de ondergrens heeft, controleert "
+       "‘Herstelbeelden’ hoogstens zoveel eerdere kandidaten."),
+    RU("Отклонять кандидатов ниже этой резкости. 0 отключает нижнюю границу. Если "
+       "в основном окне нет кандидата на уровне границы или выше, «Спасаемые "
+       "кадры» проверяет не более указанного числа более ранних кандидатов."),
+    TR("Bu keskinliğin altındaki adayları reddeder. 0 alt sınırı kapatır. Ana "
+       "pencerede sınırı karşılayan aday yoksa “Kurtarma kareleri” en fazla bu "
+       "sayıda önceki adayı kontrol eder."));
+
+SS_MSG(rescue_frames,
+    EN("Rescue frames"),
+    JA("救済フレーム"),
+    ZH_HANS("救援帧"),
+    ZH_HANT("救援影格"),
+    KO("구제 프레임"),
+    DE("Rettungsbilder"),
+    FR("Images de secours"),
+    ES("Fotogramas de rescate"),
+    PT("Quadros de resgate"),
+    IT("Fotogrammi di recupero"),
+    NL("Herstelbeelden"),
+    RU("Спасаемые кадры"),
+    TR("Kurtarma kareleri"));
+
+SS_MSG(rescue_frames_help,
+    EN("After the primary window has no candidate at or above the floor, check "
+       "at most this many earlier candidates. 0 disables rescue; rescued "
+       "candidates must still meet the floor."),
+    JA("主判定窓に下限以上の候補がないとき、ここで指定した数まで前の候補を調べます。"
+       "0 なら救済しません。救済候補も下限を満たす必要があります。"),
+    ZH_HANS("主窗口没有达到清晰度下限的候选时，最多检查这里指定数量的更早候选帧。"
+            "0 表示不救援；救援候选仍必须达到下限。"),
+    ZH_HANT("主視窗沒有達到清晰度下限的候選時，最多檢查這裡指定數量的更早候選影格。"
+            "0 表示不救援；救援候選仍必須達到下限。"),
+    KO("기본 창에 선명도 하한 이상인 후보가 없을 때 지정한 수까지 이전 후보를 확인합니다. "
+       "0이면 구제하지 않으며, 구제 후보도 하한을 넘어야 합니다."),
+    DE("Wenn das Hauptfenster keinen Kandidaten an oder über der Schärfegrenze hat, "
+       "höchstens so viele frühere Kandidaten prüfen. 0 deaktiviert die Rettung; "
+       "auch gerettete Kandidaten müssen die Grenze erfüllen."),
+    FR("Si la fenêtre principale n'a aucun candidat au moins égal au seuil, examiner "
+       "au plus ce nombre de candidats précédents. 0 désactive le secours ; les "
+       "candidats récupérés doivent aussi atteindre le seuil."),
+    ES("Cuando la ventana principal no tiene ningún candidato que alcance el umbral, "
+       "comprueba como máximo esta cantidad de candidatos anteriores. 0 desactiva "
+       "el rescate; los candidatos rescatados también deben alcanzar el umbral."),
+    PT("Quando a janela principal não tiver nenhum candidato que atinja o limite, "
+       "verifica no máximo esta quantidade de candidatos anteriores. 0 desativa "
+       "o resgate; os candidatos resgatados também precisam atingir o limite."),
+    IT("Quando la finestra principale non ha candidati che raggiungano la soglia, "
+       "controlla al massimo questo numero di candidati precedenti. 0 disattiva "
+       "il recupero; anche i candidati recuperati devono raggiungere la soglia."),
+    NL("Als het hoofdvenster niets op of boven de scherpte-ondergrens heeft, "
+       "controleer dan hoogstens zoveel eerdere kandidaten. 0 schakelt herstel "
+       "uit; herstelde kandidaten moeten de ondergrens ook halen."),
+    RU("Если в основном окне нет кандидата на уровне границы резкости или выше, "
+       "проверять не более указанного числа более ранних кандидатов. 0 отключает "
+       "спасение; спасённый кандидат тоже должен достичь границы."),
+    TR("Ana pencerede alt sınırı karşılayan aday yoksa en fazla bu sayıdaki önceki "
+       "adayı kontrol eder. 0 kurtarmayı kapatır; kurtarılan aday da alt sınırı "
+       "karşılamalıdır."));
 
 // {0} is a build-configuration note from the backend, in English.
 SS_MSG(build_note,
@@ -7956,56 +8116,49 @@ SS_MSG(sync_lenses_help,
     EN("Keep the same instants from every lens of a dual-fisheye file (one "
        "sharpness window over both), so every frame is a rig frame. Off, each "
        "lens keeps its own sharpest frame and only the coincidences form rig "
-       "frames. Built-in decoder only."),
+       "frames."),
     JA("デュアル魚眼ファイルの全レンズで同じ瞬間を残します（シャープさの判定窓は両方"
        "共通）。すべてのフレームがリグフレームになります。オフなら各レンズが自分の"
-       "いちばん鮮明なフレームを残し、偶然一致したものだけがリグフレームになります。"
-       "内蔵デコーダのみ。"),
+       "いちばん鮮明なフレームを残し、偶然一致したものだけがリグフレームになります。"),
     ZH_HANS("双鱼眼文件的每个镜头保留相同时刻（清晰度窗口对两者共用），这样每一帧都是"
-            "装置帧。关闭时各镜头保留各自最清晰的帧，只有恰好重合的才构成装置帧。"
-            "仅内置解码器。"),
+            "装置帧。关闭时各镜头保留各自最清晰的帧，只有恰好重合的才构成装置帧。"),
     ZH_HANT("雙魚眼檔案的每個鏡頭保留相同時刻（清晰度視窗對兩者共用），這樣每一幀都是"
-            "裝置幀。關閉時各鏡頭保留各自最清晰的幀，只有恰好重合的才構成裝置幀。"
-            "僅內建解碼器。"),
+            "裝置幀。關閉時各鏡頭保留各自最清晰的幀，只有恰好重合的才構成裝置幀。"),
     KO("이중 어안 파일의 모든 렌즈에서 같은 순간을 남깁니다(선명도 창은 둘에 하나). 그러면 "
        "모든 프레임이 리그 프레임이 됩니다. 끄면 렌즈마다 제일 선명한 프레임을 따로 남기고 "
-       "우연히 겹친 것만 리그 프레임이 됩니다. 내장 디코더에서만."),
+       "우연히 겹친 것만 리그 프레임이 됩니다."),
     DE("Aus jedem Objektiv einer Dual-Fisheye-Datei dieselben Augenblicke behalten "
        "(ein Schärfefenster über beide), damit jedes Bild ein Rig-Frame ist. Aus: "
        "jedes Objektiv behält sein schärfstes Bild, und nur die Zufallstreffer "
-       "bilden Rig-Frames. Nur mit dem eingebauten Decoder."),
+       "bilden Rig-Frames."),
     FR("Garder les mêmes instants de chaque objectif d'un fichier double fisheye "
        "(une fenêtre de netteté sur les deux), pour que chaque image soit une "
        "image de rig. Désactivé, chaque objectif garde sa propre image la plus "
-       "nette et seules les coïncidences forment des images de rig. Décodeur "
-       "intégré uniquement."),
+       "nette et seules les coïncidences forment des images de rig."),
     ES("Conservar los mismos instantes de cada lente de un archivo doble ojo de "
        "pez (una ventana de nitidez sobre ambas), para que cada cuadro sea un "
        "cuadro de rig. Apagado, cada lente conserva su propio cuadro más nítido y "
-       "solo las coincidencias forman cuadros de rig. Solo con el decodificador "
-       "integrado."),
+       "solo las coincidencias forman cuadros de rig."),
     PT("Guardar os mesmos instantes de cada lente de um ficheiro de duplo olho de "
        "peixe (uma janela de nitidez sobre ambas), para que cada quadro seja um "
        "quadro de rig. Desligado, cada lente guarda o seu quadro mais nítido e só "
-       "as coincidências formam quadros de rig. Apenas com o descodificador "
-       "integrado."),
+       "as coincidências formam quadros de rig."),
     IT("Tenere gli stessi istanti da ogni obiettivo di un file dual fisheye (una "
        "finestra di nitidezza su entrambi), così ogni fotogramma è un fotogramma "
        "di rig. Spento, ogni obiettivo tiene il proprio fotogramma più nitido e "
-       "solo le coincidenze formano fotogrammi di rig. Solo con il decoder "
-       "integrato."),
+       "solo le coincidenze formano fotogrammi di rig."),
     NL("Dezelfde momenten van elke lens van een dual-fisheye-bestand houden (één "
        "scherptevenster over beide), zodat elk frame een rigframe is. Uit houdt "
        "elke lens zijn eigen scherpste frame en alleen de toevalstreffers vormen "
-       "rigframes. Alleen met de ingebouwde decoder."),
+       "rigframes."),
     RU("Сохранять одни и те же мгновения с каждого объектива двойного фишая (одно "
        "окно резкости на оба), чтобы каждый кадр был кадром рига. Выкл.: каждый "
        "объектив оставляет свой самый резкий кадр, и лишь совпадения образуют "
-       "кадры рига. Только со встроенным декодером."),
+       "кадры рига."),
     TR("Çift balıkgözü dosyasının her lensinden aynı anları tut (iki lens için tek "
        "keskinlik penceresi); böylece her kare bir rig karesi olur. Kapalıyken "
        "her lens kendi en keskin karesini tutar ve yalnızca çakışanlar rig "
-       "karesi olur. Yalnızca yerleşik çözücüyle."));
+       "karesi olur."));
 
 SS_MSG(sfm_final_free_rig,
     EN("Release the rig at the end"), JA("最後にリグを解放"), ZH_HANS("最后解除装置约束"),

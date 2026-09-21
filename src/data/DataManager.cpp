@@ -642,12 +642,16 @@ public:
 
     std::string data_error() const;
     void        resolve_data_error(bool retry);
+    uint64_t    initial_seed() const { return _initial_seed; }
+    int64_t     consumed_steps() const {
+        return _consumed_steps.load(std::memory_order_relaxed);
+    }
+    void        restore_sampler(uint64_t initial_seed, int64_t consumed_steps);
 
     int64_t num_train()    const { return (int64_t)_train_indices.size(); }
     int64_t num_val()      const { return (int64_t)_val_indices.size(); }
     bool    has_val()      const { return !_val_indices.empty(); }
     CacheMode cache_mode() const { return _cfg.cache_mode; }
-
     int max_face_passes() const {
         int n = 1;
         for (const auto& g : _train_groups) n = std::max(n, (int)g.passes.size());
@@ -675,9 +679,9 @@ public:
     bool has_normals() const { return !_normal_filenames.empty() && _cfg.load_normals; }
 
 private:
-
     // ---- Shared input data ------------------------------------------------
     DataManagerConfig         _cfg;
+    uint64_t                  _initial_seed = 0;
     // Per-camera model enum value. Length matches the dataset N. Groups are
     // partitioned by this so a mixed pinhole + fisheye dataset just yields
     // two extra groups; batches stay homogeneous.
@@ -749,7 +753,8 @@ private:
 
     // ---- Batch sampling state --------------------------------------------
     std::mutex                _sampling_mu;
-    std::mt19937_64           _rng;
+    std::mt19937_64           _train_rng;
+    std::mt19937_64           _val_rng;
     std::vector<IndexGroup>   _train_groups;
     std::vector<IndexGroup>   _val_groups;
     GroupSampler              _val_sampler;
@@ -760,6 +765,7 @@ private:
     // build_train_schedule_locked() under _sampling_mu.
     std::vector<StepSpec>     _train_schedule;
     size_t                    _train_sched_cursor = 0;
+    std::atomic<int64_t>      _consumed_steps{0};
 
     // The currently-returned-to-caller data. We hold one slot per kind so the
     // reference returned by next_*_batch()/next_train_step() stays valid until
@@ -1017,14 +1023,18 @@ DataManagerImpl::DataManagerImpl(
 
     uint64_t seed = _cfg.seed != 0 ? _cfg.seed
         : (uint64_t)std::chrono::steady_clock::now().time_since_epoch().count();
-    _rng.seed(seed);
+    if (seed == 0) seed = 1;
+    _initial_seed = seed;
+    _cfg.seed = seed;
+    _train_rng.seed(_initial_seed);
+    _val_rng.seed(_initial_seed);
 
     probe_dtypes();
 
     _train_groups = build_index_groups_member(_train_indices);
     _val_groups   = build_index_groups_member(_val_indices);
-    for (auto& g : _train_groups) g.rewind(_rng, /*eval=*/false);
-    for (auto& g : _val_groups)   g.rewind(_rng, /*eval=*/true);
+    for (auto& g : _train_groups) g.rewind(_train_rng, /*eval=*/false);
+    for (auto& g : _val_groups)   g.rewind(_val_rng, /*eval=*/true);
     _val_sampler   = GroupSampler(_val_groups);
 
     // Build the first epoch's deterministic training schedule (once-per-epoch
@@ -1568,7 +1578,7 @@ DecodedBatch& DataManagerImpl::next_batch_cpu(
     if (sampler.empty()) {
         throw std::runtime_error("DataManager: no indices configured for this split");
     }
-    size_t gi = sampler(_rng);
+    size_t gi = sampler(_val_rng);
     auto& g = groups[gi];
 
     int eff_bs = std::min(batch_size, (int)g.indices.size());
@@ -1576,7 +1586,7 @@ DecodedBatch& DataManagerImpl::next_batch_cpu(
     std::vector<int32_t> picks;
     picks.reserve(eff_bs);
     for (int k = 0; k < eff_bs; ++k) {
-        if (g.cursor >= g.indices.size()) g.rewind(_rng, /*eval=*/false);
+        if (g.cursor >= g.indices.size()) g.rewind(_val_rng, /*eval=*/false);
         picks.push_back(g.indices[g.cursor++]);
     }
 
@@ -1604,7 +1614,7 @@ void DataManagerImpl::build_train_schedule_locked() {
 
     // Fresh shuffle of every group for this epoch.
     for (auto& g : _train_groups)
-        std::shuffle(g.indices.begin(), g.indices.end(), _rng);
+        std::shuffle(g.indices.begin(), g.indices.end(), _train_rng);
 
     // Full B-image chunks become their own single-sub-batch (homogeneous)
     // steps. Sub-B remainders are collected for cross-group packing; groups
@@ -1667,7 +1677,7 @@ void DataManagerImpl::build_train_schedule_locked() {
         _train_schedule.push_back(std::move(bin));
 
     // Interleave step order so full-chunk and mixed steps don't cluster.
-    std::shuffle(_train_schedule.begin(), _train_schedule.end(), _rng);
+    std::shuffle(_train_schedule.begin(), _train_schedule.end(), _train_rng);
 }
 
 StepSpec DataManagerImpl::next_train_step_spec() {
@@ -1677,6 +1687,53 @@ StepSpec DataManagerImpl::next_train_step_spec() {
     if (_train_sched_cursor >= _train_schedule.size())
         build_train_schedule_locked();   // next epoch
     return _train_schedule[_train_sched_cursor++];
+}
+
+void DataManagerImpl::restore_sampler(uint64_t initial_seed,
+                                       int64_t consumed_steps) {
+    if (initial_seed == 0)
+        throw std::runtime_error("DataManager: sampler seed must be nonzero");
+    if (consumed_steps < 0)
+        throw std::runtime_error("DataManager: consumed training steps must be nonnegative");
+    if (_train_indices.empty() && consumed_steps != 0)
+        throw std::runtime_error(
+            "DataManager: cannot restore consumed steps without training indices");
+
+    const bool disk = _cfg.cache_mode == CacheMode::DISK;
+    if (disk) stop_disk_pipeline();
+
+    {
+        std::lock_guard<std::mutex> lk(_sampling_mu);
+        _train_rng.seed(initial_seed);
+        _val_rng.seed(initial_seed);
+        _train_groups = build_index_groups_member(_train_indices);
+        _val_groups   = build_index_groups_member(_val_indices);
+        for (auto& g : _train_groups) g.rewind(_train_rng, /*eval=*/false);
+        for (auto& g : _val_groups)   g.rewind(_val_rng, /*eval=*/true);
+        _val_sampler = GroupSampler(_val_groups);
+        build_train_schedule_locked();
+
+        int64_t remaining = consumed_steps;
+        while (remaining > 0) {
+            if (_train_sched_cursor >= _train_schedule.size())
+                build_train_schedule_locked();
+            if (_train_schedule.empty())
+                throw std::runtime_error(
+                    "DataManager: cannot restore sampler without a training schedule");
+            const int64_t available =
+                (int64_t)(_train_schedule.size() - _train_sched_cursor);
+            const int64_t take = std::min(remaining, available);
+            _train_sched_cursor += (size_t)take;
+            remaining -= take;
+        }
+    }
+
+    _initial_seed = initial_seed;
+    _cfg.seed = initial_seed;
+    _consumed_steps.store(consumed_steps, std::memory_order_relaxed);
+    _cpu_train_step.subs.clear();
+    _cpu_val_batch = DecodedBatch{};
+    if (disk) start_disk_pipeline();
 }
 
 const TrainStep& DataManagerImpl::next_step_cpu() {
@@ -1702,6 +1759,16 @@ const TrainStep& DataManagerImpl::next_step_cpu() {
 // DISK mode pipeline
 // ===========================================================================
 void DataManagerImpl::start_disk_pipeline() {
+    _stop.store(false);
+    {
+        std::lock_guard<std::mutex> lk(_fault_mu);
+        _fault_msg.clear();
+        _fault_parked = false;
+        _fault_give_up = false;
+    }
+    _last_train_step_held.reset();
+    _last_val_held.reset();
+
     int prefetch = std::max(1, _cfg.prefetch_batches);
     // Job queues are sized generously — each batch enqueues B jobs per
     // modality so cap = prefetch * batch_size keeps the scheduler from
@@ -1740,17 +1807,21 @@ void DataManagerImpl::start_disk_pipeline() {
 }
 
 void DataManagerImpl::stop_disk_pipeline() {
+    if (!_disk_started) return;
     _stop.store(true);
     _fault_cv.notify_all();          // parked workers must leave before join
-    _q_rgb->close();
-    _q_mask->close();
-    _q_depth->close();
-    _q_normal->close();
-    _q_ready_train->close();
-    _q_ready_val->close();
+    if (_q_rgb)         _q_rgb->close();
+    if (_q_mask)        _q_mask->close();
+    if (_q_depth)       _q_depth->close();
+    if (_q_normal)      _q_normal->close();
+    if (_q_ready_train) _q_ready_train->close();
+    if (_q_ready_val)   _q_ready_val->close();
     if (_scheduler.joinable()) _scheduler.join();
     for (auto& th : _workers) if (th.joinable()) th.join();
     _workers.clear();
+    _last_train_step_held.reset();
+    _last_val_held.reset();
+    _disk_started = false;
 }
 
 
@@ -1901,7 +1972,7 @@ void DataManagerImpl::scheduler_loop() {
         if (!_val_groups.empty()) {
             if (!stage_or_park([&] {
                     std::unique_lock<std::mutex> lk(_sampling_mu);
-                    size_t gi = _val_sampler(_rng);
+                    size_t gi = _val_sampler(_val_rng);
                     auto& g = _val_groups[gi];
                     lk.unlock();
                     enqueue_batch(g, _cfg.val_batch_size, *_q_ready_val);
@@ -1923,7 +1994,7 @@ void DataManagerImpl::enqueue_batch(
     {
         std::lock_guard<std::mutex> lk(_sampling_mu);
         for (int k = 0; k < eff_bs; ++k) {
-            if (group.cursor >= group.indices.size()) group.rewind(_rng, /*eval=*/false);
+            if (group.cursor >= group.indices.size()) group.rewind(_val_rng, /*eval=*/false);
             picks.push_back(group.indices[group.cursor++]);
         }
     }
@@ -2101,7 +2172,9 @@ void DataManagerImpl::enqueue_step(
 // ===========================================================================
 const TrainStep& DataManagerImpl::next_train_step() {
     if (_cfg.cache_mode == CacheMode::CPU) {
-        return next_step_cpu();
+        const TrainStep& step = next_step_cpu();
+        _consumed_steps.fetch_add(1, std::memory_order_relaxed);
+        return step;
     }
     std::shared_ptr<TrainStep> s;
     for (;;) {
@@ -2113,6 +2186,7 @@ const TrainStep& DataManagerImpl::next_train_step() {
             throw std::runtime_error("DataManager: train prefetch queue closed");
     }
     _last_train_step_held = s;
+    _consumed_steps.fetch_add(1, std::memory_order_relaxed);
     return *_last_train_step_held;
 }
 
@@ -2249,3 +2323,13 @@ bool      DataManager::has_depths()     const              { return _impl->has_d
 bool      DataManager::has_normals()    const              { return _impl->has_normals(); }
 int64_t   DataManager::max_input_batch_size() const         { return _impl->max_input_batch_size(); }
 int       DataManager::max_face_passes() const              { return _impl->max_face_passes(); }
+uint64_t DataManager::initial_seed() const {
+    return _impl->initial_seed();
+}
+int64_t DataManager::consumed_steps() const {
+    return _impl->consumed_steps();
+}
+void DataManager::restore_sampler(uint64_t initial_seed,
+                                  int64_t consumed_steps) {
+    _impl->restore_sampler(initial_seed, consumed_steps);
+}

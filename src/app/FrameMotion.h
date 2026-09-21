@@ -12,11 +12,33 @@
 
 #include "app/Pano360.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <vector>
 
 namespace app {
+
+struct FrameSelectionSettings {
+    static constexpr int kSchemaVersion = 1;
+    static constexpr int kMaxRescueFrames = 1000;
+
+    float video_fps = 2.0f;
+    bool adaptive = false;
+    float adaptive_range = 4.0f;
+    int sharp_window = 3;
+    float minimum_sharpness = 0.0f;
+    int rescue_frames = 0;
+    bool sync_tracks = true;
+    int max_frames = 100000;
+
+    int candidate_group() const {
+        const int window = std::max(sharp_window, 1);
+        return adaptive ? std::max(window, static_cast<int>(std::ceil(adaptive_range)))
+                        : window;
+    }
+};
 
 // What the grey frames are pictures of, which is what decides whether turning
 // the camera costs anything: a full-sphere capture keeps every direction it
@@ -39,6 +61,63 @@ struct MotionOptions {
     float out_fov = 1.5708f;
 };
 
+// A source frame's stable identity. Ordinals are presentation order within the
+// source stream; a discontinuity starts a new independent timeline.
+struct FramePosition {
+    uint32_t segment = 0;
+    int64_t ordinal = 0;
+
+    friend bool operator==(const FramePosition& a, const FramePosition& b) {
+        return a.segment == b.segment && a.ordinal == b.ordinal;
+    }
+    friend bool operator!=(const FramePosition& a, const FramePosition& b) {
+        return !(a == b);
+    }
+    friend bool operator<(const FramePosition& a, const FramePosition& b) {
+        return a.segment < b.segment ||
+               (a.segment == b.segment && a.ordinal < b.ordinal);
+    }
+};
+
+// A selected set of source frames. Keeping identity and ordinal together is
+// what prevents a plan from crossing a decoder discontinuity.
+struct FramePlan {
+    std::vector<FramePosition> frames;
+
+    bool empty() const { return frames.empty(); }
+    size_t size() const { return frames.size(); }
+    void clear() { frames.clear(); }
+    std::vector<FramePosition>::const_iterator begin() const { return frames.begin(); }
+    std::vector<FramePosition>::const_iterator end() const { return frames.end(); }
+    const FramePosition& operator[](size_t i) const { return frames[i]; }
+};
+// The outcome of one selection interval. Both positions remain source
+// identities; a fallback capture uses segment zero when its exporter cannot
+// prove discontinuities.
+enum class FrameSelectionKind { Accepted, Rescued, Rejected };
+
+struct FrameSelectionDecision {
+    FramePosition planned;
+    FramePosition selected;
+    bool has_selected = false;
+    double score = -1.0;
+    FrameSelectionKind kind = FrameSelectionKind::Rejected;
+};
+
+
+// The observed ordinal range of one decoded discontinuity segment.
+struct FrameSegmentSpan {
+    uint32_t segment = 0;
+    int64_t first_ordinal = 0;
+    int64_t last_ordinal = -1;
+};
+
+// One measured motion step, ending at the source frame named by `end`.
+struct MotionStep {
+    FramePosition end;
+    float cost = 0.0f;
+};
+
 // Tracks one stream of grey frames. Costs are readable only after the last
 // track(): a fisheye's field of view is fitted from the first few steps and
 // their costs are revised once it is.
@@ -49,18 +128,17 @@ public:
     MotionTracker(const MotionTracker&) = delete;
     MotionTracker& operator=(const MotionTracker&) = delete;
 
-    // `gray` is width*height bytes; `index` is the source frame it came from.
-    // The first call only primes the reference.
-    void track(const uint8_t* gray, int64_t index);
+    // `gray` is width*height bytes; the position is the source frame it came
+    // from. The first call in each segment only primes the reference.
+    void track(const uint8_t* gray, FramePosition position);
 
     // Fills in the steps nothing could be tracked across. Call it once, after
     // the last track().
     void finish();
 
-    // One entry per step, in order: the view change across it, and the source
-    // frame it ends at. Both are final only after finish().
-    const std::vector<float>& costs() const;
-    const std::vector<int64_t>& ends() const;
+    // One entry per tracked step, in order. Both fields are final only after
+    // finish().
+    const std::vector<MotionStep>& steps() const;
     // Steps whose flow was too weak to fit a model to, for the log.
     int weak_steps() const;
 
@@ -79,10 +157,11 @@ float motion_out_fov(const std::vector<Pano360View>& views);
 void motion_frame_size(MotionView view, int src_w, int src_h, int& w, int& h);
 
 // One video's measured view change: what MotionTracker produced, and what the
-// fixed schedule would have done with it.
+// fixed schedule would have done with it. `spans` are the exact ranges seen
+// while decoding; `steps` never cross one.
 struct MotionPlanInput {
-    std::vector<float> cost;
-    std::vector<int64_t> ends;
+    std::vector<FrameSegmentSpan> spans;
+    std::vector<MotionStep> steps;
     int64_t frames = 0;
     int skip = 1;        // the fixed schedule's spacing
     int window = 1;      // the sharpness window, the closest two frames may be
@@ -93,9 +172,10 @@ struct MotionPlanInput {
 // Which source frames each run should end its sharpness windows at, so that
 // kept frames differ by view rather than by time, within `range` of the rate
 // `skip` asks for. Several share ONE budget: what moves more gets more of it.
-std::vector<std::vector<int64_t>> plan_by_motion(
+std::vector<FramePlan> plan_by_motion(
     const std::vector<MotionPlanInput>& in, float range);
 
+// Flat segment-0 convenience for derived timelines and existing callers.
 std::vector<int64_t> plan_by_motion(const std::vector<float>& cost,
                                     const std::vector<int64_t>& ends,
                                     int64_t frames, int skip, int window,

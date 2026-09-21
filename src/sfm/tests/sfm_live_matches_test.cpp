@@ -22,6 +22,16 @@ static void check(bool ok, const char* what) {
     }
 }
 
+template <typename F> static bool throws(F&& fn) {
+    try {
+        fn();
+    } catch (...) {
+        return true;
+    }
+    return false;
+}
+
+
 static std::vector<FeatureMatch> matches(uint32_t n, uint32_t tag) {
     std::vector<FeatureMatch> m(n);
     for (uint32_t i = 0; i < n; i++) m[i] = {tag + i, tag + 2 * i, 0.0f};
@@ -94,12 +104,47 @@ static int cmdLiveMatchesTest(int, char**) {
     // A finished file still reports its own count, not the sentinel.
     MatchesDatabase db;
     db.images = {{"a", 10}, {"b", 20}};
-    db.pairs.push_back({0, 1, 2, matches(3, 400)});
+    db.pairs.push_back({0, 1, 2, matches(3, 0)});
     const std::string done = dir + "/matches.bin";
     writeMatches(done, db);
     MatchesIndex fin;
     check(indexMatches(done, fin), "index a finished file");
     check(fin.pairs.size() == 1, "finished file indexes its pairs");
+
+    MatchesDatabase overlap;
+    overlap.images = {{"z0", 10}, {"a1", 10}, {"z2", 10},
+                      {"b3", 10}, {"a4", 10}};
+    overlap.pairs = {
+        {0, 1, 1, matches(2, 500)},
+        {1, 2, 2, matches(3, 600)},
+        {0, 3, 1, matches(4, 700)},
+        {2, 3, 0, matches(5, 800)},
+        {0, 4, 4, {}},
+        {1, 4, 3, matches(6, 900)}
+    };
+    const std::vector<std::string> groups = {"zeta", "alpha", "zeta", "beta",
+                                             "alpha"};
+    const std::vector<GroupOverlap> expected = {
+        {"alpha", "zeta", 2, 5}, {"beta", "zeta", 1, 4}};
+    const std::vector<GroupOverlap> got = verifiedGroupOverlap(overlap, groups);
+    bool exact = got.size() == expected.size();
+    for (size_t i = 0; exact && i < got.size(); i++)
+        exact = got[i].group1 == expected[i].group1 &&
+                got[i].group2 == expected[i].group2 &&
+                got[i].verified_pairs == expected[i].verified_pairs &&
+                got[i].verified_inliers == expected[i].verified_inliers;
+    check(exact, "verified group overlap is exact and sorted");
+    check(throws([&] { verifiedGroupOverlap(overlap, {"zeta"}); }),
+          "group vector size is validated");
+    std::vector<std::string> empty_group = groups;
+    empty_group[2].clear();
+    check(throws([&] { verifiedGroupOverlap(overlap, empty_group); }),
+          "empty image groups are rejected");
+    MatchesDatabase bad_endpoint = overlap;
+    bad_endpoint.pairs.push_back({0, 99, 1, matches(1, 1000)});
+    check(throws([&] { verifiedGroupOverlap(bad_endpoint, groups); }),
+          "pair endpoints are validated");
+
     // Starting another run in the same progress directory removes only the
     // four progress snapshots. Reconstruction output and resume state stay.
     progress::begin_matching(3, {{0, 1}});

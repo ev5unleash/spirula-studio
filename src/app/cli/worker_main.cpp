@@ -39,9 +39,6 @@
 
 namespace fs = std::filesystem;
 
-#ifdef SS_TOOL_TRAIN
-int spirula_train_main(int argc, char** argv);
-#endif
 #ifdef SS_TOOL_SFM
 int spirula_sfm_main(int argc, char** argv);
 void spirula_sfm_set_cancel_token(const std::atomic<bool>* token);
@@ -305,6 +302,14 @@ int run_tool_phase(const app::worker::Request& r, app::worker::Result& result) {
 #else
         setenv("SS_WORKER_CONTROL", "1", 1);
 #endif
+        const bool has_project_reference =
+            !r.project_root.empty() || !r.project_revision.empty() ||
+            !r.project_revision_digest.empty() || !r.metadata_paths.empty() ||
+            !r.artifact_paths.empty();
+        if (has_project_reference)
+            return spirula_train_main_with_project(
+                argc, argv.data(), r.project_root.c_str(),
+                r.project_revision.c_str());
         return spirula_train_main(argc, argv.data());
 #else
         result.outcome = "spawn_failed"; result.message = "worker: train phase unavailable in this build"; return 100;

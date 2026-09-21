@@ -10,6 +10,7 @@
 #include "_common.slang"
 
 static const int WG = 256;
+static const uint kMaxThumbRegions = 3u;
 
 // flags bits, shared by every entry point here.
 static const uint kF_TwoBytes = 1u << 0;   // 16-bit plane samples
@@ -149,10 +150,15 @@ void yuv_to_rgb(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID,
 // exactly keeps the numbers comparable; luma alone stands in for grey,
 // which saves copying the chroma planes for a frame that may never be
 // written out.
-
+struct ThumbRegion {
+    uint x;
+    uint y;
+    uint width;
+    uint height;
+};
 struct ThumbParams {
     float* out;      // out_w * out_h
-    uint*  luma;
+    uint* luma;
     uint   src_w;
     uint   src_h;
     uint   luma_stride;
@@ -160,6 +166,10 @@ struct ThumbParams {
     uint   out_h;
     uint   flags;
     uint   shift;
+    uint   region_count;
+    uint   packed_width;
+    uint   packed_height;
+    ThumbRegion regions[kMaxThumbRegions];
     uint   groups_per_row;
 };
 
@@ -172,18 +182,63 @@ void luma_thumbnail(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID,
     uint ox = i % p.out_w;
     uint oy = i / p.out_w;
 
-    uint x0 = (ox * p.src_w) / p.out_w;
-    uint x1 = max(x0 + 1u, ((ox + 1u) * p.src_w) / p.out_w);
-    uint y0 = (oy * p.src_h) / p.out_h;
-    uint y1 = max(y0 + 1u, ((oy + 1u) * p.src_h) / p.out_h);
-    x1 = min(x1, p.src_w);
-    y1 = min(y1, p.src_h);
+    // Keep the ordinary-video path byte-for-byte equivalent to the original
+    // full-frame reduction. Native 360 supplies a non-zero region count.
+    if (p.region_count == 0u) {
+        uint x0 = (ox * p.src_w) / p.out_w;
+        uint x1 = max(x0 + 1u, ((ox + 1u) * p.src_w) / p.out_w);
+        uint y0 = (oy * p.src_h) / p.out_h;
+        uint y1 = max(y0 + 1u, ((oy + 1u) * p.src_h) / p.out_h);
+        x1 = min(x1, p.src_w);
+        y1 = min(y1, p.src_h);
+
+        float sum = 0.0f;
+        for (uint yy = y0; yy < y1; ++yy)
+            for (uint xx = x0; xx < x1; ++xx)
+                sum += load_sample(p.luma, yy * p.luma_stride + xx, p.flags, p.shift);
+        p.out[i] = sum / float((x1 - x0) * (y1 - y0));
+        return;
+    }
+
+    const uint packed_w = max(p.packed_width, 1u);
+    const uint packed_h = max(p.packed_height, 1u);
+    const uint px0 = (ox * packed_w) / p.out_w;
+    const uint px1 = min(packed_w, max(px0 + 1u, ((ox + 1u) * packed_w) / p.out_w));
+    const uint py0 = (oy * packed_h) / p.out_h;
+    const uint py1 = min(packed_h, max(py0 + 1u, ((oy + 1u) * packed_h) / p.out_h));
 
     float sum = 0.0f;
-    for (uint yy = y0; yy < y1; ++yy)
-        for (uint xx = x0; xx < x1; ++xx)
-            sum += load_sample(p.luma, yy * p.luma_stride + xx, p.flags, p.shift);
-    p.out[i] = sum / float((x1 - x0) * (y1 - y0));
+    uint samples = 0u;
+    uint dst_x = 0u;
+    const uint n_regions = min(p.region_count, kMaxThumbRegions);
+    for (uint ri = 0u; ri < kMaxThumbRegions; ++ri) {
+        if (ri >= n_regions) break;
+        const ThumbRegion r = p.regions[ri];
+        const uint region_dst_x = dst_x;
+        dst_x += r.width;
+        const uint ix0 = max(px0, region_dst_x);
+        const uint ix1 = min(px1, region_dst_x + r.width);
+        if (ix0 >= ix1 || r.width == 0u || r.height == 0u) continue;
+
+        uint sx0 = r.x + (ix0 - region_dst_x);
+        uint sx1 = r.x + (ix1 - region_dst_x);
+        uint sy0 = (py0 * r.height) / packed_h;
+        uint sy1 = max(sy0 + 1u, ((py1 * r.height) + packed_h - 1u) / packed_h);
+        sy1 = min(sy1, r.height);
+        if (sy0 >= r.height) continue;
+        sy0 = min(sy0, sy1 - 1u);
+        sx0 = min(sx0, p.src_w - 1u);
+        sx1 = min(max(sx1, sx0 + 1u), p.src_w);
+        sy0 += r.y;
+        sy1 += r.y;
+
+        for (uint yy = sy0; yy < sy1; ++yy)
+            for (uint xx = sx0; xx < sx1; ++xx) {
+                sum += load_sample(p.luma, yy * p.luma_stride + xx, p.flags, p.shift);
+                ++samples;
+            }
+    }
+    p.out[i] = samples > 0u ? sum / float(samples) : 0.0f;
 }
 
 struct VarianceParams {

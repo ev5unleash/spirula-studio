@@ -14,7 +14,7 @@ void RunProgress::reset() {
     _scan.clear();
 }
 
-std::vector<float> scan_plan_bars(const std::vector<int64_t>& plan,
+std::vector<float> scan_plan_bars(const app::FramePlan& plan,
                                   int64_t frames) {
     if (plan.size() < 2 || frames <= 0) return {};
     std::vector<float> bars((size_t)kScanSlices, 0.0f);
@@ -22,9 +22,14 @@ std::vector<float> scan_plan_bars(const std::vector<int64_t>& plan,
     for (int b = 0; b < kScanSlices; b++) {
         const int64_t at =
             (int64_t)(((double)b + 0.5) * frames / kScanSlices);
-        while (k + 2 < plan.size() && plan[k + 1] < at) k++;
-        bars[(size_t)b] =
-            1.0f / (float)std::max<int64_t>(1, plan[k + 1] - plan[k]);
+        while (k + 2 < plan.size() &&
+               plan[k].segment == plan[k + 1].segment &&
+               plan[k + 1].ordinal < at)
+            k++;
+        if (plan[k].segment == plan[k + 1].segment)
+            bars[(size_t)b] =
+                1.0f / (float)std::max<int64_t>(
+                            1, plan[k + 1].ordinal - plan[k].ordinal);
     }
     const float top = *std::max_element(bars.begin(), bars.end());
     if (top > 0.0f)
@@ -37,6 +42,16 @@ void RunProgress::scan_reset(std::vector<ScanRow> rows) {
     for (ScanRow& r : rows) {
         r.speed.assign(kScanSlices, 0.0f);
         r.hits.assign(kScanSlices, 0);
+        r.kept.clear();
+        r.kept_n = 0;
+        r.plan_received = false;
+        r.planned_n = 0;
+        r.accepted_n = 0;
+        r.rescued_n = 0;
+        r.rejected_n = 0;
+        r.span_n = 0;
+        r.spans.clear();
+        r.decisions.clear();
     }
     _scan = std::move(rows);
 }
@@ -46,28 +61,64 @@ void RunProgress::scan_open(size_t row) {
     if (row < _scan.size()) _scan[row].started = true;
 }
 
-void RunProgress::scan_step(size_t row, int64_t at, int64_t of, float cost) {
+void RunProgress::scan_step(size_t row, const app::FramePosition& at,
+                            int64_t of, float cost) {
     std::lock_guard<std::mutex> lk(_mu);
     if (row >= _scan.size()) return;
     ScanRow& r = _scan[row];
     if (r.frames <= 0) r.frames = of;
     if (r.frames <= 0 || r.speed.empty()) return;
     r.started = true;
-    const int64_t slice = std::max<int64_t>(0, at) * kScanSlices / r.frames;
+    const int64_t ordinal = std::max<int64_t>(0, at.ordinal);
+    const int64_t slice = (int64_t)((double)ordinal * kScanSlices /
+                                    (double)r.frames);
     const size_t i = (size_t)std::min<int64_t>(kScanSlices - 1, slice);
     // A running mean rather than a sum: the slices a stride lands in unevenly
     // would otherwise read as motion the capture does not have.
-    r.speed[i] += (std::max(0.0f, cost) - r.speed[i]) / (float)(++r.hits[i]);
-    r.done = (float)std::min(1.0, (double)at / (double)r.frames);
+    r.speed[i] += (std::max(0.0f, cost) - r.speed[i]) /
+                  (float)(++r.hits[i]);
+    r.done = std::max(
+        r.done, (float)std::min(1.0, (double)ordinal / (double)r.frames));
 }
 
-void RunProgress::scan_kept(size_t row, std::vector<float> bars, int64_t kept) {
+void RunProgress::scan_spans(
+    size_t row, const std::vector<app::FrameSegmentSpan>& spans) {
     std::lock_guard<std::mutex> lk(_mu);
     if (row >= _scan.size()) return;
-    _scan[row].kept = std::move(bars);
-    _scan[row].kept_n = kept;
-    _scan[row].started = true;
-    _scan[row].done = 1.0f;
+    ScanRow& r = _scan[row];
+    r.started = true;
+    r.span_n = (int64_t)spans.size();
+    r.spans.assign(spans.begin(),
+                   spans.begin() + std::min(spans.size(), kScanSpanCap));
+}
+
+void RunProgress::scan_plan(size_t row, const app::FramePlan& plan,
+                            int64_t frames) {
+    std::lock_guard<std::mutex> lk(_mu);
+    if (row >= _scan.size()) return;
+    ScanRow& r = _scan[row];
+    r.kept = scan_plan_bars(plan, frames);
+    r.kept_n = (int64_t)plan.size();
+    r.planned_n = (int64_t)plan.size();
+    r.plan_received = true;
+    r.started = true;
+    r.done = 1.0f;
+}
+
+void RunProgress::scan_decision(
+    size_t row, const app::FrameSelectionDecision& decision) {
+    std::lock_guard<std::mutex> lk(_mu);
+    if (row >= _scan.size()) return;
+    ScanRow& r = _scan[row];
+    r.started = true;
+    if (!r.plan_received) ++r.planned_n;
+    switch (decision.kind) {
+        case app::FrameSelectionKind::Accepted: ++r.accepted_n; break;
+        case app::FrameSelectionKind::Rescued: ++r.rescued_n; break;
+        case app::FrameSelectionKind::Rejected: ++r.rejected_n; break;
+    }
+    if (r.decisions.size() < kScanMarkerCap)
+        r.decisions.push_back(decision);
 }
 
 std::vector<ScanRow> RunProgress::scan() const {

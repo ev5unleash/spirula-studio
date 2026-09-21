@@ -68,15 +68,23 @@ app::DatasetPrepSinks make_prep_sinks(RunProgress& progress, RunFilms films) {
         progress.scan_reset(std::move(rows));
     };
     sinks.scan_open = [&progress](size_t row) { progress.scan_open(row); };
-    sinks.scan_step = [&progress](size_t row, int64_t at, int64_t of,
-                                  float cost) {
+    sinks.scan_step = [&progress](size_t row, const app::FramePosition& at,
+                                  int64_t of, float cost) {
         progress.scan_step(row, at, of, cost);
     };
-    sinks.scan_kept = [&progress](size_t row,
-                                  const std::vector<int64_t>& plan,
+    sinks.scan_spans = [&progress](
+                           size_t row,
+                           const std::vector<app::FrameSegmentSpan>& spans) {
+        progress.scan_spans(row, spans);
+    };
+    sinks.scan_plan = [&progress](size_t row, const app::FramePlan& plan,
                                   int64_t frames) {
-        progress.scan_kept(row, scan_plan_bars(plan, frames),
-                           (int64_t)plan.size());
+        progress.scan_plan(row, plan, frames);
+    };
+    sinks.scan_decision = [&progress](
+                              size_t row,
+                              const app::FrameSelectionDecision& decision) {
+        progress.scan_decision(row, decision);
     };
     return sinks;
 }
@@ -292,19 +300,12 @@ void ColmapRunner::take_reconstruction(ColmapJob& job) {
     const std::vector<PrepInput> inputs = job.inputs;
     const std::string workspace = job.workspace;
     const bool resume = job.resume;
-    const float fps = job.video_fps;
-    const bool adaptive = job.adaptive_fps;
-    const float range = job.adaptive_range;
-    const int sharp = job.sharp_window, maxf = job.max_frames;
+    const app::FrameSelectionSettings selection = job.selection;
     job = _live;
     job.inputs = inputs;
     job.workspace = workspace;
     job.resume = resume;
-    job.video_fps = fps;
-    job.adaptive_fps = adaptive;
-    job.adaptive_range = range;
-    job.sharp_window = sharp;
-    job.max_frames = maxf;
+    job.selection = selection;
 }
 
 void ColmapRunner::take_geometry(ColmapJob& job) {
@@ -558,12 +559,8 @@ void ColmapRunner::run(ColmapJob job) {
             // extraction and masking use the same GPU as everything else.
             // COLMAP's own device routing is untouched.
             pj.device = job.device;
-            pj.video_fps = job.video_fps;
-            pj.adaptive_fps = job.adaptive_fps;
-            pj.adaptive_range = job.adaptive_range;
-            pj.sharp_window = job.sharp_window;
+            pj.selection = job.selection;
             pj.pano = job.pano;
-            pj.max_frames = job.max_frames;
             pj.ffmpeg_exe = job.ffmpeg_exe;
             pj.force_external_decode = job.force_external_decode;
             pj.mask_enable = job.mask_enable;

@@ -1,11 +1,8 @@
 #pragma once
 // Matroska / WebM (mkv, webm).
 //
-// Streaming rather than table-driven: the header elements (Info, Tracks) are
-// read up front, then clusters are walked lazily. A 500 MB WebM is never held
-// in memory, and no index is required -- Matroska stores frames in decode order
-// with a presentation timestamp on each block, which is all the reorder queue
-// needs.
+// Headers are read up front. Selecting a track scans its block timestamps to
+// assign presentation ranks, then packet payloads are still read lazily.
 
 #include "video/Demuxer.h"
 
@@ -26,6 +23,15 @@ private:
         uint64_t  number = 0;
         uint64_t  default_duration_ns = 0;
         TrackInfo info;
+        std::vector<uint64_t> presentation_ranks;
+    };
+
+    struct Block {
+        uint64_t payload_offset = 0;
+        uint64_t payload_size = 0;
+        uint64_t decode_ordinal = 0;
+        int64_t pts_ns = 0;
+        bool is_sync = false;
     };
 
     // --- primitive EBML reads, all at the current file offset ---
@@ -39,9 +45,11 @@ private:
 
     bool parseTracks(uint64_t end, std::string& error);
     bool parseTrackEntry(uint64_t end);
-    bool parseInfo(uint64_t end);
+    bool parseInfo(uint64_t end, std::string& error);
     // Advances to the next cluster with payload, setting cluster_ts_/cluster_end_.
     bool nextCluster(std::string& error);
+    bool nextBlock(Block& block, std::string& error);
+    void rewindPackets();
 
     std::string   path_;
     std::ifstream file_;
@@ -62,8 +70,6 @@ private:
     int64_t  cluster_ts_ = 0;
     uint64_t packet_index_ = 0;
     uint32_t discontinuity_segment_ = 0;
-    int64_t  last_pts_ns_ = 0;
-    bool     have_last_pts_ = false;
 };
 
 }  // namespace video

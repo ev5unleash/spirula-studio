@@ -10,8 +10,10 @@
 #include "nn/vk/Stream.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstring>
 #include <mutex>
+#include <type_traits>
 
 NN_DECLARE_EMBEDDED_MODULES(video)
 
@@ -203,10 +205,22 @@ struct YuvParams {
     float inv_sx, inv_sy;
     uint32_t groups_per_row;
 };
+struct ThumbRegion {
+    uint32_t x, y, width, height;
+};
 struct ThumbParams {
     vk::DevicePtr out, luma;
-    uint32_t src_w, src_h, luma_stride, out_w, out_h, flags, shift, groups_per_row;
+    uint32_t src_w, src_h, luma_stride, out_w, out_h, flags, shift;
+    uint32_t region_count, packed_width, packed_height;
+    ThumbRegion regions[VideoPipeline::kMaxSharpnessRegions];
+    uint32_t groups_per_row;
 };
+static_assert(std::is_standard_layout<ThumbRegion>::value, "ThumbRegion ABI");
+static_assert(sizeof(ThumbRegion) == 16, "ThumbRegion ABI");
+static_assert(std::is_standard_layout<ThumbParams>::value, "ThumbParams ABI");
+static_assert(offsetof(ThumbParams, regions) == 56, "ThumbParams ABI");
+static_assert(offsetof(ThumbParams, groups_per_row) == 104, "ThumbParams ABI");
+static_assert(sizeof(ThumbParams) == 112, "ThumbParams ABI");
 struct VarianceParams {
     vk::DevicePtr out, thumb;
     uint32_t size, slot;
@@ -227,8 +241,6 @@ struct Picture {
     int      refs = 0;
     uint64_t decode_value = 0;   // video timeline value covering its decode
     uint64_t read_value = 0;     // compute timeline value covering our reads
-    int64_t  poc = 0;
-    FrameTiming timing;
     bool     metric_queued = false;
 };
 
@@ -264,7 +276,7 @@ struct VideoPipeline::Impl {
 
     VkImage        dpb_image = VK_NULL_HANDLE;
     VkDeviceMemory dpb_mem = VK_NULL_HANDLE;
-    std::vector<VkImageView> dpb_views;
+    VkImageView dpb_view = VK_NULL_HANDLE;
     bool dpb_ready = false;
 
     struct BsBuf {
@@ -281,7 +293,11 @@ struct VideoPipeline::Impl {
     std::vector<int>     free_list;
     std::vector<int>     dpb_pin;      // DPB slot -> pool index, or -1
 
-    std::vector<int> ready;            // pool indices awaiting output
+    struct Ready {
+        int pool = -1;
+        FrameTiming timing;
+    };
+    std::vector<Ready> ready;
     int64_t decoded = 0;
     bool    eos = false;
 
@@ -297,6 +313,7 @@ struct VideoPipeline::Impl {
     std::vector<uint32_t> slice_offsets;
     Packet packet;              // the coded frame(s) currently being served
     bool   more_in_packet = false;
+    int    visible_in_packet = 0;
 
     ~Impl();
     bool createSession(std::string& error);
@@ -307,6 +324,7 @@ struct VideoPipeline::Impl {
     int  acquirePicture();
     void releasePool(int idx);
     void copyPlanes(int idx);
+    void queueSharpness(int idx, const VideoPipeline::SharpnessRegions* regions);
     bool ensureRgb(VkDeviceSize bytes);
     uint32_t planeFlags() const;
 };
@@ -364,8 +382,7 @@ VideoPipeline::Impl::~Impl() {
         if (p.image) vkDestroyImage(dev, p.image, nullptr);
         if (p.mem) vkFreeMemory(dev, p.mem, nullptr);
     }
-    for (VkImageView v : dpb_views)
-        if (v) vkDestroyImageView(dev, v, nullptr);
+    if (dpb_view) vkDestroyImageView(dev, dpb_view, nullptr);
     if (dpb_image) vkDestroyImage(dev, dpb_image, nullptr);
     if (dpb_mem) vkFreeMemory(dev, dpb_mem, nullptr);
     for (auto& b : bs) {
@@ -709,12 +726,13 @@ bool VideoPipeline::Impl::createImages(int lookahead, std::string& error) {
         if (vkAllocateMemory(dev, &ai, nullptr, &mem) != VK_SUCCESS) return false;
         return vkBindImageMemory(dev, image, mem, 0) == VK_SUCCESS;
     };
-    auto create_view = [&](VkImage image, VkFormat format, uint32_t layer, VkImageView& view) {
+    auto create_view = [&](VkImage image, VkFormat format, uint32_t layer, uint32_t layers,
+                           VkImageView& view) {
         VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
         vci.image = image;
-        vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        vci.viewType = layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
         vci.format = format;
-        vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, layer, 1};
+        vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, layer, layers};
         return vkCreateImageView(dev, &vci, nullptr, &view) == VK_SUCCESS;
     };
 
@@ -725,12 +743,10 @@ bool VideoPipeline::Impl::createImages(int lookahead, std::string& error) {
         error = "cannot allocate the video reference picture buffer";
         return false;
     }
-    dpb_views.resize(fmt.max_dpb_slots);
-    for (uint32_t i = 0; i < fmt.max_dpb_slots; ++i)
-        if (!create_view(dpb_image, dpb_format, i, dpb_views[i])) {
-            error = "cannot create a DPB image view";
-            return false;
-        }
+    if (!create_view(dpb_image, dpb_format, 0, fmt.max_dpb_slots, dpb_view)) {
+        error = "cannot create a DPB image view";
+        return false;
+    }
     dpb_pin.assign(fmt.max_dpb_slots, -1);
 
     // Output pictures: enough for the reorder queue, the caller's window, the
@@ -741,7 +757,7 @@ bool VideoPipeline::Impl::createImages(int lookahead, std::string& error) {
     pool.resize(n_pool);
     for (uint32_t i = 0; i < n_pool; ++i) {
         if (!create_image(out_format, 1, out_usage, true, pool[i].image, pool[i].mem) ||
-            !create_view(pool[i].image, out_format, 0, pool[i].view)) {
+            !create_view(pool[i].image, out_format, 0, 1, pool[i].view)) {
             error = "cannot allocate decode output picture " + std::to_string(i);
             return false;
         }
@@ -847,8 +863,7 @@ bool VideoPipeline::Impl::recordDecode(int pool_idx, const PictureInfo& pi,
     // ---- bitstream ----
     Impl::BsBuf& b = bs[(size_t)bs_cur];
     const VkDeviceSize need =
-        align_up64(bitstream.size() + caps.minBitstreamBufferSizeAlignment,
-                   caps.minBitstreamBufferSizeAlignment);
+        align_up64(bitstream.size(), caps.minBitstreamBufferSizeAlignment);
     if (need > b.size) {
         vkDeviceWaitIdle(dev);
         vkDestroyBuffer(dev, b.buf, nullptr);
@@ -934,15 +949,18 @@ bool VideoPipeline::Impl::recordDecode(int pool_idx, const PictureInfo& pi,
         barriers.push_back(ib);
         dpb_ready = true;
     }
+    VkMemoryBarrier dpb_barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    dpb_barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+    dpb_barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr,
+                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &dpb_barrier, 0, nullptr,
                          (uint32_t)barriers.size(), barriers.data());
 
-    auto picture_resource = [&](VkImageView view) {
+    auto picture_resource = [&](VkImageView view, uint32_t layer = 0) {
         VkVideoPictureResourceInfoKHR pr{VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR};
         pr.codedOffset = {0, 0};
         pr.codedExtent = coded;
-        pr.baseArrayLayer = 0;
+        pr.baseArrayLayer = layer;
         pr.imageViewBinding = view;
         return pr;
     };
@@ -955,9 +973,10 @@ bool VideoPipeline::Impl::recordDecode(int pool_idx, const PictureInfo& pi,
     std::vector<VkVideoReferenceSlotInfoKHR>   begin_slots;
     begin_res.reserve(pi.refs.size() + 1);
     begin_slots.reserve(pi.refs.size() + 1);
-    for (const auto& r : pi.refs) begin_res.push_back(picture_resource(dpb_views[(size_t)r.slot]));
+    for (const auto& r : pi.refs)
+        begin_res.push_back(picture_resource(dpb_view, (uint32_t)r.slot));
     if (pi.setup_slot >= 0)
-        begin_res.push_back(picture_resource(dpb_views[(size_t)pi.setup_slot]));
+        begin_res.push_back(picture_resource(dpb_view, (uint32_t)pi.setup_slot));
     for (size_t i = 0; i < pi.refs.size(); ++i) {
         VkVideoReferenceSlotInfoKHR sl{VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR};
         sl.slotIndex = pi.refs[i].slot;
@@ -1121,6 +1140,7 @@ bool VideoPipeline::Impl::decodeNext(std::string& error) {
             eos = true;
             return true;
         }
+        visible_in_packet = 0;
     }
 
     PictureInfo pi;
@@ -1130,6 +1150,11 @@ bool VideoPipeline::Impl::decodeNext(std::string& error) {
                             pi, error))
         return false;
     more_in_packet = pi.more_in_packet;
+    const bool visible = pi.show_existing_slot >= 0 || pi.output;
+    if (visible && visible_in_packet++ != 0) {
+        error = "a container packet produced more than one visible picture";
+        return false;
+    }
 
     Packet& pkt = packet;
     NN_LOG_DEBUG("[dec] pkt %llu poc %lld setup %d refs %zu show %d out %d more %d\n",
@@ -1140,8 +1165,7 @@ bool VideoPipeline::Impl::decodeNext(std::string& error) {
         const int src = dpb_pin[(size_t)pi.show_existing_slot];
         if (src >= 0) {
             ++pool[(size_t)src].refs;
-            pool[(size_t)src].timing = pkt.timing;
-            ready.push_back(src);
+            ready.push_back({src, pkt.timing});
         }
         codec->commitFrame();
         return true;
@@ -1160,8 +1184,6 @@ bool VideoPipeline::Impl::decodeNext(std::string& error) {
     ++decoded;
 
     Picture& p = pool[(size_t)idx];
-    p.poc = pi.poc;
-    p.timing = pkt.timing;
 
     // Pin the pool image while a DPB slot still refers to it (AV1 replays
     // pictures with show_existing_frame; H.264/H.265 never do).
@@ -1184,7 +1206,7 @@ bool VideoPipeline::Impl::decodeNext(std::string& error) {
     }
 
     if (pi.output)
-        ready.push_back(idx);
+        ready.push_back({idx, pkt.timing});
     else
         releasePool(idx);
     return true;
@@ -1199,15 +1221,18 @@ bool VideoPipeline::next(FrameHandle& out, std::string& error) {
     error.clear();
     while (true) {
         const bool can_pop =
-            !s.ready.empty() && (s.eos || s.ready.size() > (size_t)s.fmt.max_reorder);
+            !s.ready.empty() && !s.more_in_packet &&
+            (s.eos || s.ready.size() > (size_t)s.fmt.max_reorder);
         if (can_pop) {
             size_t best = 0;
             for (size_t i = 1; i < s.ready.size(); ++i)
-                if (s.pool[(size_t)s.ready[i]].poc < s.pool[(size_t)s.ready[best]].poc) best = i;
-            const int idx = s.ready[best];
+                if (s.ready[i].timing.presentation_ordinal <
+                    s.ready[best].timing.presentation_ordinal)
+                    best = i;
+            const Impl::Ready ready = s.ready[best];
             s.ready.erase(s.ready.begin() + (ptrdiff_t)best);
-            out.slot = idx;
-            out.timing = s.pool[(size_t)idx].timing;
+            out.slot = ready.pool;
+            out.timing = ready.timing;
             return true;
         }
         if (s.eos) return false;
@@ -1223,7 +1248,7 @@ bool VideoPipeline::seek(int64_t index, int64_t& landed, std::string& error) {
     if (!s.demux->seekSync(index, landed, error)) return false;
     // The reorder queue and the DPB hold pictures of the GOP being left, and
     // the codec's reference state describes it; all three go.
-    for (int idx : s.ready) s.releasePool(idx);
+    for (const Impl::Ready& ready : s.ready) s.releasePool(ready.pool);
     s.ready.clear();
     for (int& pin : s.dpb_pin) {
         if (pin >= 0) s.releasePool(pin);
@@ -1231,6 +1256,7 @@ bool VideoPipeline::seek(int64_t index, int64_t& landed, std::string& error) {
     }
     s.codec->flush();
     s.more_in_packet = false;
+    s.visible_in_packet = 0;
     s.eos = false;
     return true;
 }
@@ -1290,37 +1316,63 @@ void VideoPipeline::Impl::copyPlanes(int idx) {
     stream.barrierNow();
 }
 
-void VideoPipeline::queueSharpness(const FrameHandle& h) {
-    Impl& s = *impl_;
-    if (h.slot < 0) return;
-    Picture& p = s.pool[(size_t)h.slot];
+void VideoPipeline::Impl::queueSharpness(
+    int idx, const VideoPipeline::SharpnessRegions* regions) {
+    if (idx < 0) return;
+    Picture& p = pool[(size_t)idx];
     if (p.metric_queued) return;
     p.metric_queued = true;
 
-    s.copyPlanes(h.slot);
+    copyPlanes(idx);
 
     ThumbParams tp{};
-    tp.out = s.thumb_buf;
-    tp.luma = s.luma_buf;
-    tp.src_w = (uint32_t)s.fmt.width;
-    tp.src_h = (uint32_t)s.fmt.height;
-    tp.luma_stride = s.coded.width;
+    tp.out = thumb_buf;
+    tp.luma = luma_buf;
+    tp.src_w = (uint32_t)fmt.width;
+    tp.src_h = (uint32_t)fmt.height;
+    tp.luma_stride = coded.width;
     tp.out_w = kThumbSize;
     tp.out_h = kThumbSize;
-    tp.flags = s.planeFlags();
-    tp.shift = (uint32_t)s.planes.shift;
-    vk::Stream::get().dispatchFlat("video.luma_thumbnail", {}, (int64_t)kThumbSize * kThumbSize,
-                                   256, &tp, sizeof(tp), &tp.groups_per_row);
+    tp.flags = planeFlags();
+    tp.shift = (uint32_t)planes.shift;
+    if (regions) {
+        const int count = std::min(
+            std::max(regions->count, 0), VideoPipeline::kMaxSharpnessRegions);
+        if (count > 0 && regions->packed_width > 0 && regions->packed_height > 0) {
+            tp.region_count = (uint32_t)count;
+            tp.packed_width = (uint32_t)regions->packed_width;
+            tp.packed_height = (uint32_t)regions->packed_height;
+            for (int i = 0; i < count; i++) {
+                const VideoPipeline::SharpnessRegion& r = regions->regions[i];
+                tp.regions[i] = {(uint32_t)std::max(r.x, 0),
+                                 (uint32_t)std::max(r.y, 0),
+                                 (uint32_t)std::max(r.width, 0),
+                                 (uint32_t)std::max(r.height, 0)};
+            }
+        }
+    }
+    vk::Stream::get().dispatchFlat("video.luma_thumbnail", {},
+                                   (int64_t)kThumbSize * kThumbSize, 256, &tp,
+                                   sizeof(tp), &tp.groups_per_row);
 
     VarianceParams vp{};
-    vp.out = s.metric_buf;
-    vp.thumb = s.thumb_buf;
+    vp.out = metric_buf;
+    vp.thumb = thumb_buf;
     vp.size = kThumbSize;
-    vp.slot = (uint32_t)h.slot;
+    vp.slot = (uint32_t)idx;
     vk::Stream::get().dispatch("video.laplacian_variance", {}, 1, 1, 1, &vp, sizeof(vp));
 
     p.read_value = vk::Stream::get().lastSubmitted() + 1;
-    s.metric_pending.push_back(h.slot);
+    metric_pending.push_back(idx);
+}
+
+void VideoPipeline::queueSharpness(const FrameHandle& h) {
+    impl_->queueSharpness(h.slot, nullptr);
+}
+
+void VideoPipeline::queueSharpness(const FrameHandle& h,
+                                   const SharpnessRegions& regions) {
+    impl_->queueSharpness(h.slot, &regions);
 }
 
 void VideoPipeline::flushSharpness() {

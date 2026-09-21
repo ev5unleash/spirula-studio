@@ -212,9 +212,14 @@ struct ParsedDataset {
     // `source_model < 0` marks a camera that needs no resampling.
     std::vector<RedistortSource> redistort;
 
-    // Per-INPUT train/val partition (validation_fraction).
+    // Per-INPUT train/validation partition (validation_fraction).
     std::vector<int32_t>     train_indices;
     std::vector<int32_t>     val_indices;
+
+    // Explicit project-plan roles. Excluded images appear in none of these
+    // vectors; indices preserve image_filenames order.
+    std::vector<int32_t>     eval_indices;
+    bool                     explicit_roles = false;
 
     // Seed point cloud in the training frame.
     ColmapPoints3D           points;

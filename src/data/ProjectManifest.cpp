@@ -13,6 +13,7 @@
 #include <fstream>
 #include <initializer_list>
 #include <limits>
+#include <map>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -304,6 +305,32 @@ const char* decision_status_name(DecisionStatus value) {
     }
     return "refused";
 }
+const char* dataset_role_name(DatasetRole value) {
+    switch (value) {
+        case DatasetRole::Pending: return "pending";
+        case DatasetRole::Train: return "train";
+        case DatasetRole::Validation: return "validation";
+        case DatasetRole::Evaluation: return "evaluation";
+        case DatasetRole::Excluded: return "excluded";
+    }
+    return "pending";
+}
+
+bool valid_dataset_role(DatasetRole value) {
+    return value == DatasetRole::Pending || value == DatasetRole::Train ||
+           value == DatasetRole::Validation || value == DatasetRole::Evaluation ||
+           value == DatasetRole::Excluded;
+}
+
+DatasetRole parse_dataset_role(const std::string& value) {
+    if (value == "pending") return DatasetRole::Pending;
+    if (value == "train") return DatasetRole::Train;
+    if (value == "validation") return DatasetRole::Validation;
+    if (value == "evaluation") return DatasetRole::Evaluation;
+    if (value == "excluded") return DatasetRole::Excluded;
+    throw std::runtime_error("invalid dataset role " + value);
+}
+
 
 std::string rational_json(const RationalTime& value) {
     JsonWriter w;
@@ -426,6 +453,35 @@ std::string artifact_json(const ArtifactReference& artifact) {
     w.field("transform", artifact.transform);
     return w.end().str();
 }
+std::string dataset_plan_member_json(const DatasetPlanMember& member) {
+    JsonWriter w;
+    w.object()
+        .field("image", member.image)
+        .field("source_id", member.source_id);
+    if (!member.frame_id.empty()) w.field("frame_id", member.frame_id);
+    w.field("capture", member.capture)
+        .field("camera", member.camera);
+    if (!member.rig.empty()) w.field("rig", member.rig);
+    if (!member.exclusion_group.empty())
+        w.field("exclusion_group", member.exclusion_group);
+    w.field("role", dataset_role_name(member.role));
+    return w.end().str();
+}
+
+std::string dataset_plan_json(const DatasetPlan& plan) {
+    std::string members = "[";
+    for (std::size_t i = 0; i < plan.members.size(); ++i) {
+        if (i) members += ',';
+        members += dataset_plan_member_json(plan.members[i]);
+    }
+    members += ']';
+    JsonWriter w;
+    w.object()
+        .field("schema", static_cast<int>(plan.schema))
+        .field_raw("members", members);
+    return w.end().str();
+}
+
 
 std::uint64_t integer_value(const JsonValue& value, const char* field) {
     if (value.type == JsonValue::Type::String && !value.str.empty()) {
@@ -460,6 +516,16 @@ const JsonValue& required_field(const JsonValue& object, const char* key) {
     if (count != 1) throw std::runtime_error(std::string("duplicate field ") + key);
     return *value;
 }
+const JsonValue* optional_field(const JsonValue& object, const char* key) {
+    const JsonValue* value = object.find(key);
+    if (!value) return nullptr;
+    std::size_t count = 0;
+    for (const auto& entry : object.obj)
+        if (entry.first == key) ++count;
+    if (count != 1) throw std::runtime_error(std::string("duplicate field ") + key);
+    return value;
+}
+
 
 void reject_unknown_fields(const JsonValue& object,
                            std::initializer_list<const char*> allowed) {
@@ -585,6 +651,7 @@ DecisionStatus parse_decision_status(const JsonValue& object) {
     if (value == "refused") return DecisionStatus::Refused;
     throw std::runtime_error(std::string("invalid synchronization decision status ") + value);
 }
+
 
 RawClockRecord parse_raw_clock(const JsonValue& object) {
     if (!object.is_object()) throw std::runtime_error("raw clock is not an object");
@@ -760,6 +827,58 @@ SourceRecord parse_source(const JsonValue& object) {
     validate_source_record(source);
     return source;
 }
+DatasetPlanMember parse_dataset_plan_member(const JsonValue& object) {
+    if (!object.is_object())
+        throw std::runtime_error("dataset plan member is not an object");
+    reject_unknown_fields(object, {"image", "source_id", "frame_id", "capture", "camera",
+                                   "rig", "exclusion_group", "role"});
+    DatasetPlanMember out;
+    out.image = string_field(object, "image", false);
+    out.source_id = string_field(object, "source_id", false);
+    if (const JsonValue* frame_id = optional_field(object, "frame_id")) {
+        if (frame_id->type != JsonValue::Type::String ||
+            !valid_text(frame_id->str, false) || !valid_source_id(frame_id->str))
+            throw std::runtime_error("invalid dataset plan frame id");
+        out.frame_id = frame_id->str;
+    }
+    out.capture = string_field(object, "capture", false);
+    out.camera = string_field(object, "camera", false);
+    if (const JsonValue* rig = optional_field(object, "rig")) {
+        if (rig->type != JsonValue::Type::String || !valid_text(rig->str))
+            throw std::runtime_error("invalid dataset plan rig");
+        out.rig = rig->str;
+    }
+    if (const JsonValue* exclusion_group = optional_field(object, "exclusion_group")) {
+        if (exclusion_group->type != JsonValue::Type::String ||
+            !valid_text(exclusion_group->str))
+            throw std::runtime_error("invalid dataset plan exclusion group");
+        out.exclusion_group = exclusion_group->str;
+    }
+    if (const JsonValue* role = optional_field(object, "role")) {
+        if (role->type != JsonValue::Type::String || !valid_text(role->str, false))
+            throw std::runtime_error("invalid dataset plan role");
+        out.role = parse_dataset_role(role->str);
+    }
+    return out;
+}
+
+DatasetPlan parse_dataset_plan(const JsonValue& object) {
+    if (!object.is_object()) throw std::runtime_error("dataset plan is not an object");
+    reject_unknown_fields(object, {"schema", "members"});
+    DatasetPlan out;
+    const std::uint64_t schema =
+        integer_value(required_field(object, "schema"), "dataset plan schema");
+    if (schema != kDatasetPlanSchemaVersion)
+        throw std::runtime_error("unsupported dataset plan schema");
+    out.schema = static_cast<std::uint32_t>(schema);
+    const JsonValue& members = required_field(object, "members");
+    if (!members.is_array()) throw std::runtime_error("dataset plan members is not an array");
+    out.members.reserve(members.arr.size());
+    for (const JsonValue& member : members.arr)
+        out.members.push_back(parse_dataset_plan_member(member));
+    return out;
+}
+
 
 std::string read_exact(const fs::path& path, std::uintmax_t max_bytes) {
     const FileSnapshot before = snapshot(path);
@@ -909,6 +1028,23 @@ std::string path_key(const fs::path& path) {
     return key;
 }
 
+std::string exclusion_group_key(const DatasetPlanMember& member) {
+    std::string encoded;
+    append_string_field(encoded, "spirula-exclusion-group-v1");
+    append_string_field(encoded, member.capture);
+    if (!member.rig.empty()) {
+        append_string_field(encoded, member.rig);
+        append_string_field(
+            encoded, path_key(fs::u8path(member.image).filename().stem()));
+    } else if (!member.frame_id.empty()) {
+        append_string_field(encoded, member.frame_id);
+    } else {
+        append_string_field(encoded, path_key(fs::u8path(member.image)));
+    }
+    return digest_bytes(encoded);
+}
+
+
 bool path_within(const fs::path& root, const fs::path& child) {
     auto root_it = root.begin();
     auto child_it = child.begin();
@@ -947,6 +1083,96 @@ std::string normalized_artifact_name(const std::string& value) {
         throw std::runtime_error("artifact reference is not normalized");
     return result;
 }
+
+std::string coverage_image_key(const std::string& value) {
+    if (!valid_text(value, false)) return {};
+    const fs::path path = fs::u8path(value);
+    if (path.empty() || path.is_absolute() || path.has_root_name() ||
+        path.has_root_directory())
+        return {};
+    for (const fs::path& part : path)
+        if (part == fs::path("..")) return {};
+    const fs::path normalized = path.lexically_normal();
+    if (normalized.empty() || normalized == fs::path(".") ||
+        normalized == fs::path("..") || normalized.is_absolute())
+        return {};
+    return path_key(normalized);
+}
+
+struct CoveragePoint {
+    double x = 0.0;
+    double y = 0.0;
+    double z = 0.0;
+};
+
+struct CoverageGroup {
+    std::string key;
+    std::vector<std::size_t> members;
+    std::size_t first_member = 0;
+    CoveragePoint representative;
+    bool has_representative = false;
+};
+
+double coverage_distance_squared(const CoveragePoint& a, const CoveragePoint& b) {
+    const double dx = a.x - b.x;
+    const double dy = a.y - b.y;
+    const double dz = a.z - b.z;
+    return dx * dx + dy * dy + dz * dz;
+}
+
+bool coverage_group_precedes(const CoverageGroup& a, const CoverageGroup& b) {
+    if (a.first_member != b.first_member) return a.first_member < b.first_member;
+    return a.key < b.key;
+}
+
+
+void validate_dataset_plan(const DatasetPlan& plan,
+                           const std::set<std::string>& source_ids,
+                           const std::vector<std::string>& captures) {
+    if (plan.schema != kDatasetPlanSchemaVersion)
+        throw std::runtime_error("unsupported dataset plan schema");
+    std::set<std::string> image_paths;
+    std::map<std::string, DatasetRole> assigned_group_roles;
+    std::set<std::string> pending_groups;
+    for (const DatasetPlanMember& member : plan.members) {
+        const std::string image = normalized_artifact_name(member.image);
+        if (!image_paths.emplace(path_key(fs::u8path(image))).second)
+            throw std::runtime_error("duplicate normalized dataset plan image");
+        if (!source_ids.count(member.source_id))
+            throw std::runtime_error("dataset plan references an unknown source");
+        if (!member.frame_id.empty()) {
+            if (!valid_source_id(member.frame_id))
+                throw std::runtime_error("malformed dataset plan frame digest");
+            if (std::find(captures.begin(), captures.end(), member.frame_id) ==
+                captures.end())
+                throw std::runtime_error("dataset plan frame is not a revision capture");
+        }
+        require_text(member.capture, "dataset plan capture", false);
+        require_text(member.camera, "dataset plan camera", false);
+        require_text(member.rig, "dataset plan rig", true);
+        if (!valid_dataset_role(member.role))
+            throw std::runtime_error("invalid dataset plan role");
+        require_text(member.exclusion_group, "dataset plan exclusion group",
+                     member.role == DatasetRole::Pending);
+        if (member.exclusion_group.empty()) continue;
+        if (member.role == DatasetRole::Pending) {
+            if (assigned_group_roles.count(member.exclusion_group))
+                throw std::runtime_error(
+                    "dataset exclusion group mixes pending and assigned roles");
+            pending_groups.emplace(member.exclusion_group);
+        } else {
+            if (pending_groups.count(member.exclusion_group))
+                throw std::runtime_error(
+                    "dataset exclusion group mixes pending and assigned roles");
+            const auto found = assigned_group_roles.find(member.exclusion_group);
+            if (found != assigned_group_roles.end() && found->second != member.role)
+                throw std::runtime_error(
+                    "dataset exclusion group mixes assigned roles");
+            assigned_group_roles.emplace(member.exclusion_group, member.role);
+        }
+    }
+}
+
 
 bool reserved_project_path(const fs::path& root, const fs::path& path) {
     const fs::path relative = path.lexically_relative(root);
@@ -1373,6 +1599,203 @@ std::string stable_frame_id(const std::string& source_id,
     return "sha256:" + sha.hex();
 }
 
+void freeze_exclusion_groups(DatasetPlan& plan) {
+    for (DatasetPlanMember& member : plan.members)
+        member.exclusion_group = exclusion_group_key(member);
+}
+DatasetRoleIndices resolve_dataset_roles(
+    const DatasetPlan& plan,
+    const fs::path& project_root,
+    const std::vector<std::string>& image_files) {
+    if (plan.schema != kDatasetPlanSchemaVersion)
+        throw std::runtime_error("unsupported dataset plan schema");
+    if (plan.members.empty())
+        throw std::runtime_error("dataset plan is empty");
+
+    std::error_code ec;
+    const fs::path root = fs::absolute(project_root, ec).lexically_normal();
+    if (ec) throw std::runtime_error("cannot resolve project root: " + ec.message());
+
+    std::map<std::string, DatasetRole> roles;
+    for (const DatasetPlanMember& member : plan.members) {
+        if (member.role == DatasetRole::Pending)
+            throw std::runtime_error("dataset plan contains pending members");
+        if (!valid_dataset_role(member.role))
+            throw std::runtime_error("invalid dataset plan role");
+        const std::string image = normalized_artifact_name(member.image);
+        const std::string key =
+            path_key((root / fs::u8path(image)).lexically_normal());
+        if (!roles.emplace(key, member.role).second)
+            throw std::runtime_error("duplicate normalized dataset plan image");
+    }
+
+    DatasetRoleIndices out;
+    std::set<std::string> matched;
+    for (std::size_t i = 0; i < image_files.size(); ++i) {
+        if (i > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max()))
+            throw std::runtime_error("dataset image index exceeds int32 range");
+        const fs::path file = fs::u8path(image_files[i]);
+        if (file.empty()) throw std::runtime_error("dataset image path is empty");
+        ec.clear();
+        const fs::path absolute_file =
+            fs::absolute(file.is_absolute() ? file : root / file, ec);
+        if (ec)
+            throw std::runtime_error("cannot resolve dataset image path: " + ec.message());
+        const std::string key = path_key(absolute_file.lexically_normal());
+        if (!matched.emplace(key).second)
+            throw std::runtime_error("duplicate dataset image path");
+        const auto found = roles.find(key);
+        if (found == roles.end())
+            throw std::runtime_error("dataset image is not in the project plan");
+        const std::int32_t index = static_cast<std::int32_t>(i);
+        switch (found->second) {
+            case DatasetRole::Train: out.train.push_back(index); break;
+            case DatasetRole::Validation: out.validation.push_back(index); break;
+            case DatasetRole::Evaluation: out.evaluation.push_back(index); break;
+            case DatasetRole::Excluded: break;
+            case DatasetRole::Pending:
+                throw std::runtime_error("dataset plan contains pending members");
+        }
+    }
+    if (matched.size() != roles.size())
+        throw std::runtime_error("project dataset plan has unmatched members");
+    return out;
+}
+
+
+std::vector<std::size_t> select_training_by_coverage(
+    const DatasetPlan& plan,
+    const std::vector<DatasetPoseEvidence>& evidence,
+    std::size_t max_members) {
+    if (max_members == 0) return {};
+
+    std::map<std::string, CoveragePoint> points;
+    for (const DatasetPoseEvidence& row : evidence) {
+        if (!std::isfinite(row.x) || !std::isfinite(row.y) || !std::isfinite(row.z))
+            continue;
+        const std::string key = coverage_image_key(row.image);
+        if (!key.empty()) points.emplace(key, CoveragePoint{row.x, row.y, row.z});
+    }
+
+    std::vector<CoverageGroup> groups;
+    std::map<std::string, std::size_t> group_indices;
+    for (std::size_t i = 0; i < plan.members.size(); ++i) {
+        const DatasetPlanMember& member = plan.members[i];
+        std::size_t group_index = groups.size();
+        if (!member.exclusion_group.empty()) {
+            const auto found = group_indices.find(member.exclusion_group);
+            if (found != group_indices.end()) {
+                group_index = found->second;
+            } else {
+                group_indices.emplace(member.exclusion_group, group_index);
+                CoverageGroup group;
+                group.key = member.exclusion_group;
+                group.first_member = i;
+                groups.push_back(std::move(group));
+            }
+            if (member.role == DatasetRole::Pending)
+                groups[group_index].members.push_back(i);
+        } else if (member.role == DatasetRole::Pending) {
+            CoverageGroup group;
+            group.first_member = i;
+            group.members.push_back(i);
+            groups.push_back(std::move(group));
+        }
+    }
+    groups.erase(std::remove_if(groups.begin(), groups.end(),
+                                [](const CoverageGroup& group) {
+                                    return group.members.empty();
+                                }),
+                 groups.end());
+
+    long double centroid_x = 0.0;
+    long double centroid_y = 0.0;
+    long double centroid_z = 0.0;
+    std::size_t centroid_count = 0;
+    for (CoverageGroup& group : groups) {
+        long double sum_x = 0.0;
+        long double sum_y = 0.0;
+        long double sum_z = 0.0;
+        std::size_t count = 0;
+        for (const std::size_t member_index : group.members) {
+            const std::string key = coverage_image_key(plan.members[member_index].image);
+            const auto found = points.find(key);
+            if (found == points.end()) continue;
+            sum_x += found->second.x;
+            sum_y += found->second.y;
+            sum_z += found->second.z;
+            centroid_x += found->second.x;
+            centroid_y += found->second.y;
+            centroid_z += found->second.z;
+            ++count;
+            ++centroid_count;
+        }
+        if (count == 0) continue;
+        const long double divisor = static_cast<long double>(count);
+        group.representative = {
+            static_cast<double>(sum_x / divisor),
+            static_cast<double>(sum_y / divisor),
+            static_cast<double>(sum_z / divisor),
+        };
+        group.has_representative = std::isfinite(group.representative.x) &&
+                                   std::isfinite(group.representative.y) &&
+                                   std::isfinite(group.representative.z);
+    }
+
+    std::vector<std::size_t> ranked_groups;
+    std::vector<bool> ranked(groups.size(), false);
+    CoveragePoint centroid;
+    if (centroid_count != 0) {
+        const long double divisor = static_cast<long double>(centroid_count);
+        centroid = {
+            static_cast<double>(centroid_x / divisor),
+            static_cast<double>(centroid_y / divisor),
+            static_cast<double>(centroid_z / divisor),
+        };
+    }
+    while (centroid_count != 0 && ranked_groups.size() < groups.size()) {
+        std::size_t best = groups.size();
+        double best_distance = 0.0;
+        for (std::size_t i = 0; i < groups.size(); ++i) {
+            if (ranked[i] || !groups[i].has_representative) continue;
+            double distance = 0.0;
+            if (ranked_groups.empty()) {
+                distance = coverage_distance_squared(groups[i].representative, centroid);
+            } else {
+                distance = std::numeric_limits<double>::infinity();
+                for (const std::size_t selected : ranked_groups)
+                    distance = std::min(
+                        distance,
+                        coverage_distance_squared(groups[i].representative,
+                                                  groups[selected].representative));
+            }
+            if (best == groups.size() || distance > best_distance ||
+                (distance == best_distance &&
+                 coverage_group_precedes(groups[i], groups[best]))) {
+                best = i;
+                best_distance = distance;
+            }
+        }
+        if (best == groups.size()) break;
+        ranked[best] = true;
+        ranked_groups.push_back(best);
+    }
+    for (std::size_t i = 0; i < groups.size(); ++i)
+        if (!groups[i].has_representative) ranked_groups.push_back(i);
+
+    std::vector<std::size_t> selected;
+    for (const std::size_t group_index : ranked_groups) {
+        const CoverageGroup& group = groups[group_index];
+        if (!selected.empty() &&
+            (selected.size() > max_members ||
+             group.members.size() > max_members - selected.size()))
+            break;
+        selected.insert(selected.end(), group.members.begin(), group.members.end());
+    }
+    return selected;
+}
+
+
 void validate_revision(const ProjectRevision& revision) {
     if (revision.schema != kProjectSchemaVersion)
         throw std::runtime_error("unsupported project revision schema");
@@ -1401,8 +1824,18 @@ void validate_revision(const ProjectRevision& revision) {
     std::set<std::string> clock_ids;
     for (const RawClockRecord& clock : revision.raw_clocks) {
         validate_raw_clock(clock);
-        if (!source_ids.count(clock.source_id))
+        const auto source = std::find_if(
+            revision.sources.begin(), revision.sources.end(),
+            [&](const SourceRecord& candidate) {
+                return candidate.source_id == clock.source_id;
+            });
+        if (source == revision.sources.end())
             throw std::runtime_error("raw clock references an unknown source");
+        if (std::none_of(source->streams.begin(), source->streams.end(),
+                         [&](const SourceStream& stream) {
+                             return stream.stream_id == clock.stream_id;
+                         }))
+            throw std::runtime_error("raw clock references an unknown source stream");
         if (!clock_ids.emplace(clock.id).second)
             throw std::runtime_error("duplicate raw clock identity");
     }
@@ -1481,6 +1914,8 @@ void validate_revision(const ProjectRevision& revision) {
         if (!artifact_ids.emplace(artifact.artifact).second)
             throw std::runtime_error("duplicate artifact reference");
     }
+    validate_dataset_plan(revision.dataset_plan, source_ids, revision.captures);
+
 }
 
 std::string serialize_revision(const ProjectRevision& revision) {
@@ -1540,6 +1975,8 @@ std::string serialize_revision(const ProjectRevision& revision) {
     std::string captures;
     append_array(captures, revision.captures);
     w.field_raw("captures", captures);
+    w.field_raw("dataset_plan", dataset_plan_json(revision.dataset_plan));
+
 
     std::string artifacts;
     artifacts.push_back('[');
@@ -1575,7 +2012,7 @@ ProjectRevision parse_revision(const std::string& text) {
     reject_unknown_fields(
         root, {"schema", "name", "sources", "raw_clocks", "source_export_mappings",
                "timing_estimates", "synchronization_decisions", "parents", "captures",
-               "artifacts", "protected_regions", "operations", "validations"});
+               "dataset_plan", "artifacts", "protected_regions", "operations", "validations"});
     ProjectRevision revision;
     const std::uint64_t schema = integer_value(required_field(root, "schema"), "schema");
     if (schema != kProjectSchemaVersion)
@@ -1614,6 +2051,8 @@ ProjectRevision parse_revision(const std::string& text) {
 
     revision.parents = string_array_field(root, "parents");
     revision.captures = string_array_field(root, "captures");
+    revision.dataset_plan = parse_dataset_plan(required_field(root, "dataset_plan"));
+
 
     const JsonValue& artifacts = required_field(root, "artifacts");
     if (!artifacts.is_array()) throw std::runtime_error("artifacts is not an array");

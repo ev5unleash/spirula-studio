@@ -1,23 +1,8 @@
-# SS_BUILD_SAM: the GPU inference layer (src/nn/) and what currently sits
-# on it -- SAM 2 / SAM 3 segmentation (src/sam/) and, when patented modules are
-# enabled, hardware video decoding (src/video/).
-#
-# Defines:
-#   ss_nn      the reusable inference layer (Vulkan runtime + tensor + ops)
-#   ss_sam     SAM 2 / SAM 3 on top of it
-#   ss_video   demux + VK_KHR_video_decode_*  (SS_ENABLE_PATENTED only)
-#   nn_ops_test / sam_pipeline_test   one executable per src/*/tests/*.cpp
-#
-# The `spirula-sam` CLI lives with the other app targets, in SsApps.cmake.
-#
-# Like cmake/SsSfm.cmake, this needs Vulkan and slangc but NOT the compute
-# backend: src/nn/vk/ is its own Vulkan context, so the module builds
-# identically under either SS_BACKEND.
-#
-# Shaders: one slangc edge per .slang module (all of a file's entry points land
-# in one blob, which is what the pipeline cache's "<stem>.<entry>" key expects),
-# then one generated TU per library that registers its blobs with
-# nn/vk/EmbeddedSpirv.h's process registry. Three libraries, one pipeline cache.
+# Builds the Vulkan inference layer, model libraries, patented video, and tests.
+# `ss_nn` owns its Vulkan context and is independent of the compute backend.
+# Video is compiled only with SS_ENABLE_PATENTED; the SAM CLI is in SsApps.cmake.
+# Each Slang module becomes one blob because pipeline keys use
+# "<stem>.<entry>", then one generated TU per library registers those blobs.
 
 include(SsVulkan)
 ss_vulkan_lib()
@@ -232,11 +217,22 @@ if(SS_ENABLE_PATENTED)
 
     file(GLOB_RECURSE SS_VIDEO_SOURCES CONFIGURE_DEPENDS
          ${SS_SRC}/video/*.cpp)
+    list(FILTER SS_VIDEO_SOURCES EXCLUDE REGEX "/tests/")
     add_library(ss_video STATIC ${SS_VIDEO_SOURCES} ${SS_VIDEO_EMBED})
     target_link_libraries(ss_video PUBLIC ss_nn)
     target_compile_options(ss_video PRIVATE
         $<$<COMPILE_LANGUAGE:CXX>:${SPLAT_CXX_FLAGS}>)
     set_property(TARGET ss_video PROPERTY CXX_STANDARD 17)
+
+    file(GLOB SS_VIDEO_TESTS CONFIGURE_DEPENDS ${SS_SRC}/video/tests/*.cpp)
+    foreach(test_src ${SS_VIDEO_TESTS})
+        get_filename_component(test_name ${test_src} NAME_WE)
+        add_executable(${test_name} ${test_src})
+        target_link_libraries(${test_name} PRIVATE ss_video)
+        target_compile_options(${test_name} PRIVATE
+            $<$<COMPILE_LANGUAGE:CXX>:${SPLAT_CXX_FLAGS}>)
+        set_property(TARGET ${test_name} PROPERTY CXX_STANDARD 17)
+    endforeach()
 endif()
 
 # ---------------------------------------------------------------------------

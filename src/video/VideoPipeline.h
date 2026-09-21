@@ -65,8 +65,24 @@ public:
 
     // Records the sharpness reduction for a live frame. Values become readable
     // after flushSharpness(), which costs one queue sync for the whole batch.
-    void  queueSharpness(const FrameHandle& h);
-    void  flushSharpness();
+    void queueSharpness(const FrameHandle& h);
+
+    // Scores only the bounded, concatenated source rectangles. A zero-count
+    // descriptor is not valid here; use the overload above for a full frame.
+    static constexpr int kMaxSharpnessRegions = 3;
+    struct SharpnessRegion {
+        int x = 0, y = 0, width = 0, height = 0;
+    };
+    struct SharpnessRegions {
+        int count = 0;
+        int packed_width = 0, packed_height = 0;
+        SharpnessRegion regions[kMaxSharpnessRegions] = {};
+    };
+    void queueSharpness(const FrameHandle& h, const SharpnessRegions& regions);
+
+    // Values become readable after flushSharpness(), which costs one queue sync
+    // for the whole batch.
+    void flushSharpness();
     float sharpness(const FrameHandle& h) const;
 
     // A box-filtered grey copy of the frame at `w` x `h`, on the host. What

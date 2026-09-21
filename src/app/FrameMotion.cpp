@@ -352,9 +352,9 @@ struct MotionTracker::Impl {
     float diag = 1.0f;
     std::vector<float> gx, gy;      // the grid tracked, in frame pixels
     Pyramid prev, cur;
+    FramePosition previous;
     bool primed = false;
-    std::vector<float> cost;
-    std::vector<int64_t> end;
+    std::vector<MotionStep> step;
     int weak = 0;
     bool done = false;
 
@@ -544,11 +544,11 @@ MotionTracker::MotionTracker(const MotionOptions& options) : impl_(new Impl{}) {
 
 MotionTracker::~MotionTracker() = default;
 
-void MotionTracker::track(const uint8_t* gray, int64_t index) {
+void MotionTracker::track(const uint8_t* gray, FramePosition position) {
     Impl& s = *impl_;
     if (s.o.width <= 0 || s.o.height <= 0 || s.done) return;
     build_pyramid(gray, s.o.width, s.o.height, s.cur);
-    if (s.primed) {
+    if (s.primed && s.previous.segment == position.segment) {
         // The points are independent and are most of the cost of a step, so
         // they are split across the machine: the extraction this runs in front
         // of has the GPU busy and the cores idle.
@@ -581,12 +581,14 @@ void MotionTracker::track(const uint8_t* gray, int64_t index) {
         }
         const float c = s.step_cost(p);
         if (c < 0) s.weak++;
-        s.cost.push_back(c);
-        s.end.push_back(index);
+        s.step.push_back({position, c});
     }
+    // A discontinuity starts a new reference frame. It is deliberately not
+    // measured against the last picture of the preceding segment.
     s.prev.level.swap(s.cur.level);
     s.prev.w = s.cur.w;
     s.prev.h = s.cur.h;
+    s.previous = position;
     s.primed = true;
 }
 
@@ -597,15 +599,14 @@ void MotionTracker::finish() {
     // A step nothing could be tracked across is not a still one: the typical
     // step is a better guess than zero, which would hoard frames there.
     std::vector<float> good;
-    for (float c : s.cost)
-        if (c >= 0) good.push_back(c);
+    for (const MotionStep& step : s.step)
+        if (step.cost >= 0) good.push_back(step.cost);
     const float fill = good.empty() ? 0.0f : percentile(good, 0.5f);
-    for (float& c : s.cost)
-        if (c < 0) c = fill;
+    for (MotionStep& step : s.step)
+        if (step.cost < 0) step.cost = fill;
 }
 
-const std::vector<float>& MotionTracker::costs() const { return impl_->cost; }
-const std::vector<int64_t>& MotionTracker::ends() const { return impl_->end; }
+const std::vector<MotionStep>& MotionTracker::steps() const { return impl_->step; }
 int MotionTracker::weak_steps() const { return impl_->weak; }
 
 float motion_out_fov(const std::vector<Pano360View>& views) {
@@ -633,82 +634,162 @@ void motion_frame_size(MotionView view, int src_w, int src_h, int& w, int& h) {
 
 namespace {
 
-// One video's running total of view change, and the two gaps its own rate puts
-// bounds on. Built once so that bisecting the step re-walks arithmetic only.
-struct PlanTrack {
-    const MotionPlanInput* in = nullptr;
+// One segment's running total of view change and the two gaps its own rate
+// puts bounds on. Segment arithmetic starts at its first decoded ordinal.
+struct PlanSegment {
+    uint32_t segment = 0;
+    int64_t first_ordinal = 0;
+    std::vector<const MotionStep*> steps;
     std::vector<double> sum;
-    int64_t min_gap = 1, max_gap = 1, want = 1;
+    int64_t min_gap = 1, max_gap = 1;
 };
 
-std::vector<int64_t> walk_track(const PlanTrack& t, double step) {
-    const MotionPlanInput& in = *t.in;
-    std::vector<int64_t> got;
+struct PlanTrack {
+    size_t input = 0;
+    std::vector<PlanSegment> segments;
+    int64_t want = 1;
+    int max_frames = 0;
+};
+
+FramePlan walk_segment(const PlanSegment& t, int window, double step,
+                       int64_t limit) {
+    FramePlan got;
     int64_t last = -1;
     double last_sum = 0;
-    for (size_t i = 0; i < in.cost.size(); i++) {
-        const int64_t at = in.ends[i];
-        if (at < in.window - 1) continue;
+    for (size_t i = 0; i < t.steps.size(); i++) {
+        const FramePosition at = t.steps[i]->end;
+        if (at.ordinal - t.first_ordinal < window - 1) continue;
         size_t pick = i;
         if (last >= 0) {
-            if (at - last < t.min_gap) continue;
-            if (t.sum[i] - last_sum < step && at - last < t.max_gap) continue;
+            if (at.ordinal - last < t.min_gap) continue;
+            if (t.sum[i] - last_sum < step &&
+                at.ordinal - last < t.max_gap)
+                continue;
             // The step falls BETWEEN two samples, and always taking the one
             // past it lands the whole plan late.
-            if (i > 0 && t.sum[i] - last_sum > step && in.ends[i - 1] > last &&
-                in.ends[i - 1] - last >= t.min_gap &&
-                in.ends[i - 1] >= in.window - 1 &&
-                (t.sum[i] - last_sum) - step > step - (t.sum[i - 1] - last_sum))
-                pick = i - 1;
+            if (i > 0 && t.sum[i] - last_sum > step) {
+                const FramePosition previous = t.steps[i - 1]->end;
+                if (previous.ordinal > last &&
+                    previous.ordinal - last >= t.min_gap &&
+                    previous.ordinal - t.first_ordinal >= window - 1 &&
+                    (t.sum[i] - last_sum) - step >
+                        step - (t.sum[i - 1] - last_sum))
+                    pick = i - 1;
+            }
         }
-        got.push_back(in.ends[pick]);
-        last = in.ends[pick];
+        got.frames.push_back(t.steps[pick]->end);
+        last = t.steps[pick]->end.ordinal;
         last_sum = t.sum[pick];
         i = pick;   // the sample stepped over is still the next candidate
-        if (in.max_frames > 0 && (int)got.size() >= in.max_frames) break;
+        if (limit > 0 && (int64_t)got.size() >= limit) break;
+    }
+    return got;
+}
+
+std::vector<FrameSegmentSpan> input_spans(const MotionPlanInput& m) {
+    if (!m.spans.empty()) return m.spans;
+    std::vector<FrameSegmentSpan> spans;
+    for (const MotionStep& step : m.steps) {
+        if (spans.empty() || spans.back().segment != step.end.segment) {
+            spans.push_back({step.end.segment, step.end.ordinal, step.end.ordinal});
+        } else {
+            spans.back().last_ordinal = step.end.ordinal;
+        }
+    }
+    return spans;
+}
+
+PlanTrack make_track(size_t input, const MotionPlanInput& m, float range) {
+    PlanTrack t;
+    t.input = input;
+    t.max_frames = m.max_frames;
+    const int64_t source_frames = m.frames > 0
+                                      ? m.frames
+                                      : [&] {
+                                            int64_t n = 0;
+                                            for (const FrameSegmentSpan& span : input_spans(m))
+                                                n += std::max<int64_t>(
+                                                    0, span.last_ordinal -
+                                                           span.first_ordinal + 1);
+                                            return n;
+                                        }();
+    t.want = std::max<int64_t>(1, source_frames / m.skip);
+    if (m.max_frames > 0) t.want = std::min<int64_t>(t.want, m.max_frames);
+
+    const std::vector<FrameSegmentSpan> spans = input_spans(m);
+    for (const FrameSegmentSpan& span : spans) {
+        if (span.last_ordinal < span.first_ordinal) continue;
+        PlanSegment segment;
+        segment.segment = span.segment;
+        segment.first_ordinal = span.first_ordinal;
+        for (const MotionStep& step : m.steps)
+            if (step.end.segment == span.segment &&
+                step.end.ordinal >= span.first_ordinal &&
+                step.end.ordinal <= span.last_ordinal)
+                segment.steps.push_back(&step);
+        if (segment.steps.empty()) continue;
+        segment.sum.resize(segment.steps.size());
+        double run = 0;
+        for (size_t i = 0; i < segment.steps.size(); i++) {
+            run += std::max(0.0f, segment.steps[i]->cost);
+            segment.sum[i] = run;
+        }
+        // Never closer than one sharpness window: two windows that overlap can
+        // choose the same frame, and one of the two kept frames then vanishes.
+        segment.min_gap = std::max<int64_t>(
+            std::max(1, m.window), (int64_t)((double)m.skip / range));
+        segment.max_gap = std::max<int64_t>(
+            segment.min_gap, (int64_t)((double)m.skip * range));
+        t.segments.push_back(std::move(segment));
+    }
+    return t;
+}
+
+FramePlan walk_track(const PlanTrack& t, const MotionPlanInput& in,
+                     double step) {
+    FramePlan got;
+    int64_t remaining = t.max_frames > 0 ? t.max_frames : 0;
+    for (const PlanSegment& segment : t.segments) {
+        const int64_t limit = remaining > 0 ? remaining : 0;
+        FramePlan part = walk_segment(segment, std::max(in.window, 1), step, limit);
+        got.frames.insert(got.frames.end(), part.frames.begin(), part.frames.end());
+        if (remaining > 0) {
+            remaining -= (int64_t)part.size();
+            if (remaining <= 0) break;
+        }
     }
     return got;
 }
 
 }  // namespace
 
-std::vector<std::vector<int64_t>> plan_by_motion(
+std::vector<FramePlan> plan_by_motion(
         const std::vector<MotionPlanInput>& in, float range) {
-    std::vector<std::vector<int64_t>> out(in.size());
+    std::vector<FramePlan> out(in.size());
     if (range < 1.0f) range = 1.0f;
 
     std::vector<PlanTrack> tracks;
     double total = 0;
     int64_t want = 0;
-    for (const MotionPlanInput& m : in) {
-        if (m.cost.empty() || m.cost.size() != m.ends.size() || m.skip < 1) continue;
-        PlanTrack t;
-        t.in = &m;
-        t.sum.resize(m.cost.size());
-        double run = 0;
-        for (size_t i = 0; i < m.cost.size(); i++) {
-            run += std::max(0.0f, m.cost[i]);
-            t.sum[i] = run;
-        }
-        total += run;
-        // Never closer than one sharpness window: two windows that overlap can
-        // choose the same frame, and one of the two kept frames then vanishes.
-        t.min_gap = std::max<int64_t>(std::max(1, m.window),
-                                      (int64_t)((double)m.skip / range));
-        t.max_gap = std::max<int64_t>(t.min_gap, (int64_t)((double)m.skip * range));
-        t.want = std::max<int64_t>(1, m.frames / m.skip);
-        if (m.max_frames > 0) t.want = std::min<int64_t>(t.want, m.max_frames);
+    for (size_t i = 0; i < in.size(); i++) {
+        const MotionPlanInput& m = in[i];
+        if (m.steps.empty() || m.skip < 1) continue;
+        PlanTrack t = make_track(i, m, range);
+        if (t.segments.empty()) continue;
+        for (const PlanSegment& segment : t.segments)
+            if (!segment.sum.empty()) total += segment.sum.back();
         want += t.want;
         tracks.push_back(std::move(t));
     }
     if (tracks.empty()) return out;
 
     auto walk_all = [&](double step) {
-        std::vector<std::vector<int64_t>> got(tracks.size());
+        std::vector<FramePlan> got(in.size());
         int64_t n = 0;
-        for (size_t k = 0; k < tracks.size(); k++) {
-            got[k] = walk_track(tracks[k], step);
-            n += (int64_t)got[k].size();
+        for (const PlanTrack& track : tracks) {
+            FramePlan plan = walk_track(track, in[track.input], step);
+            n += (int64_t)plan.size();
+            got[track.input] = std::move(plan);
         }
         return std::make_pair(n, std::move(got));
     };
@@ -731,28 +812,38 @@ std::vector<std::vector<int64_t>> plan_by_motion(
             }
         }
     }
-    size_t k = 0;
-    for (size_t i = 0; i < in.size(); i++) {
-        const MotionPlanInput& m = in[i];
-        if (m.cost.empty() || m.cost.size() != m.ends.size() || m.skip < 1) continue;
-        out[i] = std::move(best.second[k++]);
-    }
-    return out;
+    return std::move(best.second);
 }
 
 std::vector<int64_t> plan_by_motion(const std::vector<float>& cost,
                                     const std::vector<int64_t>& ends,
                                     int64_t frames, int skip, int window,
                                     float range, int max_frames) {
+    if (cost.size() != ends.size()) return {};
     MotionPlanInput in;
-    in.cost = cost;
-    in.ends = ends;
     in.frames = frames;
     in.skip = skip;
     in.window = window;
     in.max_frames = max_frames;
-    std::vector<std::vector<int64_t>> got = plan_by_motion({in}, range);
-    return got.empty() ? std::vector<int64_t>() : std::move(got[0]);
+    const size_t n = cost.size();
+    if (n > 0) {
+        int64_t last = ends[0];
+        in.steps.reserve(n);
+        for (size_t i = 0; i < n; i++) {
+            last = std::max(last, ends[i]);
+            in.steps.push_back({{0, ends[i]}, cost[i]});
+        }
+        // The flat API historically measured windows from ordinal zero.
+        in.spans.push_back({0, 0, last});
+    }
+    const std::vector<FramePlan> got = plan_by_motion({in}, range);
+    std::vector<int64_t> flat;
+    if (!got.empty()) {
+        flat.reserve(got[0].size());
+        for (const FramePosition& position : got[0].frames)
+            flat.push_back(position.ordinal);
+    }
+    return flat;
 }
 
 }  // namespace app

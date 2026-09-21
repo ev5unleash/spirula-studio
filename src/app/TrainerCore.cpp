@@ -29,7 +29,7 @@
 #include <numeric>
 #include <random>
 #include <stdexcept>
-#include <thread>
+#include <utility>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -364,6 +364,7 @@ EngineStepConfig build_step_config(const TrainConfig& c, const RunState& st, int
         cfg.loss.color_shift_reg_beta =
             std::max(0.0f, 1.0f - 1.0f / std::max(c.color_shift_reg_ema_period, 1));
     }
+    cfg.loss.depth_unit_scale_factor = c.depth_unit_scale_factor;
     cfg.loss.input_depth_is_ray_depth = st.input_depth_is_ray_depth;
 
     // ---- optim ---------------------------------------------------------
@@ -547,17 +548,45 @@ void TrainerSession::log(const std::string& msg) {
     std::fflush(stdout);
 }
 
+void TrainerSession::set_project_dataset_plan(fs::path project_root,
+                                              project::DatasetPlan plan) {
+    if (project_root.empty())
+        throw std::runtime_error("project dataset plan requires a project root");
+    if (plan.members.empty())
+        throw std::runtime_error("project dataset plan is empty");
+    _project_root = std::move(project_root);
+    _dataset_plan = std::move(plan);
+}
+
+void TrainerSession::apply_project_roles(ParsedDataset& parsed) const {
+    if (!_project_root && !_dataset_plan) return;
+    if (!_project_root || !_dataset_plan)
+        throw std::runtime_error("project dataset plan context is incomplete");
+    project::DatasetRoleIndices roles = project::resolve_dataset_roles(
+        *_dataset_plan, *_project_root, parsed.image_filenames);
+    parsed.train_indices = std::move(roles.train);
+    parsed.val_indices = std::move(roles.validation);
+    parsed.eval_indices = std::move(roles.evaluation);
+    if (parsed.train_indices.empty())
+        throw std::runtime_error("project dataset plan has no training members");
+    parsed.explicit_roles = true;
+}
+
 // The unported-feature guards, as a pure check. Split out of check_config()
 // so a front-end can ask the question without the answer arriving as an
 // exception: the GUI's batch pre-flight reports every row's problems at once,
-// before anything starts, which is the whole point of a pre-flight.
 std::string train_config_unsupported(const TrainConfig& c) {
-    // The flag name is an IDENTIFIER and goes in as {0}: `--use-bvh` reads the
-    // same in every language, and it is what the reader would type or search
+    // The flag name is an IDENTIFIER and goes in as {0}: `--use-bvh` reads
+    // the same in every language, and it is what the reader would type or search
     // for. Only the sentence around it is translated.
     auto not_impl = [](const std::string& what) {
         return lfmt(lmsg::not_supported_yet, {what});
     };
+    if (!std::isfinite(c.depth_unit_scale_factor) ||
+        c.depth_unit_scale_factor <= 0.0f)
+        return lfmt(lmsg::err_bad_flag_value,
+                    {"--depth-unit-scale-factor",
+                     std::to_string(c.depth_unit_scale_factor)});
     if (c.use_bvh)                    return not_impl("--use-bvh");
     if (c.use_camera_optimizer)       return not_impl("--use-camera-optimizer");
     if (c.deblur_training_images)     return not_impl("--deblur-training-images");
@@ -575,7 +604,7 @@ std::string train_config_unsupported(const TrainConfig& c) {
 void TrainerSession::check_config() {
     if (std::string what = train_config_unsupported(cfg); !what.empty())
         throw std::runtime_error(what);
-    if (cfg.validation_fraction > 0)
+    if (cfg.validation_fraction > 0 && !_dataset_plan)
         log(lmsg::warn_validation_unported.get());
     if (cfg.orientation_method != "up" || cfg.center_method != "poses")
         log(lfmt(lmsg::warn_pose_normalization_approx,
@@ -583,14 +612,15 @@ void TrainerSession::check_config() {
 }
 
 void TrainerSession::load_dataset() {
+    const bool project_roles = _dataset_plan.has_value();
     DatasetParserConfig pcfg;
     pcfg.recon_dir            = cfg.colmap_recon_dir;
     pcfg.image_dir            = cfg.image_dir;
     pcfg.mask_dir             = cfg.mask_dir;
     pcfg.depth_dir            = cfg.depth_dir;
     pcfg.normal_dir           = cfg.normal_dir;
-    pcfg.validation_fraction  = cfg.validation_fraction;
-    pcfg.eval_mode            = cfg.eval_mode;
+    pcfg.validation_fraction  = project_roles ? 0.0f : cfg.validation_fraction;
+    pcfg.eval_mode            = project_roles ? "all" : cfg.eval_mode;
     pcfg.eval_interval        = cfg.eval_interval;
     pcfg.train_split_fraction = cfg.train_split_fraction;
     pcfg.outlier_threshold    = cfg.outlier_threshold;
@@ -603,6 +633,7 @@ void TrainerSession::load_dataset() {
     pcfg.metashape_ply           = cfg.metashape_ply;
     pcfg.metashape_psx           = cfg.metashape_psx;
     ds = parse_dataset(cfg.data, pcfg, cfg.data_format);
+    apply_project_roles(ds);
     if (ds.center_mode != "none") {
         char xyz[96];
         std::snprintf(xyz, sizeof xyz, "%.12g, %.12g, %.12g",
@@ -849,14 +880,13 @@ void TrainerSession::setup_engine() {
     }
 
     // ---- DataManager ---------------------------------------------------
-    const int64_t N = ds.num_cameras;
     int64_t num_val = (int64_t)ds.val_indices.size();
-    int64_t num_train = N - num_val;
+    int64_t num_train = (int64_t)ds.train_indices.size();
     // Batch-size policy.
     double n_batch = std::max((double)num_train / std::max(cfg.max_batch_per_epoch, 1), 1.0);
     int train_bs = std::max(1, (int)(n_batch + 0.5));
     int val_bs = 1;
-    if (num_val > 0)
+    if (num_val > 0 && num_train > 0)
         val_bs = std::max(1, (int)std::ceil(n_batch * (double)num_val / (double)num_train));
 
     DataManagerConfig dm;
@@ -1389,11 +1419,13 @@ std::vector<uint8_t> to_png_bytes(const std::vector<float>& rgb) {
 }  // namespace
 
 void TrainerSession::eval() {
-    // eval_mode "all" trains on every frame, so nothing is held out.
-    if (cfg.eval_mode == "all") return;
+    const bool project_roles = _dataset_plan.has_value();
+    // eval_mode "all" trains on every frame, so nothing is held out. A
+    // project plan supplies an independent evaluation role set.
+    if (!project_roles && cfg.eval_mode == "all") return;
 
-    // Re-parse for the eval side of the split. The parser computes the split
-    // over all frames, so this is the exact complement of what training saw.
+    // Re-parse the eval side without copying the training dataset. Project
+    // plans re-parse all frames and select their evaluation roles below.
     DatasetParserConfig pcfg;
     pcfg.recon_dir            = cfg.colmap_recon_dir;
     pcfg.image_dir            = cfg.image_dir;
@@ -1401,7 +1433,7 @@ void TrainerSession::eval() {
     pcfg.depth_dir            = cfg.depth_dir;
     pcfg.normal_dir           = cfg.normal_dir;
     pcfg.validation_fraction  = 0.0f;      // no early-stop holdout inside eval
-    pcfg.eval_mode            = cfg.eval_mode;
+    pcfg.eval_mode            = project_roles ? "all" : cfg.eval_mode;
     pcfg.eval_interval        = cfg.eval_interval;
     pcfg.train_split_fraction = cfg.train_split_fraction;
     pcfg.outlier_threshold    = cfg.outlier_threshold;
@@ -1413,10 +1445,11 @@ void TrainerSession::eval() {
     pcfg.metashape_xml           = cfg.metashape_xml;
     pcfg.metashape_ply           = cfg.metashape_ply;
     pcfg.metashape_psx           = cfg.metashape_psx;
-    pcfg.split                   = "eval";
+    if (!project_roles) pcfg.split = "eval";
 
     ParsedDataset eds = parse_dataset(cfg.data, pcfg, cfg.data_format);
-    if (eds.num_cameras == 0) {
+    apply_project_roles(eds);
+    if (eds.num_cameras == 0 || (project_roles && eds.eval_indices.empty())) {
         log(lmsg::eval_split_empty.get());
         return;
     }
@@ -1446,8 +1479,13 @@ void TrainerSession::eval() {
     dm.flip_mask = cfg.flip_mask;
     dm.mask_boundary_offset = cfg.mask_boundary_offset;
     dm.exif_quarter_turns = eds.exif_quarter_turns;
-    std::vector<int32_t> all_idx((size_t)eds.num_cameras);
-    std::iota(all_idx.begin(), all_idx.end(), 0);
+    std::vector<int32_t> all_idx;
+    if (!project_roles) {
+        all_idx.resize((size_t)eds.num_cameras);
+        std::iota(all_idx.begin(), all_idx.end(), 0);
+    }
+    const std::vector<int32_t>& eval_indices =
+        project_roles ? eds.eval_indices : all_idx;
 
     {
         std::lock_guard<std::mutex> lk(engine_mutex);
@@ -1464,10 +1502,13 @@ void TrainerSession::eval() {
             epost.any_warp ? epost.face_axes : std::vector<float>{},
             epost.input_intrins, epost.input_dist_coeffs,
             epost.redistort_models, epost.redistort_params,
-            all_idx, {});
+            eval_indices, {});
     }
 
-    log(lfmt(lmsg::eval_views, {(long long)epost.n_post}));
+    int64_t eval_views = 0;
+    for (const int32_t index : eval_indices)
+        eval_views += epost.K_per_camera[(size_t)index];
+    log(lfmt(lmsg::eval_views, {(long long)eval_views}));
 
     // Rendering is serial (one process-global engine), but scoring a view --
     // colour correction, the metrics, and the PNG encode -- is pure host work
@@ -1572,7 +1613,7 @@ void TrainerSession::eval() {
     const int sh_deg = cfg.sh_degree;
     int64_t next_slot = 0;
 
-    for (int64_t i = 0; i < eds.num_cameras; i++) {
+    for (size_t i = 0; i < eval_indices.size(); i++) {
         int64_t H = 0, W = 0, B = 0, Cc = 0;
         std::vector<float> gt, render;
         {

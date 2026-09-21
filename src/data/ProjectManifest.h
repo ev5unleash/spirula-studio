@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -7,7 +8,8 @@
 
 namespace spirula::project {
 
-constexpr std::uint32_t kProjectSchemaVersion = 1;
+constexpr std::uint32_t kProjectSchemaVersion = 2;
+constexpr std::uint32_t kDatasetPlanSchemaVersion = 1;
 constexpr const char* kFrameKeyDomain = "spirula-frame-v1";
 
 enum class SourceRelation { Original, Export };
@@ -37,6 +39,8 @@ enum class SynchronizationPurpose {
 };
 
 enum class DecisionStatus { Accepted, Review, Refused };
+
+enum class DatasetRole { Pending, Train, Validation, Evaluation, Excluded };
 
 struct RationalTime {
     std::int64_t num = 0;
@@ -180,6 +184,47 @@ struct ArtifactReference {
     std::string transform;
 };
 
+struct DatasetPlanMember {
+    std::string image;
+    std::string source_id;
+    std::string frame_id;
+    std::string capture;
+    std::string camera;
+    std::string rig;
+    std::string exclusion_group;
+    DatasetRole role = DatasetRole::Pending;
+};
+
+struct DatasetPlan {
+    std::uint32_t schema = kDatasetPlanSchemaVersion;
+    std::vector<DatasetPlanMember> members;
+};
+struct DatasetRoleIndices {
+    std::vector<std::int32_t> train;
+    std::vector<std::int32_t> validation;
+    std::vector<std::int32_t> evaluation;
+};
+
+
+struct DatasetPoseEvidence {
+    std::string image;
+    double x = 0.0;
+    double y = 0.0;
+    double z = 0.0;
+};
+
+std::vector<std::size_t> select_training_by_coverage(
+    const DatasetPlan& plan,
+    const std::vector<DatasetPoseEvidence>& evidence,
+    std::size_t max_members);
+void freeze_exclusion_groups(DatasetPlan& plan);
+DatasetRoleIndices resolve_dataset_roles(
+    const DatasetPlan& plan,
+    const std::filesystem::path& project_root,
+    const std::vector<std::string>& image_files);
+
+
+
 struct ProjectRevision {
     std::uint32_t schema = kProjectSchemaVersion;
     std::string name;
@@ -190,6 +235,7 @@ struct ProjectRevision {
     std::vector<SynchronizationDecision> synchronization_decisions;
     std::vector<std::string> parents;
     std::vector<std::string> captures;
+    DatasetPlan dataset_plan;
     std::vector<ArtifactReference> artifacts;
     std::vector<std::string> protected_regions;
     std::vector<std::string> operations;

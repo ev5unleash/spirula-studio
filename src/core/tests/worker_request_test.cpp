@@ -277,6 +277,7 @@ int main() {
         input.mask_dir = "input/masks";
         input.camera_model = "OPENCV_FISHEYE";
         input.focal_factor = 0.73f;
+        input.fps = 2.75f;
         input.rig = app::kRigFirstShared;
         input.video_tracks = 2;
         input.subcameras.push_back(
@@ -301,12 +302,14 @@ int main() {
         prep.photo_import = app::PhotoImport::Move;
         prep.device = "uuid:0123456789abcdef0123456789abcdef";
         prep.pano = {app::Pano360Mode::Faces, 768, 12.0f, -8.0f, 180.0f};
-        prep.video_fps = 1.5f;
-        prep.adaptive_fps = true;
-        prep.adaptive_range = 8.0f;
-        prep.sharp_window = 5;
-        prep.sync_tracks = false;
-        prep.max_frames = 321;
+        prep.selection.video_fps = 1.5f;
+        prep.selection.adaptive = true;
+        prep.selection.adaptive_range = 8.0f;
+        prep.selection.sharp_window = 5;
+        prep.selection.minimum_sharpness = 12.5f;
+        prep.selection.rescue_frames = 4;
+        prep.selection.sync_tracks = false;
+        prep.selection.max_frames = 321;
         prep.auto_rotate = false;
         prep.force_external_decode = true;
         prep.ffmpeg_exe = "tools/ffmpeg.exe";
@@ -362,12 +365,15 @@ int main() {
                   decoded.pano.yaw == prep.pano.yaw &&
                   decoded.pano.pitch == prep.pano.pitch &&
                   decoded.pano.roll == prep.pano.roll &&
-                  decoded.video_fps == prep.video_fps &&
-                  decoded.adaptive_fps == prep.adaptive_fps &&
-                  decoded.adaptive_range == prep.adaptive_range &&
-                  decoded.sharp_window == prep.sharp_window &&
-                  decoded.sync_tracks == prep.sync_tracks &&
-                  decoded.max_frames == prep.max_frames &&
+                  decoded.selection.video_fps == prep.selection.video_fps &&
+                  decoded.selection.adaptive == prep.selection.adaptive &&
+                  decoded.selection.adaptive_range == prep.selection.adaptive_range &&
+                  decoded.selection.sharp_window == prep.selection.sharp_window &&
+                  decoded.selection.minimum_sharpness ==
+                      prep.selection.minimum_sharpness &&
+                  decoded.selection.rescue_frames == prep.selection.rescue_frames &&
+                  decoded.selection.sync_tracks == prep.selection.sync_tracks &&
+                  decoded.selection.max_frames == prep.selection.max_frames &&
                   decoded.auto_rotate == prep.auto_rotate &&
                   decoded.force_external_decode == prep.force_external_decode &&
                   decoded.ffmpeg_exe == prep.ffmpeg_exe &&
@@ -395,6 +401,7 @@ int main() {
                   got_input.mask_dir == want_input.mask_dir &&
                   got_input.camera_model == want_input.camera_model &&
                   got_input.focal_factor == want_input.focal_factor &&
+                  got_input.fps == want_input.fps &&
                   got_input.rig == want_input.rig &&
                   got_input.video_tracks == want_input.video_tracks &&
                   got_input.pano360.packing == want_input.pano360.packing &&
@@ -429,20 +436,61 @@ int main() {
                   got_click->source == want_click.source &&
                   got_click->camera == want_click.camera,
               "prep payload roundtrips every execution option");
+        check(payload.find("\"selection_schema_version\":1") != std::string::npos,
+              "prep payload writes the selection schema marker");
+        check(payload.find("\"minimum_sharpness\":12.5") != std::string::npos &&
+                  payload.find("\"rescue_frames\":4") != std::string::npos,
+              "prep payload writes the acceptance and rescue policy");
         std::string legacy_payload = payload;
+        legacy_payload = replace_once(legacy_payload,
+                                      ",\"selection_schema_version\":1", "");
         legacy_payload = replace_once(legacy_payload, "\"pano360\":", "\"eac360\":");
         legacy_payload = replace_once(legacy_payload, "\"packing\":1,", "");
         legacy_payload = replace_once(legacy_payload, ",\"margin\":24", "");
         legacy_payload =
             replace_once(legacy_payload, ",\"pano360_unsupported\":true", "");
+        legacy_payload = replace_once(legacy_payload, ",\"fps\":2.75", "");
         const app::PrepJob legacy =
             app::worker::deserialize_prep_job(legacy_payload);
         const app::PrepInput& legacy_input = legacy.inputs.front();
-        check(legacy_input.pano360.face == want_input.pano360.face &&
+        check(legacy.selection.video_fps == prep.selection.video_fps &&
+                  legacy.selection.adaptive == prep.selection.adaptive &&
+                  legacy_input.pano360.face == want_input.pano360.face &&
                   legacy_input.pano360.packing == app::Pano360Packing::Eac &&
                   legacy_input.pano360.margin == 0 &&
+                  legacy_input.fps == 0.0f &&
                   !legacy_input.pano360_unsupported,
-              "prep payload reads old eac360 defaults");
+              "prep payload reads old flat fields without a selection marker");
+        std::string legacy_policy_payload = legacy_payload;
+        legacy_policy_payload = replace_once(
+            legacy_policy_payload, ",\"minimum_sharpness\":12.5", "");
+        legacy_policy_payload = replace_once(
+            legacy_policy_payload, ",\"rescue_frames\":4", "");
+        const app::PrepJob legacy_policy =
+            app::worker::deserialize_prep_job(legacy_policy_payload);
+        check(legacy_policy.selection.minimum_sharpness == 0.0f &&
+                  legacy_policy.selection.rescue_frames == 0,
+              "legacy worker payload defaults absent acceptance policy");
+        bool unsupported_selection_schema = false;
+        try {
+            app::worker::deserialize_prep_job(
+                replace_once(payload, "\"selection_schema_version\":1",
+                             "\"selection_schema_version\":2"));
+        } catch (const std::exception&) {
+            unsupported_selection_schema = true;
+        }
+        check(unsupported_selection_schema,
+              "prep payload rejects an unsupported selection schema");
+        bool oversized_rescue = false;
+        try {
+            app::worker::deserialize_prep_job(
+                replace_once(payload, "\"rescue_frames\":4",
+                             "\"rescue_frames\":1001"));
+        } catch (const std::exception&) {
+            oversized_rescue = true;
+        }
+        check(oversized_rescue,
+              "prep payload rejects an oversized rescue window");
         std::string masking_error;
         check(app::worker::reject_external_masking(decoded, masking_error) &&
                   masking_error.find("external Python") != std::string::npos,

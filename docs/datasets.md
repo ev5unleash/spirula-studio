@@ -604,9 +604,10 @@ degrees of elevation, 120 apart in azimuth -- rather than axis-aligned:
 ## Frames out of a video
 
 One frame every `skip` source frames, the sharpest of a window of `keep`
-around each. Both decode paths choose the same frames (`app/FrameExtract.h`),
-and the GUI's rate is **per input**: a capture shot as several clips is rarely
-shot at one pace, so `PrepInput::fps` overrides the job's for that video.
+around each. Native decode applies this directly; the ffmpeg fallback applies
+the same policy to its exported candidate stream (`app/FrameExtract.h`). The
+GUI's rate is **per input**: a capture shot as several clips is rarely shot at
+one pace, so `PrepInput::fps` overrides the job's for that video.
 
 The rate is a column of the input list rather than a field in the settings, so
 it sits beside the video it describes. The first video's box holds the
@@ -644,10 +645,10 @@ flow by RANSAC, and two numbers come out:
   percentile of the residual. This is what a translation past something close
   produces and what a translation towards something far does not.
 
-`cost = coverage + 2 * parallax`, and the plan spaces frames at equal
-cumulative cost. The weight is the only hand-set number: a tenth of the frame
-of unexplained disparity is a harder match than a tenth of the frame of pan,
-and carries the triangulation the pan does not.
+`cost = coverage + 2 * parallax`; the coefficient is an algorithm choice, not a
+camera calibration. It makes a tenth of the frame of unexplained disparity a
+harder match than a tenth of the frame of pan, carrying the triangulation that
+the pan does not.
 
 The global model depends on what the frames are pictures of:
 
@@ -678,14 +679,28 @@ up to +100% on a 1080p clip, with the tracking itself overlapped with the
 decode. Nothing is buffered: a video's worth of pictures does not fit, and a
 plan cannot be made until the whole cost curve is known.
 
-Without the built-in decoder the same plan is made from the candidate frames
-ffmpeg already extracts, at `fps x max(window, range)` instead of
-`fps x window` so there are enough of them for the fastest rate it may ask for
-(`gui/FrameSelect.h`). That path plans one video at a time -- the candidates of
-a whole group are not on disk at once -- and it numbers the frames it keeps by
-the candidate they were, not by how many it has kept. The stem is what times a
-frame against the video's IMU and GPS (`sfm/map/SensorGauge.h`), and an
-adaptive plan leaves nothing evenly spaced for a frame rate to recover it from.
+Without the built-in decoder, ffmpeg first exports a bounded candidate stream at
+`input_fps x group`, where `group` is `window` for fixed spacing and
+`max(window, ceil(adaptive_range))` for adaptive spacing. A nonzero
+`--max-frames` also caps that export at `max_frames x group`; zero leaves the
+candidate count uncapped. The fallback then plans one video at a time -- a
+video's candidates are not all kept on disk alongside another video's -- and
+`app/FrameSelect.h` selects from that finite stream.
+
+The fallback cannot prove source-timeline discontinuities from ffmpeg's numbered
+files, so every candidate is explicitly in **segment 0**. It names kept frames
+by candidate ordinal rather than a source-frame identity; that is the fallback's
+known limit, not a calibration claim. With synchronized multi-track selection,
+the candidate grids and filenames must agree, every track must clear the
+sharpness floor at an instant, and the weakest track supplies the score. One
+instant is then kept from every track; if none passes, no unsynchronized rig
+frames are written.
+
+`--minimum-sharpness` (the GUI's "Minimum sharpness") rejects candidates below
+the floor; 0 disables it. Each primary window is tried first. Only when it has
+no candidate at or above the floor does `--rescue-frames` inspect earlier
+candidates, and it checks at most that many; a rescued candidate must still meet
+the floor.
 
 The pass reports as it goes, in two places. It enters the Frames step itself --
 nothing else has, since a whole rate group is measured before any of it is

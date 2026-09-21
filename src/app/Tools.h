@@ -63,6 +63,9 @@ constexpr const char* kToolWorker = "worker";
 
 #ifdef SS_TOOL_TRAIN
 int spirula_train_main(int argc, char** argv);
+int spirula_train_main_with_project(int argc, char** argv,
+                                    const char* project_root,
+                                    const char* project_revision);
 #endif
 #ifdef SS_TOOL_MESH
 int spirula_mesh_main(int argc, char** argv);

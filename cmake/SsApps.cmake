@@ -347,12 +347,22 @@ foreach(test_src ${SS_CORE_TESTS})
     ss_configure_app(${test_name})
 endforeach()
 
-# The frame plan: no device, no GUI, and a wrong answer is silent.
+# The frame plan and Pano360 source-region geometry: no device, no image files,
+# and a wrong answer is silent.
 add_executable(frame_motion_test
     ${SS_SRC}/app/tests/frame_motion_test.cpp
     ${SS_SRC}/app/FrameMotion.cpp
     ${SS_SRC}/app/Pano360.cpp)
 ss_configure_app(frame_motion_test)
+
+# The frame quality policy: no device, no image files, and a wrong answer is
+# silent.
+add_executable(frame_select_test
+    ${SS_SRC}/app/tests/frame_select_test.cpp
+    ${SS_SRC}/app/FrameSelect.cpp
+    ${SS_SRC}/app/FrameMotion.cpp
+    ${SS_SRC}/app/Pano360.cpp)
+ss_configure_app(frame_select_test)
 
 # The shared stamp that decides whether a finished reconstruction is kept or
 # rebuilt, and the GUI preset serializers. Named rather than globbed -- each

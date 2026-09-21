@@ -117,13 +117,9 @@ struct ColmapJob {
     bool seq_loop_closure = true;        // sequential: vocab-tree loop
                                          // detection (SIFT features only)
 
-    // Video extraction
-    float video_fps = 2.0f;              // kept frames per second
-    bool adaptive_fps = false;           // see PrepJob
-    float adaptive_range = 4.0f;
-    int sharp_window = 3;                // pick sharpest of N candidates (1 = off)
+    // Video frame extraction and selection policy.
+    app::FrameSelectionSettings selection;
     app::Pano360Options pano;            // see PrepJob
-    int max_frames = 100000;
 
     // Advanced
     int max_num_features = 0;            // 0 = per-quality default

@@ -11,9 +11,10 @@ function(ss_register_test name labels timeout)
     set_tests_properties(${name} PROPERTIES LABELS "${labels}" TIMEOUT ${timeout})
 endfunction()
 
-foreach(SS_TEST IN ITEMS source_path frame_motion_test mesh_format_roundtrip
-        delaunay_degenerate worker_request_test checkpoint_resolution_test
-        dataset_parser_test project_manifest_test step_config_test)
+foreach(SS_TEST IN ITEMS source_path frame_motion_test frame_select_test
+        mesh_format_roundtrip delaunay_degenerate worker_request_test
+        checkpoint_resolution_test dataset_parser_test project_manifest_test
+        data_manager_sampler_test step_config_test)
     ss_register_test(${SS_TEST} "headless;fast" 60)
 endforeach()
 
@@ -46,4 +47,10 @@ else()
 endif()
 if(SS_BUILD_SFM)
     ss_register_test(sfm_feature_work_test "headless;fast" 60)
+endif()
+
+if(SS_ENABLE_PATENTED)
+    ss_register_test(mkv_timing_test "gpu;native_video" 120
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/video/tests/fixtures")
+    set_tests_properties(mkv_timing_test PROPERTIES RESOURCE_LOCK training_gpu)
 endif()

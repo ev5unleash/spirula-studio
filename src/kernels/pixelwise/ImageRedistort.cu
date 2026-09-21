@@ -292,22 +292,23 @@ void launch_redistort_depth(
     const void* d_in, uint32_t elem_size,   // 2 = uint16 raw counts, 4 = float
     int B, int in_H, int in_W,
     float* d_float_out, int out_H, int out_W,
-    int ref_H, int ref_W)
+    int ref_H, int ref_W,
+    float depth_unit_scale_factor = 1.0f)
 {
     CameraModelType cm = cmt(camera_model);
     CameraDistortionCoeffsBuffer dcb(const_cast<float*>(d_dist_coeffs));
     const float4* intr = (const float4*)d_intrins;
     auto out = _rd_f32(d_float_out, B, out_H, out_W, 1);
 
-    // Depth is raw counts either way, so norm_inv stays 1 -- same convention as
-    // the wide warp.
+    // Raw uint16 depth counts use the configured unit scale; float inputs
+    // retain scene-unit passthrough semantics.
     #define _RD_LAUNCH(D)                                                        \
         if (elem_size == 2)                                                      \
             redistort_depth_kernel<D, uint16_t>                                  \
                 <<<_LAUNCH_ARGS_3D(out_W, out_H, B, 16, 16, 1)>>>(               \
                     cm, intr, dcb, d_source_models, d_source_params,             \
                     _rd_in((const uint16_t*)d_in, B, in_H, in_W, 1), out,        \
-                    ref_H, ref_W, 1.0f);                                         \
+                    ref_H, ref_W, depth_unit_scale_factor);                     \
         else                                                                     \
             redistort_depth_kernel<D, float>                                     \
                 <<<_LAUNCH_ARGS_3D(out_W, out_H, B, 16, 16, 1)>>>(               \

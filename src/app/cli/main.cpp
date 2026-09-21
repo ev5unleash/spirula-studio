@@ -14,6 +14,7 @@
 
 #include "app/Tools.h"
 #include "app/TrainerCore.h"
+#include "data/ProjectManifest.h"
 #include "app/webviewer/Viewer.h"
 #include "checkpoint/Resume.h"
 #include "i18n/catalog/Cli.h"
@@ -412,7 +413,9 @@ void dump_cameras_json(const char* path, const ParsedDataset& ds,
 // main
 // ===========================================================================
 
-int spirula_train_main(int argc, char** argv) {
+static int spirula_train_main_impl(int argc, char** argv,
+                                   const char* project_root,
+                                   const char* project_revision) {
     try {
         // ---- Preset + flags ------------------------------------------------
         std::string preset = "3dgs";
@@ -500,6 +503,17 @@ int spirula_train_main(int argc, char** argv) {
         TrainerSession session;
         session.cfg = cfg;
         session.preset = preset;
+        if (project_root || project_revision) {
+            if (!project_root || !project_revision ||
+                !project_root[0] || !project_revision[0])
+                throw std::runtime_error(
+                    "project-backed training requires project root and revision");
+            const fs::path root = fs::u8path(project_root);
+            const project::ProjectRevision revision =
+                project::read_revision(root, project_revision);
+            if (!revision.dataset_plan.members.empty())
+                session.set_project_dataset_plan(root, revision.dataset_plan);
+        }
 
         const bool worker_control = spirula::env_on("WORKER_CONTROL");
         std::atomic<bool> worker_listener_stop{false};
@@ -636,4 +650,14 @@ int spirula_train_main(int argc, char** argv) {
         return 1;
     }
     return 0;
+}
+
+int spirula_train_main(int argc, char** argv) {
+    return spirula_train_main_impl(argc, argv, nullptr, nullptr);
+}
+
+int spirula_train_main_with_project(int argc, char** argv,
+                                    const char* project_root,
+                                    const char* project_revision) {
+    return spirula_train_main_impl(argc, argv, project_root, project_revision);
 }

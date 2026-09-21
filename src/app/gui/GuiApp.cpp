@@ -1171,16 +1171,19 @@ void GuiApp::write_run_settings(std::ofstream& f) {
     line("subprocess", cfg_str(j.subprocess));
     line("force_external_decode", cfg_str(j.prep.force_external_decode));
     line("force_external_masking", cfg_str(j.prep.force_external_masking));
-    line("video_fps", cfg_str(j.prep.video_fps));
-    line("adaptive_fps", cfg_str(j.prep.adaptive_fps));
-    if (j.prep.adaptive_fps) line("adaptive_range", cfg_str(j.prep.adaptive_range));
+    line("video_fps", cfg_str(j.prep.selection.video_fps));
+    line("adaptive_fps", cfg_str(j.prep.selection.adaptive));
+    if (j.prep.selection.adaptive)
+        line("adaptive_range", cfg_str(j.prep.selection.adaptive_range));
     for (const PrepInput& s : _sources)
         if (s.is_video && s.fps > 0.0f)
             line("video_fps:" + (s.subdir.empty() ? s.path : s.subdir),
                  cfg_str(s.fps));
-    line("sharp_window", std::to_string(j.prep.sharp_window));
-    line("sync_tracks", cfg_str(j.prep.sync_tracks));
-    line("max_frames", std::to_string(j.prep.max_frames));
+    line("sharp_window", std::to_string(j.prep.selection.sharp_window));
+    line("minimum_sharpness", cfg_str(j.prep.selection.minimum_sharpness));
+    line("rescue_frames", std::to_string(j.prep.selection.rescue_frames));
+    line("sync_tracks", cfg_str(j.prep.selection.sync_tracks));
+    line("max_frames", std::to_string(j.prep.selection.max_frames));
     if (!j.extra_args.empty()) line("extra_args", j.extra_args);
 
     if (effective_engine() == Engine::Colmap) {
@@ -3132,8 +3135,7 @@ void GuiApp::refresh_sources() {
     }
 
     refresh_subcameras(_sources);
-    normalize_source_lenses(_sources, _sfm_job.camera_model);
-    normalize_source_fps(_sources, _sfm_job.prep.video_fps);
+    normalize_source_fps(_sources, _sfm_job.prep.selection.video_fps);
 
     // The output folder follows the input until the user takes it over.
     if (_workspace.empty() || _workspace == _workspace_auto) {
@@ -4141,14 +4143,9 @@ void GuiApp::sync_dataset_jobs() {
         for (PrepInput& in : prep.inputs) in.stencil = app::FrameStencil{};
     prep.workspace = _workspace;
     prep.resume = _resume;
-    prep.video_fps = _sfm_job.prep.video_fps;
-    prep.adaptive_fps = _sfm_job.prep.adaptive_fps;
-    prep.adaptive_range = _sfm_job.prep.adaptive_range;
-    prep.sharp_window = _sfm_job.prep.sharp_window;
+    prep.selection = _sfm_job.prep.selection;
     prep.pano = _sfm_job.prep.pano;
-    prep.max_frames = _sfm_job.prep.max_frames;
     prep.force_external_decode = _sfm_job.prep.force_external_decode;
-    prep.sync_tracks = _sfm_job.prep.sync_tracks;
     prep.ffmpeg_exe = _ffmpeg_exe;
     prep.python_exe = _python_exe;
     prep.mask_enable = _mask_enable;
@@ -4181,12 +4178,8 @@ void GuiApp::sync_dataset_jobs() {
     // The frozen choice, so a later edit cannot drop the UUID the run has
     // already committed to. Empty before the freeze.
     _colmap_job.device = _native_device_uuid;
-    _colmap_job.video_fps = prep.video_fps;
-    _colmap_job.adaptive_fps = prep.adaptive_fps;
-    _colmap_job.adaptive_range = prep.adaptive_range;
-    _colmap_job.sharp_window = prep.sharp_window;
+    _colmap_job.selection = prep.selection;
     _colmap_job.pano = prep.pano;
-    _colmap_job.max_frames = prep.max_frames;
     _colmap_job.force_external_decode = prep.force_external_decode;
     _colmap_job.photo_import = prep.photo_import;
     _colmap_job.force_external_masking = prep.force_external_masking;
@@ -4687,14 +4680,14 @@ void GuiApp::draw_dataset_source() {
                 const bool head = i == first_video_row(_sources);
                 const float above =
                     head ? 0.0f
-                         : input_fps(_sources, _sfm_job.prep.video_fps, i - 1);
+                         : input_fps(_sources, _sfm_job.prep.selection.video_fps, i - 1);
                 if (_fps_text.size() != _sources.size()) {
                     _fps_text.assign(_sources.size(), std::string());
                     _fps_editing = -1;
                 }
                 std::string& text = _fps_text[i];
                 if (_fps_editing != (int)i)
-                    text = fps_label(head ? _sfm_job.prep.video_fps : s.fps);
+                    text = fps_label(head ? _sfm_job.prep.selection.video_fps : s.fps);
                 ui::InputTextRaw("##fps", &text);
                 if (ImGui::IsItemActive()) _fps_editing = (int)i;
                 else if (_fps_editing == (int)i) _fps_editing = -1;
@@ -4703,13 +4696,13 @@ void GuiApp::draw_dataset_source() {
                     // A head row cannot be a caret: an unreadable answer there
                     // leaves the rate where it was rather than at nothing.
                     if (head) {
-                        if (v > 0.0f) _sfm_job.prep.video_fps = v;
+                        if (v > 0.0f) _sfm_job.prep.selection.video_fps = v;
                     } else {
                         s.fps = v;
                     }
                     edited = true;
                 }
-                ui::help_on_hover(head ? (_sfm_job.prep.adaptive_fps
+                ui::help_on_hover(head ? (_sfm_job.prep.selection.adaptive
                                               ? dmsg::frames_per_second_help_adaptive
                                               : dmsg::frames_per_second_help)
                                        : dmsg::video_fps_this_one_help);
@@ -5034,24 +5027,38 @@ void GuiApp::draw_dataset_basics() {
         // The rate itself is a column of the input list, beside the video it
         // describes; what is left here is what it means for all of them.
         ImGui::BeginDisabled(dataset_locked(Stage::Frames));
-        ui::Checkbox(dmsg::adaptive_fps, &_sfm_job.prep.adaptive_fps);
+        ui::Checkbox(dmsg::adaptive_fps, &_sfm_job.prep.selection.adaptive);
         ui::help_on_hover(dmsg::adaptive_fps_help);
-        if (_sfm_job.prep.adaptive_fps) {
+        if (_sfm_job.prep.selection.adaptive) {
             ImGui::Indent();
             ImGui::SetNextItemWidth(px(220.0f));
-            ui::SliderFloat(dmsg::adaptive_range, &_sfm_job.prep.adaptive_range,
+            ui::SliderFloat(dmsg::adaptive_range, &_sfm_job.prep.selection.adaptive_range,
                             1.0f, 16.0f, "%.1f");
             ui::help_on_hover(dmsg::adaptive_range_help);
             ImGui::Unindent();
         }
         ImGui::SetNextItemWidth(px(220.0f));
-        ui::SliderInt(dmsg::sharpness_window, &_sfm_job.prep.sharp_window, 1, 8);
+        ui::SliderInt(dmsg::sharpness_window, &_sfm_job.prep.selection.sharp_window, 1, 8);
         ui::help_on_hover(dmsg::sharpness_window_help);
+        ImGui::SetNextItemWidth(px(220.0f));
+        if (ui::InputFloat(dmsg::minimum_sharpness,
+                           &_sfm_job.prep.selection.minimum_sharpness, 0, 0,
+                           "%.4g"))
+            _sfm_job.prep.selection.minimum_sharpness =
+                std::max(0.0f, _sfm_job.prep.selection.minimum_sharpness);
+        ui::help_on_hover(dmsg::minimum_sharpness_help);
+        ImGui::SetNextItemWidth(px(220.0f));
+        if (ui::InputInt(dmsg::rescue_frames,
+                         &_sfm_job.prep.selection.rescue_frames))
+            _sfm_job.prep.selection.rescue_frames = std::clamp(
+                _sfm_job.prep.selection.rescue_frames, 0,
+                app::FrameSelectionSettings::kMaxRescueFrames);
+        ui::help_on_hover(dmsg::rescue_frames_help);
         bool any_multi = false;
         for (const PrepInput& s : _sources)
             any_multi = any_multi || (s.is_video && !s.pano360.valid() && s.video_tracks >= 2);
         if (any_multi) {
-            ui::Checkbox(dmsg::sync_lenses, &_sfm_job.prep.sync_tracks);
+            ui::Checkbox(dmsg::sync_lenses, &_sfm_job.prep.selection.sync_tracks);
             ui::help_on_hover(dmsg::sync_lenses_help);
         }
         if (any_pano360(_sources)) draw_pano360_options();
@@ -5202,7 +5209,7 @@ void GuiApp::draw_source_cameras() {
     // rewrites what the loop was holding references into.
     if (edited) {
         normalize_source_lenses(_sources, _sfm_job.camera_model);
-        normalize_source_fps(_sources, _sfm_job.prep.video_fps);
+        normalize_source_fps(_sources, _sfm_job.prep.selection.video_fps);
     }
 }
 
@@ -6134,20 +6141,63 @@ void GuiApp::draw_scan_view(float h) {
     const float band = px(38.0f), strip = px(12.0f);
     const ImU32 back = ImGui::GetColorU32(ImGuiCol_FrameBg);
     const ImU32 ink = ImGui::GetColorU32(ImGuiCol_PlotHistogram);
-    const ImU32 keep = ImGui::GetColorU32(kOk);
+    const ImU32 planned = ImGui::GetColorU32(ImGuiCol_TextDisabled);
+    const ImU32 accepted = ImGui::GetColorU32(kOk);
+    const ImU32 rescued = ImGui::GetColorU32(kWarn);
+    const ImU32 rejected = ImGui::GetColorU32(kErr);
+    const ImU32 boundary = ImGui::GetColorU32(ImGuiCol_Border);
     const ImU32 veil = ImGui::GetColorU32(ImGuiCol_WindowBg, 0.55f);
+    auto fraction = [](const ScanRow& r, const app::FramePosition& p) {
+        if (!r.spans.empty()) {
+            int64_t total = 0;
+            for (const app::FrameSegmentSpan& span : r.spans)
+                total += std::max<int64_t>(
+                    1, span.last_ordinal - span.first_ordinal + 1);
+            int64_t base = 0;
+            for (const app::FrameSegmentSpan& span : r.spans) {
+                const int64_t length = std::max<int64_t>(
+                    1, span.last_ordinal - span.first_ordinal + 1);
+                if (span.segment == p.segment) {
+                    const int64_t local = std::min(
+                        length - 1,
+                        std::max<int64_t>(0, p.ordinal - span.first_ordinal));
+                    return (float)((double)(base + local) /
+                                   (double)std::max<int64_t>(1, total - 1));
+                }
+                base += length;
+            }
+        }
+        return (float)std::min(
+            1.0, std::max(0.0, (double)p.ordinal /
+                                  (double)std::max<int64_t>(1, r.frames - 1)));
+    };
     for (const ScanRow& r : rows) {
         ui::TextRaw(r.name);
         ImGui::SameLine();
-        if (!r.video)
+        if (!r.video) {
             ui::TextDisabled(dmsg::scan_photos, {(long long)r.frames});
-        else if (r.kept_n > 0)
-            ui::TextDisabled(dmsg::scan_kept_frames, {(long long)r.kept_n});
-        else
-            ui::TextDisabledRaw("");
+        } else {
+            ui::TextDisabled(dmsg::scan_planned_frames,
+                             {(long long)r.planned_n});
+            ImGui::SameLine(0.0f, px(6.0f));
+            ui::TextDisabled(dmsg::scan_accepted_frames,
+                             {(long long)r.accepted_n});
+            ImGui::SameLine(0.0f, px(6.0f));
+            ui::TextDisabled(dmsg::scan_rescued_frames,
+                             {(long long)r.rescued_n});
+            ImGui::SameLine(0.0f, px(6.0f));
+            ui::TextDisabled(dmsg::scan_rejected_frames,
+                             {(long long)r.rejected_n});
+            if (r.span_n > 0) {
+                ImGui::SameLine(0.0f, px(6.0f));
+                ui::TextDisabled(dmsg::scan_segments, {(long long)r.span_n});
+            }
+        }
 
         const float w = ImGui::GetContentRegionAvail().x;
-        const float tall = band + (r.kept.empty() ? 0.0f : strip + px(2.0f));
+        const bool show_strip = !r.kept.empty() || !r.decisions.empty() ||
+                                !r.spans.empty();
+        const float tall = band + (show_strip ? strip + px(2.0f) : 0.0f);
         if (w < px(48.0f)) break;
         const ImVec2 at = ImGui::GetCursorScreenPos();
         ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -6166,22 +6216,66 @@ void GuiApp::draw_scan_view(float h) {
         if (r.video && r.done < 1.0f)
             dl->AddRectFilled(ImVec2(at.x + w * r.done, at.y),
                               ImVec2(at.x + w, at.y + band), veil);
-        if (!r.kept.empty()) {
+        if (show_strip) {
             const float y = at.y + band + px(2.0f);
             dl->AddRectFilled(ImVec2(at.x, y), ImVec2(at.x + w, y + strip), back);
-            for (size_t i = 0; i < r.kept.size(); i++) {
-                const float v = std::min(1.0f, std::max(0.0f, r.kept[i]));
-                if (v <= 0.0f) continue;
-                const float x0 = at.x + step * (float)i;
-                // The slowest stretch still keeps frames, so it still gets a
-                // mark: a strip that thins to nothing reads as a gap.
-                const float tall = std::max(strip * v, px(2.0f));
-                dl->AddRectFilled(ImVec2(x0, y + strip - tall),
-                                  ImVec2(x0 + std::max(step - 1.0f, 1.0f), y + strip),
-                                  keep);
+            if (!r.kept.empty()) {
+                for (size_t i = 0; i < r.kept.size(); i++) {
+                    const float v = std::min(1.0f, std::max(0.0f, r.kept[i]));
+                    if (v <= 0.0f) continue;
+                    const float x0 = at.x + step * (float)i;
+                    const float mark_h = std::max(strip * v, px(2.0f));
+                    dl->AddRectFilled(
+                        ImVec2(x0, y + strip - mark_h),
+                        ImVec2(x0 + std::max(step - 1.0f, 1.0f), y + strip),
+                        accepted);
+                }
+            }
+            if (!r.spans.empty()) {
+                int64_t total = 0, base = 0;
+                for (const app::FrameSegmentSpan& span : r.spans)
+                    total += std::max<int64_t>(
+                        1, span.last_ordinal - span.first_ordinal + 1);
+                for (size_t i = 0; i < r.spans.size(); i++) {
+                    const app::FrameSegmentSpan& span = r.spans[i];
+                    base += std::max<int64_t>(
+                        1, span.last_ordinal - span.first_ordinal + 1);
+                    if (i + 1 < r.spans.size()) {
+                        const float x =
+                            at.x + w * (float)((double)base /
+                                               (double)std::max<int64_t>(1, total));
+                        dl->AddLine(ImVec2(x, at.y), ImVec2(x, y + strip),
+                                    boundary, px(1.0f));
+                    }
+                }
+            }
+            for (const app::FrameSelectionDecision& decision : r.decisions) {
+                const float planned_x =
+                    at.x + w * fraction(r, decision.planned);
+                dl->AddLine(ImVec2(planned_x, y + px(1.0f)),
+                            ImVec2(planned_x, y + strip - px(1.0f)),
+                            planned, px(1.0f));
+                if (!decision.has_selected) {
+                    dl->AddLine(ImVec2(planned_x, y + strip - px(3.0f)),
+                                ImVec2(planned_x, y + strip), rejected,
+                                px(1.0f));
+                    continue;
+                }
+                const float selected_x =
+                    at.x + w * fraction(r, decision.selected);
+                const ImU32 color =
+                    decision.kind == app::FrameSelectionKind::Rescued
+                        ? rescued
+                        : decision.kind == app::FrameSelectionKind::Rejected
+                              ? rejected
+                              : accepted;
+                dl->AddCircleFilled(ImVec2(selected_x, y + strip * 0.5f),
+                                    px(2.0f), color);
             }
         }
         ImGui::Dummy(ImVec2(w, tall));
+        if (show_strip && !r.decisions.empty() && ImGui::IsItemHovered())
+            ui::SetTooltip(dmsg::scan_marker_help);
         ImGui::Spacing();
     }
     ImGui::EndChild();

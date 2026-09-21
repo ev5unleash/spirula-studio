@@ -3,6 +3,7 @@
 #include "nn/core/Log.h"
 #include "video/Mp4Demuxer.h"
 
+#include <algorithm>
 #include <cstring>
 #include <limits>
 namespace video {
@@ -36,6 +37,28 @@ enum : uint32_t {
     kCues            = 0x1C53BB6B,
 };
 
+bool scale_timestamp(int64_t timestamp, uint64_t scale, int64_t& result) {
+    if (scale == 0) return false;
+    if (timestamp == 0) {
+        result = 0;
+        return true;
+    }
+    if (timestamp > 0) {
+        if (scale > (uint64_t)std::numeric_limits<int64_t>::max() /
+                        (uint64_t)timestamp)
+            return false;
+        result = (int64_t)((uint64_t)timestamp * scale);
+        return true;
+    }
+    const uint64_t magnitude = (uint64_t)(-(timestamp + 1)) + 1;
+    const uint64_t limit = (uint64_t)std::numeric_limits<int64_t>::max() + 1;
+    if (scale > limit / magnitude) return false;
+    const uint64_t product = magnitude * scale;
+    result = product == limit ? std::numeric_limits<int64_t>::min()
+                              : -(int64_t)product;
+    return true;
+}
+
 }  // namespace
 
 // ================
@@ -49,7 +72,7 @@ void MkvDemuxer::seek(uint64_t off) {
 }
 
 bool MkvDemuxer::readBytes(void* dst, uint64_t len) {
-    if (pos_ + len > file_size_) return false;
+    if (pos_ > file_size_ || len > file_size_ - pos_) return false;
     file_.read((char*)dst, (std::streamsize)len);
     if ((uint64_t)file_.gcount() != len) return false;
     pos_ += len;
@@ -125,6 +148,7 @@ double MkvDemuxer::readFloat(uint64_t len) {
 // ================
 
 bool MkvDemuxer::open(const std::string& path, std::string& error) {
+    error.clear();
     path_ = path;
     file_.open(path, std::ios::binary | std::ios::ate);
     if (!file_) {
@@ -141,7 +165,11 @@ bool MkvDemuxer::open(const std::string& path, std::string& error) {
         error = "'" + path + "' is not a Matroska/WebM file (no EBML header)";
         return false;
     }
-    if (!readSize(size, unknown)) return false;
+    if (!readSize(size, unknown) || unknown || pos_ > file_size_ ||
+        size > file_size_ - pos_) {
+        error = "malformed EBML header";
+        return false;
+    }
     skip(size);
 
     // Find the Segment.
@@ -151,14 +179,21 @@ bool MkvDemuxer::open(const std::string& path, std::string& error) {
             return false;
         }
         if (id == kSegment) break;
+        if (unknown || pos_ > file_size_ || size > file_size_ - pos_) {
+            error = "corrupt EBML structure before the Segment element";
+            return false;
+        }
         skip(size);
     }
     if (pos_ >= file_size_) {
         error = "'" + path + "' has no Segment element";
         return false;
     }
+    if (!unknown && (pos_ > file_size_ || size > file_size_ - pos_)) {
+        error = "Matroska Segment extends past the file";
+        return false;
+    }
     segment_end_ = unknown ? file_size_ : pos_ + size;
-    if (segment_end_ > file_size_) segment_end_ = file_size_;
 
     // Walk the Segment's children until Tracks has been seen and a Cluster is
     // in sight. Well-formed files put Info and Tracks first; we do not require
@@ -166,11 +201,15 @@ bool MkvDemuxer::open(const std::string& path, std::string& error) {
     while (pos_ < segment_end_) {
         const uint64_t elem_start = pos_;
         if (!readId(id) || !readSize(size, unknown)) break;
+        if (pos_ > segment_end_ || (!unknown && size > segment_end_ - pos_)) {
+            error = "Matroska element extends past the Segment";
+            return false;
+        }
         if (unknown && id != kCluster && id != kSegment) break;
         const uint64_t end = unknown ? segment_end_ : pos_ + size;
 
         if (id == kInfo) {
-            parseInfo(end);
+            if (!parseInfo(end, error)) return false;
         } else if (id == kTracks) {
             if (!parseTracks(end, error)) return false;
         } else if (id == kCluster) {
@@ -208,16 +247,28 @@ bool MkvDemuxer::open(const std::string& path, std::string& error) {
     return selectTrack(0, error);
 }
 
-bool MkvDemuxer::parseInfo(uint64_t end) {
+bool MkvDemuxer::parseInfo(uint64_t end, std::string& error) {
     while (pos_ < end) {
         uint32_t id;
         uint64_t size;
         bool unknown;
-        if (!readId(id) || !readSize(size, unknown)) return false;
+        if (!readId(id) || !readSize(size, unknown) || unknown || pos_ > end ||
+            size > end - pos_) {
+            error = "malformed Matroska Info element";
+            return false;
+        }
         const uint64_t next = pos_ + size;
         if (id == kTimestampScale) {
+            if (size == 0 || size > 8) {
+                error = "invalid Matroska TimestampScale";
+                return false;
+            }
             const uint64_t scale = readUInt(size);
-            if (scale != 0) timestamp_scale_ns_ = scale;
+            if (scale == 0) {
+                error = "Matroska TimestampScale must be nonzero";
+                return false;
+            }
+            timestamp_scale_ns_ = scale;
         } else if (id == kDuration) {
             duration_ = readFloat(size);
         }
@@ -233,7 +284,11 @@ bool MkvDemuxer::parseTracks(uint64_t end, std::string& error) {
         uint32_t id;
         uint64_t size;
         bool unknown;
-        if (!readId(id) || !readSize(size, unknown)) return false;
+        if (!readId(id) || !readSize(size, unknown) || unknown || pos_ > end ||
+            size > end - pos_) {
+            error = "malformed Matroska Tracks element";
+            return false;
+        }
         const uint64_t next = pos_ + size;
         if (id == kTrackEntry) parseTrackEntry(next);
         seek(next);
@@ -250,7 +305,9 @@ bool MkvDemuxer::parseTrackEntry(uint64_t end) {
         uint32_t id;
         uint64_t size;
         bool unknown;
-        if (!readId(id) || !readSize(size, unknown)) return false;
+        if (!readId(id) || !readSize(size, unknown) || unknown || pos_ > end ||
+            size > end - pos_)
+            return false;
         const uint64_t next = pos_ + size;
         switch (id) {
             case kTrackNumber: tk.number = readUInt(size); break;
@@ -271,7 +328,9 @@ bool MkvDemuxer::parseTrackEntry(uint64_t end) {
                     uint32_t vid;
                     uint64_t vsize;
                     bool vunknown;
-                    if (!readId(vid) || !readSize(vsize, vunknown)) break;
+                    if (!readId(vid) || !readSize(vsize, vunknown) || vunknown ||
+                        pos_ > next || vsize > next - pos_)
+                        return false;
                     const uint64_t vnext = pos_ + vsize;
                     if (vid == kPixelWidth) tk.info.width = (int)readUInt(vsize);
                     else if (vid == kPixelHeight) tk.info.height = (int)readUInt(vsize);
@@ -307,18 +366,37 @@ bool MkvDemuxer::parseTrackEntry(uint64_t end) {
 
 
 bool MkvDemuxer::selectTrack(int index, std::string& error) {
+    error.clear();
     if (index < 0 || index >= (int)tracks_.size()) {
         error = "video track index out of range";
         return false;
     }
     selected_ = index;
+    Track& tk = tracks_[(size_t)selected_];
+    if (tk.presentation_ranks.empty()) {
+        rewindPackets();
+        std::vector<int64_t> pts;
+        Block block;
+        while (nextBlock(block, error)) pts.push_back(block.pts_ns);
+        if (!error.empty()) return false;
+
+        std::vector<size_t> order(pts.size());
+        for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+        std::stable_sort(order.begin(), order.end(),
+                         [&pts](size_t a, size_t b) { return pts[a] < pts[b]; });
+        tk.presentation_ranks.resize(order.size());
+        for (size_t rank = 0; rank < order.size(); ++rank)
+            tk.presentation_ranks[order[rank]] = rank;
+    }
+    rewindPackets();
+    return true;
+}
+
+void MkvDemuxer::rewindPackets() {
     in_cluster_ = false;
     packet_index_ = 0;
     discontinuity_segment_ = 0;
-    last_pts_ns_ = 0;
-    have_last_pts_ = false;
     seek(first_cluster_);
-    return true;
 }
 
 bool MkvDemuxer::nextCluster(std::string& error) {
@@ -326,33 +404,61 @@ bool MkvDemuxer::nextCluster(std::string& error) {
         uint32_t id;
         uint64_t size;
         bool unknown;
-        if (!readId(id) || !readSize(size, unknown)) return false;
+        if (!readId(id) || !readSize(size, unknown)) {
+            error = "malformed Matroska element between clusters";
+            return false;
+        }
         if (id == kCluster) {
             if (unknown) {
                 error = "unknown-size Cluster (live stream capture); remux the file";
                 return false;
             }
+            if (pos_ > segment_end_ || size > segment_end_ - pos_) {
+                error = "Matroska Cluster extends past the Segment";
+                return false;
+            }
             cluster_end_ = pos_ + size;
-            cluster_ts_ = 0;
             in_cluster_ = true;
-            // The Timestamp element is required to be the cluster's first child.
-            const uint64_t save = pos_;
-            uint32_t cid;
-            uint64_t csize;
-            bool cunknown;
-            if (readId(cid) && readSize(csize, cunknown) && cid == kClusterTs)
-                cluster_ts_ = (int64_t)readUInt(csize);
-            else
-                seek(save);
-            return true;
+            const uint64_t payload_start = pos_;
+            while (pos_ < cluster_end_) {
+                uint32_t cid;
+                uint64_t csize;
+                bool cunknown;
+                if (!readId(cid) || !readSize(csize, cunknown) || cunknown ||
+                    pos_ > cluster_end_ || csize > cluster_end_ - pos_) {
+                    error = "malformed Matroska Cluster";
+                    return false;
+                }
+                const uint64_t child_end = pos_ + csize;
+                if (cid == kClusterTs) {
+                    if (csize == 0 || csize > 8) {
+                        error = "Matroska Cluster has no valid Timestamp";
+                        return false;
+                    }
+                    const uint64_t timestamp = readUInt(csize);
+                    if (timestamp > (uint64_t)std::numeric_limits<int64_t>::max()) {
+                        error = "Matroska Cluster Timestamp is not representable";
+                        return false;
+                    }
+                    cluster_ts_ = (int64_t)timestamp;
+                    seek(payload_start);
+                    return true;
+                }
+                seek(child_end);
+            }
+            error = "Matroska Cluster has no Timestamp";
+            return false;
         }
-        if (unknown) return false;
+        if (unknown || pos_ > segment_end_ || size > segment_end_ - pos_) {
+            error = "malformed Matroska element between clusters";
+            return false;
+        }
         skip(size);
     }
     return false;
 }
 
-bool MkvDemuxer::next(Packet& out, std::string& error) {
+bool MkvDemuxer::nextBlock(Block& block, std::string& error) {
     const Track& tk = tracks_[(size_t)selected_];
 
     while (true) {
@@ -365,16 +471,16 @@ bool MkvDemuxer::next(Packet& out, std::string& error) {
         uint64_t size;
         bool unknown;
         const uint64_t elem_pos = pos_;
-        if (!readId(id) || !readSize(size, unknown)) {
-            in_cluster_ = false;
-            continue;
+        if (!readId(id) || !readSize(size, unknown) || unknown) {
+            error = "malformed Matroska Cluster element";
+            return false;
         }
-        uint64_t next_elem = pos_ + size;
-        if (next_elem > cluster_end_ || elem_pos >= cluster_end_) {
-            seek(cluster_end_);
-            in_cluster_ = false;
-            continue;
+        if (elem_pos >= cluster_end_ || pos_ > cluster_end_ ||
+            size > cluster_end_ - pos_) {
+            error = "Matroska element extends past its Cluster";
+            return false;
         }
+        const uint64_t next_elem = pos_ + size;
 
         // A BlockGroup wraps exactly one Block plus reference metadata; we only
         // need the Block, so descend and let the loop pick it up next.
@@ -387,9 +493,15 @@ bool MkvDemuxer::next(Packet& out, std::string& error) {
         // Block header: track number (vint), int16 relative timestamp, flags.
         uint64_t track_num;
         bool tn_unknown;
-        if (!readSize(track_num, tn_unknown)) return false;
+        if (!readSize(track_num, tn_unknown) || tn_unknown || pos_ + 3 > next_elem) {
+            error = "malformed Matroska block header";
+            return false;
+        }
         uint8_t hdr[3];
-        if (!readBytes(hdr, 3)) return false;
+        if (!readBytes(hdr, 3)) {
+            error = "truncated Matroska block header";
+            return false;
+        }
         const int16_t rel_ts = (int16_t)((hdr[0] << 8) | hdr[1]);
         const uint8_t flags = hdr[2];
 
@@ -403,57 +515,67 @@ bool MkvDemuxer::next(Packet& out, std::string& error) {
             return false;
         }
 
-        const uint64_t payload = next_elem - pos_;
-        out = Packet{};
-        out.data.resize((size_t)payload);
-        if (!readBytes(out.data.data(), payload)) {
-            error = "truncated Matroska block";
+        const int64_t cluster = cluster_ts_;
+        const int64_t relative = rel_ts;
+        if ((relative > 0 && cluster > std::numeric_limits<int64_t>::max() - relative) ||
+            (relative < 0 && cluster < std::numeric_limits<int64_t>::min() - relative)) {
+            error = "Matroska block timestamp is not representable";
+            return false;
+        }
+        int64_t pts_ns = 0;
+        if (!scale_timestamp(cluster + relative, timestamp_scale_ns_, pts_ns)) {
+            error = "Matroska block timestamp is not representable in nanoseconds";
             return false;
         }
 
-        FrameTiming& timing = out.timing;
-        timing.stream_index = tk.info.stream_index;
-        timing.discontinuity_segment = discontinuity_segment_;
-        timing.decode_ordinal = packet_index_;
-        timing.presentation_ordinal = packet_index_;
-        const int64_t cluster = cluster_ts_;
-        const int64_t relative = rel_ts;
-        bool exact = true;
-        if ((relative > 0 && cluster > std::numeric_limits<int64_t>::max() - relative) ||
-            (relative < 0 && cluster < std::numeric_limits<int64_t>::min() - relative))
-            exact = false;
-        const int64_t timestamp = exact ? cluster + relative : 0;
-        int64_t pts_ns = 0;
-        if (exact && timestamp_scale_ns_ <= (uint64_t)std::numeric_limits<int64_t>::max()) {
-            const int64_t scale = (int64_t)timestamp_scale_ns_;
-            if (timestamp >= 0) {
-                exact = timestamp <= std::numeric_limits<int64_t>::max() / scale;
-            } else {
-                exact = timestamp >= std::numeric_limits<int64_t>::min() / scale;
-            }
-            if (exact) pts_ns = timestamp * scale;
-        } else {
-            exact = false;
-        }
-        if (exact) {
-            timing.kind = TimingKind::SourceExact;
-            timing.time_base_num = 1;
-            timing.time_base_den = 1000000000;
-            timing.pts = pts_ns;
-            timing.has_pts = true;
-            if (tk.default_duration_ns <= (uint64_t)std::numeric_limits<int64_t>::max()) {
-                timing.duration = (int64_t)tk.default_duration_ns;
-                timing.has_duration = tk.default_duration_ns > 0;
-            }
-        }
-        // SimpleBlock states keyframe-ness in bit 7; a Block inside a BlockGroup
-        // is a keyframe when it has no ReferenceBlock, which we approximate the
-        // same way (the codec parser is the authority for IDR/IRAP anyway).
-        out.is_sync = (id == kSimpleBlock) ? ((flags & 0x80) != 0) : false;
-        ++packet_index_;
+        block.payload_offset = pos_;
+        block.payload_size = next_elem - pos_;
+        block.decode_ordinal = packet_index_++;
+        block.pts_ns = pts_ns;
+        block.is_sync = (id == kSimpleBlock) && ((flags & 0x80) != 0);
         seek(next_elem);
         return true;
     }
+}
+
+bool MkvDemuxer::next(Packet& out, std::string& error) {
+    error.clear();
+    const Track& tk = tracks_[(size_t)selected_];
+    Block block;
+    if (!nextBlock(block, error)) return false;
+    if (block.decode_ordinal >= tk.presentation_ranks.size()) {
+        error = "Matroska presentation index does not match the selected track";
+        return false;
+    }
+
+    out = Packet{};
+    out.data.resize((size_t)block.payload_size);
+    seek(block.payload_offset);
+    if (!readBytes(out.data.data(), block.payload_size)) {
+        error = "truncated Matroska block";
+        return false;
+    }
+
+    FrameTiming& timing = out.timing;
+    timing.kind = TimingKind::SourceExact;
+    timing.stream_index = tk.info.stream_index;
+    timing.discontinuity_segment = discontinuity_segment_;
+    timing.decode_ordinal = block.decode_ordinal;
+    timing.presentation_ordinal = tk.presentation_ranks[(size_t)block.decode_ordinal];
+    timing.time_base_num = 1;
+    timing.time_base_den = 1000000000;
+    timing.pts = block.pts_ns;
+    timing.has_pts = true;
+    if (tk.default_duration_ns > 0) {
+        if (tk.default_duration_ns > (uint64_t)std::numeric_limits<int64_t>::max()) {
+            error = "Matroska DefaultDuration is not representable";
+            return false;
+        }
+        timing.duration = (int64_t)tk.default_duration_ns;
+        timing.has_duration = true;
+    }
+    out.is_sync = block.is_sync;
+    return true;
 }
 
 // ================

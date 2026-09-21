@@ -343,7 +343,8 @@ static std::map<std::string, float> _engine_train_step_split_one_per_camera(
         set_camera_params(width, height, camera_model, distortion,
                           viewmats, intrins, dist_coeffs);
         set_training_data(gt_rgb, gt_depth, gt_normal, gt_alpha,
-                          cfg.loss.input_depth_is_ray_depth);
+                          cfg.loss.input_depth_is_ray_depth,
+                          cfg.loss.depth_unit_scale_factor);
         return _engine_train_step_after_setup(
             step, max_steps, std::move(primitive), sh_degree, packed,
             bilagrid_cam_indices, cfg);
@@ -404,7 +405,8 @@ static std::map<std::string, float> _engine_train_step_split_one_per_camera(
 
         set_camera_params(width, height, camera_model, distortion, vmt_k, itr_k, dst_k);
         set_training_data(rgb_k, dep_k, nrm_k, aph_k,
-                          cfg.loss.input_depth_is_ray_depth);
+                          cfg.loss.input_depth_is_ray_depth,
+                          cfg.loss.depth_unit_scale_factor);
 
         // Thumbnails: capture per-sub-batch with the sliced cam index. The
         // viewer host counter naturally throttles re-captures, so doing this
@@ -545,7 +547,8 @@ std::map<std::string, float> engine_train_step_hetero(
             set_camera_params(s.width, s.height, s.camera_model, s.distortion,
                               vmt_c, itr_c, dst_c);
             set_training_data(rgb_c, dep_c, nrm_c, aph_c,
-                              cfg.loss.input_depth_is_ray_depth);
+                              cfg.loss.input_depth_is_ray_depth,
+                              cfg.loss.depth_unit_scale_factor);
 
             _set_cur_cam_indices(bgi_c);
             engine_viewer_capture_thumbnails(bgi_c);
@@ -615,7 +618,8 @@ std::map<std::string, float> engine_train_step(
     }
     set_camera_params(width, height, camera_model, distortion, viewmats, intrins, dist_coeffs);
     set_training_data(gt_rgb, gt_depth, gt_normal, gt_alpha,
-                      cfg.loss.input_depth_is_ray_depth);
+                      cfg.loss.input_depth_is_ray_depth,
+                      cfg.loss.depth_unit_scale_factor);
     return _engine_train_step_after_setup(
         step, max_steps, std::move(primitive), sh_degree, packed,
         bilagrid_cam_indices, cfg);
@@ -685,7 +689,8 @@ static std::map<std::string, float> _engine_train_step_split_warped(
                                  cfg.loss.input_depth_is_ray_depth,
                                  input_intrins, input_dist_coeffs,
                                  input_source_models, input_source_params,
-                                 face_axes);
+                                 face_axes,
+                                 cfg.loss.depth_unit_scale_factor);
         return _engine_train_step_after_setup(
             step, max_steps, std::move(primitive), sh_degree, packed,
             bilagrid_cam_indices, cfg);
@@ -764,7 +769,8 @@ static std::map<std::string, float> _engine_train_step_split_warped(
                                      nrm_k, normal_in_H, normal_in_W,
                                      cfg.loss.input_depth_is_ray_depth,
                                      i_itr_k, i_dst_k, i_src_m_k, i_src_p_k,
-                                     axes_k);
+                                     axes_k,
+                                     cfg.loss.depth_unit_scale_factor);
 
             _set_cur_cam_indices(bgi_k);
             engine_viewer_capture_thumbnails(bgi_k);
@@ -870,7 +876,8 @@ std::map<std::string, float> engine_train_step_warped(
                              cfg.loss.input_depth_is_ray_depth,
                              input_intrins, input_dist_coeffs,
                              input_source_models, input_source_params,
-                             face_axes);
+                             face_axes,
+                             cfg.loss.depth_unit_scale_factor);
     return _engine_train_step_after_setup(
         step, max_steps, std::move(primitive), sh_degree, packed,
         bilagrid_cam_indices, cfg);

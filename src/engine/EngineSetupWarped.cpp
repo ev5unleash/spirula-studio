@@ -113,7 +113,8 @@ void set_training_data_warped(
     TorchTensorView input_source_models,
     TorchTensorView input_source_params,
     // [B_in*K, 3, 3] frame of each post camera in its input camera's frame.
-    TorchTensorView face_axes)
+    TorchTensorView face_axes,
+    float depth_unit_scale_factor)
 {
     // Depth / normal are warped below; clear stale buffers first so a step
     // that supplies neither leaves the loss kernels seeing "no GT".
@@ -266,19 +267,22 @@ void set_training_data_warped(
                 input_model_name, input_distortion, d_intrins, d_dist,
                 d_src_models, d_src_params, d_depth_in, d_elem,
                 B_in, depth_in_H, depth_in_W,
-                d_depth_out, out_H, out_W, in_H, in_W);
+                d_depth_out, out_H, out_W, in_H, in_W,
+                depth_unit_scale_factor);
         } else if (cm == CameraModelType::EQUIRECTANGULAR) {
             launch_warp_depth_equi(
                 d_depth_in, d_elem, B_in, depth_in_H, depth_in_W,
                 d_depth_out, K, out_H, out_W,
-                d_post_intrins, d_axes, input_depth_is_ray_depth);
+                d_post_intrins, d_axes, input_depth_is_ray_depth,
+                depth_unit_scale_factor);
         } else {
             launch_warp_depth_wide(
                 input_model_name, input_distortion, d_intrins, d_dist,
                 d_src_models, d_src_params,
                 d_depth_in, d_elem, B_in, depth_in_H, depth_in_W,
                 in_H, in_W, d_depth_out, K, out_H, out_W,
-                d_post_intrins, d_axes, input_depth_is_ray_depth);
+                d_post_intrins, d_axes, input_depth_is_ray_depth,
+                depth_unit_scale_factor);
         }
         TorchTensorView dv((uint64_t)d_depth_out, 4,
                            {(int64_t)B_post, (int64_t)out_H, (int64_t)out_W, 1LL});

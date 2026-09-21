@@ -123,23 +123,112 @@ The pool is sized `max_reorder + lookahead + max_dpb_slots + 4` pictures. At 4K
 that is a few hundred megabytes, which is the price of holding a blur-selection
 window in decoded form rather than re-decoding it.
 
-## Frame numbers, and seeking by them
+## Frame timing and identity
 
-`FrameHandle::timing.presentation_ordinal` is the frame's place in the
-container's **presentation** order, taken from
-`Packet::timing.presentation_ordinal` rather than counted as pictures come out.
-Counting drifts: on a file the decoder loses a picture in, every later frame
-would be renamed, and after a seek the count would restart. Naming them from the
-container leaves a gap instead.
+A frame identity is scoped to one source file, one selected container stream,
+and one discontinuity segment. `TrackInfo::stream_id` is the stable container
+stream identity; `FrameTiming::stream_index` points to that stream in the
+source's recorded stream table. Ordinals start at zero independently for each
+stream and segment:
 
-`VideoPipeline::seek()` jumps to the sync sample at or before a frame — the
-reorder queue, the DPB pins and the codec's reference state all go, and
-decoding resumes from the keyframe. It is what makes the GUI's frame slider
-usable on a long capture: the last frame of a fifteen-minute GoPro clip is
-35 s of decoding without it and 0.09 s with, and the frames it hands back are
+- `decode_ordinal` is the selected stream's coded-packet position. It follows
+  container/decode order and is assigned before decoding.
+- `presentation_ordinal` is that packet's rank in presentation order. It is
+  assigned from container timing before decoding, never by counting pictures
+  emitted by `VideoPipeline`.
+
+The rank includes packets that later yield no visible picture. A packet with no
+visible output, or a picture deliberately dropped after successful decode,
+therefore leaves a gap instead of renaming every later frame. Hidden units inside
+a packet do not consume additional ordinals. A decode failure aborts the stream.
+Reopening the same source and selecting the same stream gives the same ordinals;
+draining a short final reorder queue does not change them.
+
+### Matroska ordering contract
+
+Matroska stores referenced frames in coding order and permits their timestamps
+to regress in that order (RFC 9559, sections 10 and 11). The demuxer must keep
+that packet order for the codec while assigning presentation identity from the
+selected track's block timestamps:
+
+1. Compute each unlaced selected-track block's exact timestamp as the signed
+   block timestamp plus its cluster timestamp, scaled by `TimestampScale`.
+2. Rank all such blocks by ascending PTS, breaking equal-PTS ties by
+   `decode_ordinal`. This is the same stable PTS/source-order convention used by
+   the ISO-BMFF sample table. Equal timestamps remain distinct and unchanged.
+3. Deliver visible handles in ascending `presentation_ordinal`. Codec completion
+   plus `max_reorder` determines when output is eligible; the ordinal chooses
+   the next eligible output. Codec POC remains display metadata, not the source
+   identity or tie-break. Equal PTS has no earlier/later distinction to preserve,
+   so a tie that crosses codec POC order is emitted in stable block order.
+
+A PTS regression in decode order is normal B-frame reordering. Neither it nor a
+timestamp gap starts a discontinuity segment. Native Matroska files currently
+have one segment (`discontinuity_segment == 0`): the demuxer has no supported
+container signal for a later segment and must not infer one from timestamp
+shape. Other selected tracks do not consume either ordinal and never affect the
+rank. Current native extraction and seek naming are valid only for segment zero;
+supporting another segment requires composite segment/ordinal output identity
+and a segment-aware seek contract before such frames can be published.
+
+Matroska PTS is represented exactly in integer nanoseconds while the scaled
+value fits `int64_t`; negative values are valid. The native outcomes are:
+
+| Input | `TimingKind` and availability |
+|---|---|
+| Valid block timestamp and scale | `SourceExact`, known decode/presentation ordinals, `has_pts`, time base `1/1000000000` |
+| Valid `DefaultDuration` | Adds exact source duration; the kind remains `SourceExact` |
+| No container DTS | `has_dts == false`; DTS is not inferred |
+| Missing, malformed, or unrepresentable block timing | Demux error before packet publication; no ordinal or `FrameHandle` |
+
+The native Matroska path does not emit `SourceDerived` or `Missing` packets.
+`SourceDerived` is reserved for a value derived losslessly from other source
+metadata; `ExportDerived` is the external-decoder fallback and carries no source
+ordinals or source PTS. Nominal FPS, packet count, and decode output order are
+not timing fallbacks.
+
+The timing tuple belongs to a container packet. H.264/H.265's supported unlaced
+blocks contain one coded picture. An AV1 temporal unit may contain hidden coded
+pictures followed by one presentation: hidden/no-show pictures produce no
+`FrameHandle`, while the packet's sole visible output inherits its timing.
+`show_existing_frame` is a new presentation of stored pixels and inherits the
+current packet's timing, not the packet that originally decoded those pixels.
+The ready queue must therefore store immutable timing per presentation instead
+of attaching mutable timing to a shared picture-pool slot. More than one visible
+output from one packet is outside the exact-provenance contract; reject it rather
+than assigning duplicate or output-counted identity. All units in a packet must
+be consumed and this count validated before any presentation from that packet is
+returned. Laced blocks remain unsupported.
+
+`VideoPipeline::next()` returns visible pictures in the order above and retains
+the complete packet tuple: timing kind, stream index, discontinuity segment,
+both ordinals, available PTS/DTS/duration fields, and their time base.
+`PrepFrameSource` persists that tuple together with the source ID, output name,
+and output digest. The provenance schema must also serialize and validate the
+capture's `PrepStream` table so `stream_index` resolves to the recorded stable
+`stream_id` after reload; exact native provenance is incomplete without it.
+Extraction must fail if the selected picture has no proven presentation ordinal;
+filenames and `export_ordinal` must not repair or replace missing source identity.
+
+At end of stream, the pipeline consumes every `more_in_packet` picture in the
+last packet and drains every ready visible picture exactly once before reporting
+EOF. There is no separate codec drain API. Truncated packets and incomplete
+pictures are errors, not a successful short stream. SimpleBlock and the Block
+inside BlockGroup use the same timestamp/ordinal rules; current BlockGroup
+keyframe approximation, Cues, seeking, lacing, and live unknown-size clusters
+are separate support boundaries.
+
+### Seeking by presentation ordinal
+
+`VideoPipeline::seek()` jumps to the sync sample at or before a presentation
+ordinal — the reorder queue, the DPB pins and the codec's reference state all
+go, and decoding resumes from the keyframe. It is what makes the GUI's frame
+slider usable on a long capture: the last frame of a fifteen-minute GoPro clip
+is 35 s of decoding without it and 0.09 s with, and the frames it hands back are
 bit-identical (154 probes over the local corpus, one keyframe interval apart
 either side of the boundaries). Matroska has no seek here — no cue parsing —
-and `seekSync()` returning false just means reading from the start.
+and `seekSync()` returns false without changing the current position. Reopen the
+source to read it again from the start.
 
 ## Colour
 

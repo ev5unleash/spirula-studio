@@ -1,9 +1,10 @@
 # Distributed dataset creation
 
 Status: implementation present in the working tree; acceptance is not yet closed.
-The execution runbook in [section 13](#13-acceptance-execution-runbook) governs the
-remaining tests. Sections 1–12 retain the design contracts and acceptance scope;
-their implementation phases are not evidence that their gates have passed.
+Sections 1–12 retain the design contracts and acceptance scope; their
+implementation phases are not evidence that their gates have passed.
+The current P1 provenance status and next dependency are tracked in
+[section 14](#14-p1-provenance-closeout).
 
 Prior-session results are recorded separately from repeatable acceptance evidence.
 Remote connectivity, a representative reconstructable corpus, real cross-host
@@ -247,8 +248,8 @@ A missing/disconnected reconstruction retains existing failure/partial semantics
 
 ## 7. CLI contract
 
-The current executable exposes these commands. Exact Windows execution,
-request authority, retry, and evidence handling are specified in section 13.
+The current executable exposes these commands. Request authority and retry
+requirements are in section 5; these examples are not acceptance evidence.
 
 ```text
 # Coordinator: snapshot prepared inputs and export work assignments.
@@ -433,8 +434,155 @@ Correctness gates are unconditional. Before claiming a speed benefit, the comple
 
 None is required for the complete extraction-shard/chunk workflow described above. Revisit only against a measured limitation or a separate explicit requirement.
 
-## 13. Planning evidence
+## 13. Original planning evidence
 
-This plan was grounded in the current extraction/resume/index code, central matching/mapping/assembly, application scheduler/worker protocol, dataset handoff, and test registration. The existing built executable was invoked successfully with `sfm --help`, `sfm extract --help`, `sfm match --help`, and `sfm merge --help` to inspect its actual public command surface.
+The original planning pass was grounded in the extraction/resume/index code, central matching/mapping/assembly, application scheduler/worker protocol, dataset handoff, and test registration. The then-existing built executable was invoked successfully with `sfm --help`, `sfm extract --help`, `sfm match --help`, and `sfm merge --help` to inspect its public command surface.
 
 Those help checks establish command exposure only. They do not establish that the installed binary includes every inspected source change, that distributed commands exist, that cross-machine artifacts are compatible, or that any proposed performance gain has been measured. No implementation build, reconstruction benchmark, GPU acceptance run, or distributed test was performed for this planning-only change.
+
+## 14. P1 provenance closeout
+
+This section tracks the input-provenance P1 work from the latest progress report.
+It does not renumber phases A–F or close their distributed acceptance gates.
+Reported build/test/review results below are accepted as supplied; they were not
+rerun for this documentation update.
+
+### Completed: raw-clock stream ownership
+
+- [x] [`ProjectManifest.cpp`](../../src/data/ProjectManifest.cpp), `validate_revision`, rejects a raw clock whose `stream_id` is not in the `streams` of its referenced source. A matching stream on a different source does not satisfy that relationship.
+- [x] [`project_manifest_test.cpp`](../../src/core/tests/project_manifest_test.cpp) covers the cross-source stream case.
+- [x] Independent review completed with no findings.
+
+| Reported verification | Result |
+|---|---|
+| Vulkan development build | Succeeded |
+| `project_manifest_test` | Passed |
+| Headless suite | **23/23 passed** |
+| `git diff --check` | Clean |
+| Existing `vswhere.exe` warning | Still present and nonfatal; not a new P1 blocker |
+
+The clock-ownership fix is complete. Do not reopen it or rerun these checks merely
+to reconfirm the report. The headless result is not native-video acceptance.
+
+### Completed: Matroska presentation ordering
+
+The contract, synthetic fixture set, source correction, supported non-NVIDIA
+Vulkan Video run, and real extraction/provenance handoff are complete. The
+frozen timing and decoded-luma oracles pass on the selected AMD device.
+
+Keep `SS_ENABLE_PATENTED=OFF` by default. This native-video item is separate from
+ordinary ffmpeg-backed preparation and extraction-shard acceptance; it does not
+make patented decoding a requirement for those workflows. Any later native run
+must be explicitly opted in on supported non-NVIDIA Vulkan hardware. No CUDA or
+NVIDIA work is authorized by this status update.
+
+#### Source boundary and ownership
+
+[`Demuxer::next`](../../src/video/Demuxer.h) supplies coded packets in decode
+order. [`MkvDemuxer::selectTrack`](../../src/video/MkvDemuxer.cpp) now scans the
+selected track's timestamps without loading packet payloads and assigns stable
+PTS/decode-order ranks. [`VideoPipeline::next`](../../src/video/VideoPipeline.cpp)
+orders eligible presentations by those ranks and stores timing on each ready
+entry, so `show_existing_frame` cannot overwrite a shared picture's identity.
+
+[`Mp4Demuxer::buildPresentationOrder`](../../src/video/Mp4Demuxer.cpp), which
+stable-sorts sample indices by PTS, is the existing convention to evaluate before
+adding another ordering mechanism. It is not proof that copying that mechanism
+unchanged handles every Matroska packet/picture relationship.
+
+[`FrameExtract.cpp`](../../src/app/FrameExtract.cpp) consumes presentation
+ordinals for selection and exported frame identity.
+[`DatasetPrep.cpp`](../../src/app/DatasetPrep.cpp) writes and validates the
+resulting provenance. Fix the source identity at the demuxer/picture boundary;
+do not repair filenames afterwards or weaken the provenance validator.
+
+#### Dependency-ordered remaining work
+
+The row IDs below are local to this P1 continuation, not additional distributed
+implementation phases.
+
+| Row | State | Deliverable and gate |
+|---|---|---|
+| P1-MKV-SPEC | **Completed; reviewed** | The [video timing documentation](../../src/video/README.md) defines identity scope, stable PTS/decode-order ranking, equal-PTS behavior, timing availability, packet/picture limits, EOF, selected-track isolation, and the persisted consumer tuple. Static review found no unresolved contract requirement or source-boundary contradiction. |
+| P1-MKV-FIXTURE | **Completed** | Three committed synthetic fixtures freeze hashes, packet traces, decoded luma hashes, two-track isolation, and malformed zero-scale behavior. The unchanged demuxer failed at `presentation ordinal 1` before the source correction. |
+| P1-MKV-FIX | **Completed; GPU checked** | The demuxer pre-ranks selected-track blocks by stable PTS/decode order and rejects invalid timing. The pipeline ready queue carries immutable packet timing and orders by presentation ordinal. One layered DPB view selects reference slots through `baseArrayLayer`; this fixed the B-picture corruption exposed by the luma oracle. |
+| P1-MKV-VERIFY | **Completed** | The patented Vulkan fixture passes timing and content checks on the selected AMD device, including a validation-layer run. Native worker preparation exported all eight frames with exact provenance, and a resumed worker run read and accepted that sidecar. |
+
+#### Ordering decisions the specification must settle
+
+- **Identity domain:** define the relationship between source, stream, discontinuity segment, decode ordinal, and presentation ordinal; state ordinal origin, whether gaps are preserved, and what remains stable after reopen, a dropped picture, and end-of-stream draining.
+- **B-frames:** keep packets in decode order for the codec. Define how each displayed picture retains its source packet identity while receiving the correct presentation identity. A PTS regression in decode order is normal for B-frames and must not automatically create a clock-discontinuity segment.
+- **Equal PTS:** retain distinct frames; specify a deterministic tie-break and its relationship to codec display order. Evaluate the existing stable PTS/sample-order convention, including a tie that crosses a B-frame reorder. Do not silently choose a tie-break during implementation, deduplicate by timestamp, or fabricate different timestamps.
+- **Time authority:** preserve container timestamp/time-base precision. Specify negative, missing, invalid, and unrepresentable timestamp behavior and the correct `TimingKind`/availability. Do not manufacture PTS from nominal FPS or substitute packet count for an unavailable presentation identity.
+- **Packet versus picture:** define the treatment of hidden/no-show pictures, repeated/show-existing output, and multiple visible pictures in one packet wherever the existing codec path permits them. State exact-provenance limits explicitly; do not assume every coded packet is one displayed frame.
+- **Boundaries:** distinguish real discontinuities from reordering; specify short final GOP/EOF flushing and selected-track isolation. Matroska currently has no seek implementation: preserve that boundary rather than adding Cues/seek or unrelated BlockGroup sync changes to this item.
+- **Consumer contract:** define the complete timing/identity tuple delivered by `FrameHandle` and persisted in exported provenance. If the source identity cannot be established under the agreed contract, report that limitation explicitly rather than publishing an exact-looking ordinal.
+
+An output counter incremented when pictures happen to emerge is not an accepted
+shortcut: the existing timing contract requires source identity to survive
+missing pictures without renaming every later frame.
+
+#### Opt-in fixture and oracle
+
+Use synthetic or redistributable, explicitly approved media with recognizable
+frame identities and an independently recorded expected trace. Record fixture
+content hashes, generation/reference-tool versions where applicable, track IDs,
+timestamp scale, codec/reorder assumptions, and expected outcomes. Do not derive
+the oracle from the implementation being repaired or commit private captures.
+Fixture preparation may use existing external tools; it must not create a new
+build/runtime dependency.
+
+| Fixture case | Required observation |
+|---|---|
+| B-frame GOP with differing packet and display order | Decoded frame content/identity, emitted order, PTS/time base, decode ordinal, and presentation ordinal agree with the frozen trace. Include the ordinary no-reorder control. |
+| Equal-PTS frames, including a reorder tie | Both visible frames survive with stable distinct identities and the specified tie order; repeated runs/reopen do not change the mapping. |
+| Timestamp gap and B-frame PTS regression | Normal reordering is not classified as a clock reset; gap/ordinal behavior matches the agreed contract. |
+| Missing/invalid/unrepresentable time | The specified error or timing-availability result reaches the consumer; no fabricated exact provenance is accepted. Use a bounded malformed-container companion if needed. |
+| Short final reorder queue | EOF emits every expected visible picture exactly once with its original timing association. |
+| Multiple tracks and supported block/picture forms | Selected-track IDs and ordinals do not bleed across tracks. Any claimed exact support for SimpleBlock/BlockGroup or multi-picture/show-existing output has a matching case; other forms have an explicit boundary, not an assumed pass. |
+| Real extraction/provenance handoff | Exported names and `PrepFrameSource` timing describe the intended source pictures and survive the existing provenance writer/reader. Disable sharpness filtering for this identity check; subjective sharpness labels are not a prerequisite. |
+
+Observe the real `Demuxer` → `VideoPipeline` → extraction/provenance path, not just
+a mocked timestamp sort or a helper forwarding its inputs. Do not fix unrelated
+seek, sync, codec, or GUI behavior unless the scoped fixture exposes a necessary
+dependency; document such a dependency before expanding the change.
+
+#### Validation and closeout rule
+
+The dedicated fixture is registered only in the explicit native-video lane:
+[`cmake/SsNn.cmake`](../../cmake/SsNn.cmake) owns the patent-gated video library,
+and [`cmake/SsTests.cmake`](../../cmake/SsTests.cmake) owns CTest registration.
+`mkv_timing_test` is present only with `SS_ENABLE_PATENTED=ON` and carries the
+`gpu;native_video` labels plus the shared `training_gpu` resource lock.
+
+After the contract and fixture are ready, use the dev build entrypoint with an
+explicit `SS_ENABLE_PATENTED=ON` opt-in and select a supported non-NVIDIA Vulkan
+video device. An absent fixture, unavailable decoder/device, skipped test, or
+empty test selection is **unverified**, not a pass. Keep a native-fixture result
+separate from ordinary headless results. Restore `SS_ENABLE_PATENTED=OFF`
+explicitly afterwards; omitting a cached CMake option does not reset it.
+
+After the production change, run the focused native fixture and actual provenance
+handoff, then the affected manifest/host tests and headless suite once after
+integration, followed by review and diff checking. Record the new commands,
+configuration, fixture hashes, device, outcomes, and any remaining blockers.
+These are future post-change gates, not instructions to repeat the already
+accepted clock-ownership verification now.
+
+#### Observed fixture result
+
+| Check | Observed result |
+|---|---|
+| `build_develop.bat -DSS_BACKEND=vulkan -DSS_ENABLE_PATENTED=ON` | Passed with MSVC 14.44.35207 and Slang 2026.12.0.1 |
+| `build_vulkan\mkv_timing_test.exe src\video\tests\fixtures --demux-only` | Passed all hashes, packet timing/ranks, track isolation, and malformed timing checks |
+| `cmake -E chdir build_vulkan ctest -N -R "^mkv_timing_test$"` | Registered exactly one test |
+| `$env:SS_TEST_DEVICE='uuid:00000000020000000000000000000000'; cmake -E chdir build_vulkan ctest -R '^mkv_timing_test$' --output-on-failure --no-tests=error` | Passed timing and decoded-luma oracles on AMD Radeon AI PRO R9700, proprietary driver 2.0.395 / 26.Q3 |
+| The same focused test with `SS_VK_VALIDATION=1` | Passed with no validation error |
+| `spirula worker --request <native prep request>` followed by a resume request | Both attempts succeeded; eight frames were exported and the second attempt accepted `.spirula/prep-provenance.json` with exact presentation/decode ordinals and PTS |
+| `cmake -E chdir build_vulkan ctest -L headless --output-on-failure --no-tests=error -j 2` | **23/23 passed** |
+| `git diff --check` | Clean |
+
+The Matroska ordering item is closed: semantics, fixture, implementation,
+exported provenance, and supported-lane evidence agree. This does not reopen
+the separate optional native-video CLI gap or claim closure of the remaining
+distributed reconstruction/transfer/training/performance acceptance work.

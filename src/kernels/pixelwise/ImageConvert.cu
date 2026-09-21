@@ -155,11 +155,11 @@ void uint8_normal_to_float_raw(
     CHECK_DEVICE_ERROR(cudaGetLastError());
 }
 
-// ---- gt_depth: uint16 -> float (cast only, no scaling) ----
-// Cast only: the raw integer value is preserved.
+// ---- gt_depth: uint16 -> float (*depth unit scale) ----
 __global__ void uint16_depth_to_float_kernel(
     const TensorView<uint16_t, 4> img_in,
-    TensorView<float, 4> img_out
+    TensorView<float, 4> img_out,
+    float depth_unit_scale_factor
 ) {
     unsigned gid = blockIdx.x * blockDim.x + threadIdx.x;
     unsigned bid = blockIdx.y * blockDim.y + threadIdx.y;
@@ -169,13 +169,15 @@ __global__ void uint16_depth_to_float_kernel(
     unsigned y = gid / W;
     unsigned x = gid % W;
     for (int i = 0; i < C; ++i) {
-        img_out.at(bid, y, x, i) = (float)img_in.at(bid, y, x, i);
+        img_out.at(bid, y, x, i) =
+            (float)img_in.at(bid, y, x, i) * depth_unit_scale_factor;
     }
 }
 
 void uint16_depth_to_float_raw(
     const uint16_t* d_in, float* d_out,
-    int B, int H, int W, int C
+    int B, int H, int W, int C,
+    float depth_unit_scale_factor
 ) {
     TensorView<uint16_t, 4> in_v;
     in_v.data = const_cast<uint16_t*>(d_in);
@@ -187,7 +189,8 @@ void uint16_depth_to_float_raw(
     out_v.shape[0] = B; out_v.shape[1] = H; out_v.shape[2] = W; out_v.shape[3] = C;
     out_v.strides[0] = (long)H*W*C; out_v.strides[1] = (long)W*C; out_v.strides[2] = C; out_v.strides[3] = 1;
 
-    uint16_depth_to_float_kernel<<<_LAUNCH_ARGS_2D(H*W, B, 256, 1)>>>(in_v, out_v);
+    uint16_depth_to_float_kernel<<<_LAUNCH_ARGS_2D(H*W, B, 256, 1)>>>(
+        in_v, out_v, depth_unit_scale_factor);
     CHECK_DEVICE_ERROR(cudaGetLastError());
 }
 

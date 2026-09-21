@@ -78,6 +78,9 @@ struct LossConfig {
     // is enabled.
     float color_shift_reg_weight = 0.0f;
     float color_shift_reg_beta   = 0.0f;
+    // uint16 supervision stores raw counts; this converts them to scene units
+    // on the GPU. Float depth inputs remain unchanged.
+    float depth_unit_scale_factor = 1.0f;
     // Supervision depth maps may store either ray depth (Euclidean distance
     // along the camera ray) or linear depth (z component). The rasterizer
     // renders ray depth, so when this is false the freshly uploaded GT depth

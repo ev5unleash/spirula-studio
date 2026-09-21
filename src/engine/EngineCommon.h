@@ -161,19 +161,14 @@ inline void _dt3d_to_host(const DeviceTensor3D<T>& dt, const TorchTensorView& ho
 }
 
 
-// --- Ground-truth upload + GPU-side type conversion.
-//
-// kind picks the per-element conversion:
-//   "rgb"    : uint8 -> [0, 1] (/255); uint16 -> float (/65535)
-//   "normal" : uint8 -> [-1, 1] (x/127.5 - 1)
-//   "depth"  : uint16 -> float (cast only)
-// For all kinds, elem_size == sizeof(float) goes through the regular zero-copy
-// / H2D _hv_to_dt3d<T>() path unchanged.
+// Ground-truth bytes convert on GPU; float inputs pass through unchanged.
+// RGB/normal normalize, while uint16 depth applies depth_unit_scale_factor.
 template<typename T>
 inline DeviceTensor3D<T> _hv_to_dt3d_gt(
     const TorchTensorView& src_tv,
     PoolSlot key,
-    const std::string& kind)
+    const std::string& kind,
+    float depth_unit_scale_factor = 1.0f)
 {
     if (std::get<0>(src_tv) == 0) return DeviceTensor3D<T>();
     uint32_t elem_size = std::get<1>(src_tv);
@@ -224,7 +219,8 @@ inline DeviceTensor3D<T> _hv_to_dt3d_gt(
         if (kind == "rgb") {
             uint16_image_to_float_raw(d_u16, d_f, (int)B, (int)H, (int)W, (int)C);
         } else if (kind == "depth") {
-            uint16_depth_to_float_raw(d_u16, d_f, (int)B, (int)H, (int)W, (int)C);
+            uint16_depth_to_float_raw(d_u16, d_f, (int)B, (int)H, (int)W, (int)C,
+                                      depth_unit_scale_factor);
         } else {
             throw std::runtime_error(key_name + ": uint16 not supported for kind '" + kind + "'");
         }
