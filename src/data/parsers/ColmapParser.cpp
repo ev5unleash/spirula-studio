@@ -7,6 +7,7 @@
 #include "data/FastFloat.h"
 
 #include "core/CameraModel.h"   // camera_model_from_name (CUDA-free)
+#include "core/FilesystemPath.h"
 #include "data/DistortionFit.h"
 #include "data/SourceCamera.h"
 #include "sfm/core/Exif.h"
@@ -38,7 +39,13 @@ struct BinReader {
     std::string path;
 
     explicit BinReader(const std::string& p) : path(p) {
-        f = std::fopen(p.c_str(), "rb");
+        const fs::path io_path =
+            spirula::NativeFilesystemPath(fs::path(p));
+#ifdef _WIN32
+        f = ::_wfopen(io_path.c_str(), L"rb");
+#else
+        f = std::fopen(io_path.c_str(), "rb");
+#endif
         if (!f) throw std::runtime_error("ColmapParser: cannot open " + p);
     }
     ~BinReader() { if (f) std::fclose(f); }
@@ -106,7 +113,8 @@ int colmap_model_id(const std::string& name) {
 // gauge.txt beside the model (sfm/Pipeline.h): what the frame is worth. Absent
 // for every reconstruction not made here, and then the answer is "nothing".
 void read_gauge(const std::string& recon_dir, ParsedDataset& ds) {
-    std::ifstream f(recon_dir + "/gauge.txt");
+    std::ifstream f(spirula::NativeFilesystemPath(
+        fs::path(recon_dir) / "gauge.txt"));
     if (!f) return;
     // Line at a time, so a comment with an odd number of words cannot shift
     // every key onto the wrong value.
@@ -194,7 +202,13 @@ struct TextReader {
     size_t pos = 0;
 
     explicit TextReader(const std::string& p) {
-        FILE* f = std::fopen(p.c_str(), "rb");
+        const fs::path io_path =
+            spirula::NativeFilesystemPath(fs::path(p));
+#ifdef _WIN32
+        FILE* f = ::_wfopen(io_path.c_str(), L"rb");
+#else
+        FILE* f = std::fopen(io_path.c_str(), "rb");
+#endif
         if (!f) throw std::runtime_error("ColmapParser: cannot open " + p);
         std::fseek(f, 0, SEEK_END);
         long n = std::ftell(f);
@@ -588,13 +602,19 @@ struct ColmapModelFmt { ColmapFmt cameras{}, images{}, points3D{}; };
 // reconstruction: images.bin starts with a uint64 count; images.txt carries
 // it in a header comment (else count non-comment lines / 2). -1 = no model.
 static int64_t colmap_model_num_images(const fs::path& dir) {
-    if (FILE* f = std::fopen((dir / "images.bin").string().c_str(), "rb")) {
+    const fs::path binary_path =
+        spirula::NativeFilesystemPath(dir / "images.bin");
+#ifdef _WIN32
+    if (FILE* f = ::_wfopen(binary_path.c_str(), L"rb")) {
+#else
+    if (FILE* f = std::fopen(binary_path.c_str(), "rb")) {
+#endif
         uint64_t n = 0;
         bool ok = std::fread(&n, sizeof n, 1, f) == 1;
         std::fclose(f);
         if (ok) return (int64_t)n;
     }
-    std::ifstream t(dir / "images.txt");
+    std::ifstream t(spirula::NativeFilesystemPath(dir / "images.txt"));
     if (t) {
         std::string line;
         int64_t rows = 0;
@@ -624,8 +644,10 @@ static std::string join_files(const std::vector<std::string>& v) {
 // two, and each file parses on its own. .bin wins when both are present.
 static ColmapFmt colmap_file_fmt(const fs::path& dir, const char* base) {
     std::error_code ec;
-    if (fs::exists(dir / (std::string(base) + ".bin"), ec)) return ColmapFmt::Bin;
-    if (fs::exists(dir / (std::string(base) + ".txt"), ec)) return ColmapFmt::Text;
+    if (fs::exists(spirula::NativeFilesystemPath(
+            dir / (std::string(base) + ".bin")), ec)) return ColmapFmt::Bin;
+    if (fs::exists(spirula::NativeFilesystemPath(
+            dir / (std::string(base) + ".txt")), ec)) return ColmapFmt::Text;
     return ColmapFmt::None;
 }
 
@@ -641,6 +663,8 @@ static std::string find_colmap_recon(const std::string& dataset_dir,
                                      const DatasetParserConfig& cfg,
                                      ColmapModelFmt* fmt, bool verbose,
                                      std::string* near_miss = nullptr) {
+    const fs::path root =
+        spirula::LogicalFilesystemPath(fs::path(dataset_dir));
     std::vector<std::string> probe;
     if (!cfg.recon_dir.empty()) {
         probe = {cfg.recon_dir};
@@ -652,11 +676,14 @@ static std::string find_colmap_recon(const std::string& dataset_dir,
         std::vector<Model> models;
         std::error_code ec;
         for (const char* parent : {"sparse", "colmap/sparse"}) {
-            fs::path p = fs::path(dataset_dir) / parent;
-            if (!fs::is_directory(p, ec)) continue;
-            for (fs::directory_iterator it(p, ec), end; !ec && it != end;
-                 it.increment(ec)) {
-                if (!it->is_directory(ec)) continue;
+            fs::path p = root / parent;
+            if (!fs::is_directory(spirula::NativeFilesystemPath(p), ec)) continue;
+            for (fs::directory_iterator it(
+                     spirula::NativeFilesystemPath(p), ec), end;
+                 !ec && it != end; it.increment(ec)) {
+                if (!fs::is_directory(
+                        spirula::NativeFilesystemPath(it->path()), ec))
+                    continue;
                 int64_t n = colmap_model_num_images(it->path());
                 if (n >= 0)
                     models.push_back({n,
@@ -686,7 +713,7 @@ static std::string find_colmap_recon(const std::string& dataset_dir,
     };
     *fmt = ColmapModelFmt{};
     for (const auto& rel : probe) {
-        fs::path d = fs::path(dataset_dir) / rel;
+        fs::path d = spirula::LogicalFilesystemPath(root / rel);
         ColmapModelFmt f = colmap_model_fmt(d);
         if (has_recon(f)) { *fmt = f; return d.string(); }
     }
@@ -695,7 +722,8 @@ static std::string find_colmap_recon(const std::string& dataset_dir,
     // three files (a recon that lost points3D, say) rather than none.
     if (near_miss) {
         for (const auto& rel : probe) {
-            ColmapModelFmt f = colmap_model_fmt(fs::path(dataset_dir) / rel);
+            ColmapModelFmt f =
+                colmap_model_fmt(spirula::LogicalFilesystemPath(root / rel));
             const std::pair<const char*, ColmapFmt> files[] = {
                 {"cameras", f.cameras}, {"images", f.images},
                 {"points3D", f.points3D}};
@@ -719,9 +747,11 @@ static std::string find_colmap_recon(const std::string& dataset_dir,
 
 ParsedDataset parse_colmap_dataset(const std::string& dataset_dir,
                                    const DatasetParserConfig& cfg) {
+    const std::string logical_dataset_dir =
+        spirula::LogicalFilesystemPath(fs::path(dataset_dir)).string();
     ColmapModelFmt fmt;
     std::string near_miss;
-    std::string recon_dir = find_colmap_recon(dataset_dir, cfg, &fmt,
+    std::string recon_dir = find_colmap_recon(logical_dataset_dir, cfg, &fmt,
                                               /*verbose=*/true, &near_miss);
     if (recon_dir.empty())
         throw std::runtime_error(
@@ -818,12 +848,14 @@ ParsedDataset parse_colmap_dataset(const std::string& dataset_dir,
     // frames (train + eval, matching the Python dataparser, which splits
     // after normalization). No applied_transform on the COLMAP path, so
     // train_to_normalized = inv(T_n_from_camera). -----------------------------
-    fs::path image_dir = fs::path(dataset_dir) / cfg.image_dir;
+    fs::path image_dir = spirula::LogicalFilesystemPath(
+        fs::path(logical_dataset_dir) / cfg.image_dir);
 
     // Read before the split, like everything else the whole set decides.
     std::vector<std::string> all_paths(n_all);
     for (int64_t i = 0; i < n_all; i++)
-        all_paths[i] = (image_dir / frames[i]->name).string();
+        all_paths[i] = spirula::LogicalFilesystemPath(
+            image_dir / frames[i]->name).string();
     const std::vector<uint8_t> exif_o =
         dsparse::read_exif_orientations(cfg.exif_orientation, all_paths);
     // `apply` turns the pixels, so the levelling has nothing left to correct.
@@ -891,8 +923,9 @@ ParsedDataset parse_colmap_dataset(const std::string& dataset_dir,
                                      std::to_string(im.camera_id));
         const ColmapCamera& cam = cam_it->second;
 
-        fs::path img_path = image_dir / im.name;
-        if (cfg.require_image_files && !fs::exists(img_path))
+        fs::path img_path = spirula::LogicalFilesystemPath(image_dir / im.name);
+        if (cfg.require_image_files &&
+            !fs::exists(spirula::NativeFilesystemPath(img_path)))
             throw std::runtime_error("ColmapParser: " + img_path.string() +
                                      " does not exist (set --image-dir if needed)");
         ds.image_filenames.push_back(img_path.string());
@@ -960,7 +993,7 @@ ParsedDataset parse_colmap_dataset(const std::string& dataset_dir,
 // directory is not mistaken for one (a plain "*.xml is present" test makes
 // any random folder look like a Metashape dataset).
 static bool looks_like_metashape_xml(const fs::path& p) {
-    std::ifstream f(p, std::ios::binary);
+    std::ifstream f(spirula::NativeFilesystemPath(p), std::ios::binary);
     if (!f) return false;
     char buf[8192];
     f.read(buf, sizeof buf);
@@ -977,9 +1010,12 @@ static bool has_metashape_xml(const std::string& dataset_dir,
                               const DatasetParserConfig& cfg) {
     if (!cfg.metashape_xml.empty()) return true;
     std::error_code ec;
-    for (fs::directory_iterator it(dataset_dir, ec), end; !ec && it != end;
-         it.increment(ec)) {
-        if (!it->is_regular_file(ec)) continue;
+    for (fs::directory_iterator it(
+             spirula::NativeFilesystemPath(fs::path(dataset_dir)), ec), end;
+         !ec && it != end; it.increment(ec)) {
+        if (!fs::is_regular_file(
+                spirula::NativeFilesystemPath(it->path()), ec))
+            continue;
         std::string ext = it->path().extension().string();
         for (auto& c : ext) c = (char)std::tolower((unsigned char)c);
         if (ext == ".xml" && looks_like_metashape_xml(it->path())) return true;
@@ -990,37 +1026,45 @@ static bool has_metashape_xml(const std::string& dataset_dir,
 ParsedDataset parse_dataset(const std::string& dataset_dir,
                             const DatasetParserConfig& cfg,
                             const std::string& format) {
+    const fs::path logical_dataset_dir =
+        spirula::LogicalFilesystemPath(fs::path(dataset_dir));
     std::error_code ec;
-    if (!fs::exists(fs::path(dataset_dir), ec))
+    if (!fs::exists(spirula::NativeFilesystemPath(logical_dataset_dir), ec))
         throw std::runtime_error("dataset path does not exist: " + dataset_dir);
-    if (!fs::is_directory(fs::path(dataset_dir), ec))
+    if (!fs::is_directory(spirula::NativeFilesystemPath(logical_dataset_dir), ec))
         throw std::runtime_error("dataset path is not a directory: " + dataset_dir +
                                  " (--data must point at the dataset folder)");
 
-    if (format == "colmap")     return parse_colmap_dataset(dataset_dir, cfg);
-    if (format == "nerfstudio") return parse_nerfstudio_dataset(dataset_dir, cfg);
-    if (format == "metashape")  return parse_metashape_dataset(dataset_dir, cfg);
+    if (format == "colmap")
+        return parse_colmap_dataset(logical_dataset_dir.string(), cfg);
+    if (format == "nerfstudio")
+        return parse_nerfstudio_dataset(logical_dataset_dir.string(), cfg);
+    if (format == "metashape")
+        return parse_metashape_dataset(dataset_dir, cfg);
     if (!format.empty())
         throw std::runtime_error("unsupported data format: '" + format +
                                  "' (expected colmap, nerfstudio or metashape)");
 
     // ---- Auto-detect: probe for each format's marker files ----------------
-    if (fs::exists(fs::path(dataset_dir) / "transforms.json"))
-        return parse_nerfstudio_dataset(dataset_dir, cfg);
+    if (fs::exists(spirula::NativeFilesystemPath(
+            logical_dataset_dir / "transforms.json")))
+        return parse_nerfstudio_dataset(logical_dataset_dir.string(), cfg);
 
     ColmapModelFmt fmt;
     std::string colmap_near_miss;
-    bool has_colmap = !find_colmap_recon(dataset_dir, cfg, &fmt,
+    bool has_colmap = !find_colmap_recon(logical_dataset_dir.string(), cfg, &fmt,
                                          /*verbose=*/false,
                                          &colmap_near_miss).empty();
-    bool has_metashape = has_metashape_xml(dataset_dir, cfg);
+    bool has_metashape =
+        has_metashape_xml(logical_dataset_dir.string(), cfg);
 
     if (has_colmap) {
-        if (!has_metashape) return parse_colmap_dataset(dataset_dir, cfg);
+        if (!has_metashape)
+            return parse_colmap_dataset(logical_dataset_dir.string(), cfg);
         // Both markers present: COLMAP still wins, but a failure there is
         // worth retrying as Metashape rather than aborting the run.
         try {
-            return parse_colmap_dataset(dataset_dir, cfg);
+            return parse_colmap_dataset(logical_dataset_dir.string(), cfg);
         } catch (const std::exception& e) {
             std::fprintf(stderr, "%s\n",
                          spirula::i18n::format(

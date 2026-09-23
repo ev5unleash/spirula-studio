@@ -6909,6 +6909,245 @@ SS_MSG(capture_type_help,
        "kadar hoşgörülü olduğunu bu belirler. Girdiyi seçerken türünden "
        "ayarlanır."));
 
+SS_MSG(remote_reconstruction_worker,
+    EN("Whole-SfM worker"), JA("全体 SfM ワーカー"), ZH_HANS("完整 SfM 工作节点"),
+    ZH_HANT("完整 SfM 工作節點"), KO("전체 SfM 워커"), DE("Worker für vollständiges SfM"),
+    FR("Nœud SfM complet"), ES("Trabajador de SfM completo"),
+    PT("Trabalhador de SfM completo"), IT("Worker SfM completo"),
+    NL("Worker voor volledige SfM"), RU("Воркер полного SfM"),
+    TR("Tam SfM işçisi"));
+SS_MSG(remote_reconstruction_worker_help,
+    EN("Choose a paired, ready Vulkan worker for the entire reconstruction. "
+       "Local is the default; feature shards remain a separate workflow."),
+    JA("ペアリング済みで準備完了の Vulkan ワーカーに再構成全体を任せます。"
+       "既定はローカルです。特徴抽出の分割は別のワークフローです。"),
+    ZH_HANS("选择已配对且就绪的 Vulkan 工作节点执行整个重建。默认使用本机；"
+            "特征分片仍是独立工作流。"),
+    ZH_HANT("選擇已配對且就緒的 Vulkan 工作節點執行整個重建。預設使用本機；"
+            "特徵分片仍是獨立工作流程。"),
+    KO("페어링되어 준비된 Vulkan 워커에 전체 재구성을 맡깁니다. 기본값은 로컬이며 "
+       "특징 분할은 별도 작업 흐름입니다."),
+    DE("Wählt einen gekoppelten, bereiten Vulkan-Worker für die gesamte Rekonstruktion. "
+       "Lokal ist die Voreinstellung; Feature-Shards bleiben ein eigener Ablauf."),
+    FR("Choisissez un nœud Vulkan associé et prêt pour toute la reconstruction. "
+       "Le mode local reste celui par défaut ; les lots de points restent séparés."),
+    ES("Elija un trabajador Vulkan emparejado y listo para toda la reconstrucción. "
+       "El modo local es el predeterminado; los fragmentos siguen siendo otro flujo."),
+    PT("Escolha um trabalhador Vulkan pareado e pronto para toda a reconstrução. "
+       "O modo local é o padrão; as partes de características continuam separadas."),
+    IT("Scegli un worker Vulkan associato e pronto per l'intera ricostruzione. "
+       "Il locale è predefinito; le partizioni di caratteristiche restano separate."),
+    NL("Kies een gekoppelde, gereedstaande Vulkan-worker voor de volledige reconstructie. "
+       "Lokaal is de standaard; kenmerkfragmenten blijven een aparte workflow."),
+    RU("Выберите сопряжённый и готовый Vulkan-воркер для полной реконструкции. "
+       "По умолчанию используется локальный режим; сегменты признаков работают отдельно."),
+    TR("Tüm yeniden yapılandırma için eşleştirilmiş ve hazır bir Vulkan işçisi seçin. "
+       "Varsayılan yereldir; öznitelik parçaları ayrı bir iş akışıdır."));
+SS_MSG(remote_reconstruction_local,
+    EN("Local"), JA("ローカル"), ZH_HANS("本机"), ZH_HANT("本機"), KO("로컬"),
+    DE("Lokal"), FR("Local"), ES("Local"), PT("Local"), IT("Locale"),
+    NL("Lokaal"), RU("Локально"), TR("Yerel"));
+SS_MSG(remote_reconstruction_no_workers,
+    EN("No ready, compatible Vulkan reconstruction workers are available."),
+    JA("準備完了で互換性のある Vulkan 再構成ワーカーがありません。"),
+    ZH_HANS("没有可用的兼容 Vulkan 重建工作节点。"),
+    ZH_HANT("沒有可用的相容 Vulkan 重建工作節點。"),
+    KO("사용 가능한 호환 Vulkan 재구성 워커가 없습니다."),
+    DE("Keine bereiten, kompatiblen Vulkan-Rekonstruktions-Worker verfügbar."),
+    FR("Aucun nœud Vulkan compatible et prêt pour la reconstruction."),
+    ES("No hay trabajadores Vulkan compatibles y listos para reconstrucción."),
+    PT("Não há trabalhadores Vulkan compatíveis e prontos para reconstrução."),
+    IT("Nessun worker Vulkan compatibile e pronto per la ricostruzione."),
+    NL("Geen gereedstaande, compatibele Vulkan-workers voor reconstructie beschikbaar."),
+    RU("Нет готовых совместимых Vulkan-воркеров для реконструкции."),
+    TR("Hazır ve uyumlu Vulkan yeniden yapılandırma işçisi yok."));
+SS_MSG(remote_reconstruction_unavailable,
+    EN("The selected worker is not currently ready and compatible. Start the leader "
+       "and reconnect that same worker; no local fallback will be used."),
+    JA("選択したワーカーは現在準備完了または互換状態ではありません。リーダーを開始し、"
+       "同じワーカーを再接続してください。ローカルには切り替えません。"),
+    ZH_HANS("所选工作节点当前未就绪或不兼容。请启动主节点并重新连接该工作节点；"
+            "不会回退到本机。"),
+    ZH_HANT("所選工作節點目前未就緒或不相容。請啟動主節點並重新連線該工作節點；"
+            "不會切換至本機。"),
+    KO("선택한 워커가 현재 준비되지 않았거나 호환되지 않습니다. 리더를 시작하고 같은 "
+       "워커를 다시 연결하세요. 로컬로 대체하지 않습니다."),
+    DE("Der ausgewählte Worker ist derzeit nicht bereit oder kompatibel. Starten Sie den "
+       "Leiter und verbinden Sie denselben Worker erneut; es gibt keinen lokalen Ersatz."),
+    FR("Le nœud choisi n'est pas prêt ou compatible. Démarrez le coordinateur et reconnectez "
+       "ce même nœud ; aucun basculement local ne sera effectué."),
+    ES("El trabajador seleccionado no está listo o no es compatible. Inicie el coordinador "
+       "y vuelva a conectar ese mismo trabajador; no habrá sustitución local."),
+    PT("O trabalhador selecionado não está pronto ou compatível. Inicie o coordenador e "
+       "reconecte o mesmo trabalhador; não haverá alternativa local."),
+    IT("Il worker selezionato non è pronto o compatibile. Avvia il coordinatore e riconnetti "
+       "lo stesso worker; non verrà usato il computer locale come ripiego."),
+    NL("De gekozen worker is momenteel niet gereed of compatibel. Start de leider en verbind "
+       "dezelfde worker opnieuw; er wordt niet lokaal overgeschakeld."),
+    RU("Выбранный воркер сейчас не готов или несовместим. Запустите координатор и подключите "
+       "тот же воркер повторно; перехода на локальный режим не будет."),
+    TR("Seçilen işçi şu anda hazır veya uyumlu değil. Lideri başlatıp aynı işçiyi yeniden "
+       "bağlayın; yerel çalışmaya geçiş yapılmayacak."));
+SS_MSG(remote_reconstruction_leader_unavailable,
+    EN("Open Worker Management and start the leader before submitting."),
+    JA("送信前にワーカー管理を開いてリーダーを開始してください。"),
+    ZH_HANS("提交前请打开工作节点管理并启动主节点。"),
+    ZH_HANT("提交前請開啟工作節點管理並啟動主節點。"),
+    KO("제출하기 전에 워커 관리를 열고 리더를 시작하세요."),
+    DE("Öffnen Sie die Worker-Verwaltung und starten Sie den Leiter vor dem Absenden."),
+    FR("Ouvrez la gestion des nœuds et démarrez le coordinateur avant l'envoi."),
+    ES("Abra la gestión de trabajadores e inicie el coordinador antes de enviar."),
+    PT("Abra o gerenciamento de trabalhadores e inicie o coordenador antes de enviar."),
+    IT("Apri la gestione worker e avvia il coordinatore prima dell'invio."),
+    NL("Open Workermanagement en start de leider voordat u de taak verzendt."),
+    RU("Откройте управление воркерами и запустите координатор перед отправкой."),
+    TR("Göndermeden önce İşçi Yönetimi'ni açıp lideri başlatın."));
+SS_MSG(remote_reconstruction_shards_unsupported,
+    EN("Whole-SfM remote jobs do not use feature shards. Set the shard count to 1."),
+    JA("全体 SfM のリモートジョブでは特徴抽出の分割を使いません。分割数を 1 にしてください。"),
+    ZH_HANS("完整 SfM 远程任务不使用特征分片。请将分片数设为 1。"),
+    ZH_HANT("完整 SfM 遠端工作不使用特徵分片。請將分片數設為 1。"),
+    KO("전체 SfM 원격 작업은 특징 분할을 사용하지 않습니다. 분할 수를 1로 설정하세요."),
+    DE("Remote-Aufträge für vollständiges SfM verwenden keine Feature-Shards. Setzen Sie die Anzahl auf 1."),
+    FR("Les tâches SfM distantes complètes n'utilisent pas de lots de points. Réglez leur nombre sur 1."),
+    ES("Los trabajos remotos de SfM completo no usan fragmentos. Establezca la cantidad en 1."),
+    PT("Trabalhos remotos de SfM completo não usam partes de características. Defina a quantidade como 1."),
+    IT("I lavori SfM remoti completi non usano partizioni di caratteristiche. Imposta il numero su 1."),
+    NL("Externe taken voor volledige SfM gebruiken geen kenmerkfragmenten. Stel het aantal in op 1."),
+    RU("Удалённые задания полного SfM не используют сегменты признаков. Установите их число равным 1."),
+    TR("Tam SfM uzak işleri öznitelik parçalarını kullanmaz. Parça sayısını 1 yapın."));
+SS_MSG(remote_reconstruction_settings_unsupported,
+    EN("Remote whole-SfM requires the built-in engine and local built-in preparation. "
+       "Disable external masking and use the built-in reconstruction engine."),
+    JA("リモート全体 SfM には内蔵エンジンとローカル内蔵準備が必要です。外部マスキングを"
+       "無効にし、内蔵再構成エンジンを使用してください。"),
+    ZH_HANS("远程完整 SfM 需要内置引擎和本机内置预处理。请关闭外部遮罩并使用内置重建引擎。"),
+    ZH_HANT("遠端完整 SfM 需要內建引擎和本機內建前置處理。請關閉外部遮罩並使用內建重建引擎。"),
+    KO("원격 전체 SfM에는 내장 엔진과 로컬 내장 준비가 필요합니다. 외부 마스킹을 끄고 내장 "
+       "재구성 엔진을 사용하세요."),
+    DE("Remote-SfM erfordert die integrierte Engine und lokale integrierte Vorbereitung. "
+       "Deaktivieren Sie externe Maskierung und verwenden Sie die integrierte Rekonstruktion."),
+    FR("Le SfM distant exige le moteur intégré et une préparation locale intégrée. "
+       "Désactivez le masquage externe et utilisez le moteur de reconstruction intégré."),
+    ES("El SfM remoto requiere el motor integrado y preparación local integrada. "
+       "Desactive el enmascarado externo y use el motor de reconstrucción integrado."),
+    PT("O SfM remoto exige o mecanismo integrado e preparação local integrada. "
+       "Desative a máscara externa e use o mecanismo de reconstrução integrado."),
+    IT("Lo SfM remoto richiede il motore integrato e la preparazione locale integrata. "
+       "Disattiva la mascheratura esterna e usa il motore di ricostruzione integrato."),
+    NL("Externe volledige SfM vereist de ingebouwde engine en lokale voorbereiding. "
+       "Schakel externe maskering uit en gebruik de ingebouwde reconstructie-engine."),
+    RU("Для удалённого полного SfM нужны встроенный движок и локальная подготовка. "
+       "Отключите внешнее маскирование и выберите встроенный движок реконструкции."),
+    TR("Uzak tam SfM, yerleşik motor ve yerel yerleşik hazırlık gerektirir. "
+       "Harici maskelemeyi kapatıp yerleşik yeniden yapılandırma motorunu kullanın."));
+SS_MSG(remote_reconstruction_waiting_leader,
+    EN("Waiting for the leader to return the submitted job snapshot."),
+    JA("送信済みジョブのスナップショットをリーダーから取得しています。"),
+    ZH_HANS("正在等待主节点返回已提交任务的快照。"),
+    ZH_HANT("正在等待主節點傳回已提交工作的快照。"),
+    KO("리더가 제출된 작업 스냅샷을 반환하기를 기다리는 중입니다."),
+    DE("Warten auf den Auftragsstatus des Leiters."),
+    FR("En attente de l'instantané du travail envoyé par le coordinateur."),
+    ES("Esperando la instantánea del trabajo enviado desde el coordinador."),
+    PT("Aguardando o instantâneo do trabalho enviado pelo coordenador."),
+    IT("In attesa dello snapshot del lavoro inviato dal coordinatore."),
+    NL("Wachten op de momentopname van de ingediende taak van de leider."),
+    RU("Ожидание снимка отправленного задания от координатора."),
+    TR("Liderin gönderilen işin anlık görüntüsünü döndürmesi bekleniyor."));
+SS_MSG(remote_reconstruction_waiting_worker,
+    EN("Waiting for the selected worker to be ready; it will not be reassigned."),
+    JA("選択したワーカーの準備完了を待っています。別のワーカーには割り当てません。"),
+    ZH_HANS("正在等待所选工作节点就绪；任务不会重新分配。"),
+    ZH_HANT("正在等待所選工作節點就緒；工作不會重新指派。"),
+    KO("선택한 워커가 준비되기를 기다리는 중입니다. 다른 워커로 재할당하지 않습니다."),
+    DE("Warten auf den ausgewählten Worker; der Auftrag wird nicht neu zugewiesen."),
+    FR("En attente du nœud choisi ; la tâche ne sera pas réattribuée."),
+    ES("Esperando al trabajador seleccionado; el trabajo no se reasignará."),
+    PT("Aguardando o trabalhador selecionado; o trabalho não será reatribuído."),
+    IT("In attesa del worker selezionato; il lavoro non verrà riassegnato."),
+    NL("Wachten tot de gekozen worker gereed is; de taak wordt niet opnieuw toegewezen."),
+    RU("Ожидание выбранного воркера; задание не будет переназначено."),
+    TR("Seçilen işçinin hazır olması bekleniyor; görev yeniden atanmayacak."));
+SS_MSG(remote_reconstruction_cancelling,
+    EN("Cancelling: waiting for the leader to supersede the attempt."),
+    JA("キャンセル中です。リーダーによる試行の失効を待っています。"),
+    ZH_HANS("正在取消：等待主节点使当前尝试失效。"),
+    ZH_HANT("正在取消：等待主節點使目前嘗試失效。"),
+    KO("취소 중입니다. 리더가 현재 시도를 대체 처리하기를 기다립니다."),
+    DE("Abbruch läuft: Warten, bis der Leiter den Versuch ersetzt hat."),
+    FR("Annulation en cours : attente de l'invalidation de la tentative par le coordinateur."),
+    ES("Cancelando: esperando que el coordinador invalide el intento."),
+    PT("Cancelando: aguardando o coordenador invalidar a tentativa."),
+    IT("Annullamento: in attesa che il coordinatore invalidi il tentativo."),
+    NL("Annuleren: wachten tot de leider de poging ongeldig heeft gemaakt."),
+    RU("Отмена: ожидание аннулирования попытки координатором."),
+    TR("İptal ediliyor: liderin denemeyi geçersiz kılması bekleniyor."));
+SS_MSG(remote_state_staging,
+    EN("Staging inputs"), JA("入力を準備中"), ZH_HANS("正在暂存输入"), ZH_HANT("正在暫存輸入"),
+    KO("입력 준비 중"), DE("Eingaben werden bereitgestellt"), FR("Préparation des entrées"),
+    ES("Preparando entradas"), PT("Preparando entradas"), IT("Preparazione degli input"),
+    NL("Invoer klaarzetten"), RU("Подготовка входных данных"), TR("Girdiler hazırlanıyor"));
+SS_MSG(remote_state_queued,
+    EN("Queued"), JA("待機中"), ZH_HANS("排队中"), ZH_HANT("排隊中"), KO("대기 중"),
+    DE("In Warteschlange"), FR("En file d'attente"), ES("En cola"), PT("Na fila"),
+    IT("In coda"), NL("In wachtrij"), RU("В очереди"), TR("Sırada"));
+SS_MSG(remote_state_offered,
+    EN("Offered to worker"), JA("ワーカーに提示済み"), ZH_HANS("已提供给工作节点"),
+    ZH_HANT("已提供給工作節點"), KO("워커에 제안됨"), DE("Worker angeboten"),
+    FR("Proposé au nœud"), ES("Ofrecido al trabajador"), PT("Oferecido ao trabalhador"),
+    IT("Proposto al worker"), NL("Aan worker aangeboden"), RU("Предложено воркеру"),
+    TR("İşçiye sunuldu"));
+SS_MSG(remote_state_transferring,
+    EN("Transferring inputs"), JA("入力を転送中"), ZH_HANS("正在传输输入"),
+    ZH_HANT("正在傳輸輸入"), KO("입력 전송 중"), DE("Eingaben werden übertragen"),
+    FR("Transfert des entrées"), ES("Transfiriendo entradas"), PT("Transferindo entradas"),
+    IT("Trasferimento degli input"), NL("Invoer overdragen"), RU("Передача входных данных"),
+    TR("Girdiler aktarılıyor"));
+SS_MSG(remote_state_running,
+    EN("Reconstructing"), JA("再構成中"), ZH_HANS("正在重建"), ZH_HANT("正在重建"),
+    KO("재구성 중"), DE("Rekonstruktion läuft"), FR("Reconstruction en cours"),
+    ES("Reconstruyendo"), PT("Reconstruindo"), IT("Ricostruzione in corso"),
+    NL("Reconstructie bezig"), RU("Реконструкция"), TR("Yeniden yapılandırılıyor"));
+SS_MSG(remote_state_unknown,
+    EN("Unknown — waiting for reconciliation"), JA("不明 — 状態の照合を待っています"),
+    ZH_HANS("状态未知 — 等待核对"), ZH_HANT("狀態未知 — 等待核對"),
+    KO("알 수 없음 — 상태 확인 대기 중"), DE("Unbekannt — Abgleich ausstehend"),
+    FR("État inconnu — rapprochement en attente"), ES("Desconocido — esperando conciliación"),
+    PT("Desconhecido — aguardando reconciliação"), IT("Sconosciuto — in attesa di riconciliazione"),
+    NL("Onbekend — wachten op afstemming"), RU("Состояние неизвестно — ожидается сверка"),
+    TR("Bilinmiyor — eşitleme bekleniyor"));
+SS_MSG(remote_state_receiving,
+    EN("Receiving output"), JA("出力を受信中"), ZH_HANS("正在接收输出"),
+    ZH_HANT("正在接收輸出"), KO("출력 수신 중"), DE("Ausgabe wird empfangen"),
+    FR("Réception du résultat"), ES("Recibiendo resultado"), PT("Recebendo resultado"),
+    IT("Ricezione del risultato"), NL("Uitvoer ontvangen"), RU("Получение результата"),
+    TR("Çıktı alınıyor"));
+SS_MSG(remote_state_succeeded,
+    EN("Reconstruction succeeded"), JA("再構成が完了しました"), ZH_HANS("重建成功"),
+    ZH_HANT("重建成功"), KO("재구성 성공"), DE("Rekonstruktion erfolgreich"),
+    FR("Reconstruction réussie"), ES("Reconstrucción correcta"), PT("Reconstrução concluída"),
+    IT("Ricostruzione riuscita"), NL("Reconstructie geslaagd"), RU("Реконструкция завершена"),
+    TR("Yeniden yapılandırma başarılı"));
+SS_MSG(remote_state_failed,
+    EN("Reconstruction failed"), JA("再構成に失敗しました"), ZH_HANS("重建失败"),
+    ZH_HANT("重建失敗"), KO("재구성 실패"), DE("Rekonstruktion fehlgeschlagen"),
+    FR("Échec de la reconstruction"), ES("Falló la reconstrucción"),
+    PT("Falha na reconstrução"), IT("Ricostruzione non riuscita"),
+    NL("Reconstructie mislukt"), RU("Ошибка реконструкции"), TR("Yeniden yapılandırma başarısız"));
+SS_MSG(remote_state_interrupted,
+    EN("Interrupted"), JA("中断"), ZH_HANS("已中断"), ZH_HANT("已中斷"), KO("중단됨"),
+    DE("Unterbrochen"), FR("Interrompu"), ES("Interrumpido"), PT("Interrompido"),
+    IT("Interrotto"), NL("Onderbroken"), RU("Прервано"), TR("Kesintiye uğradı"));
+SS_MSG(remote_state_rejected,
+    EN("Rejected"), JA("拒否されました"), ZH_HANS("已拒绝"), ZH_HANT("已拒絕"), KO("거부됨"),
+    DE("Abgelehnt"), FR("Rejeté"), ES("Rechazado"), PT("Rejeitado"), IT("Rifiutato"),
+    NL("Afgewezen"), RU("Отклонено"), TR("Reddedildi"));
+SS_MSG(remote_state_superseded,
+    EN("Superseded"), JA("無効化されました"), ZH_HANS("已失效"), ZH_HANT("已失效"),
+    KO("대체됨"), DE("Ersetzt"), FR("Remplacé"), ES("Reemplazado"), PT("Substituído"),
+    IT("Sostituito"), NL("Vervangen"), RU("Заменено"), TR("Geçersiz kılındı"));
+
 SS_MSG(features,
     EN("Features"),      JA("特徴"),          ZH_HANS("特征"),     ZH_HANT("特徵"),
     KO("특징점"),         DE("Merkmale"),     FR("Points caractéristiques"),

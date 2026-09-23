@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <map>
@@ -17,6 +18,7 @@
 #include <string>
 #include <vector>
 
+#include "core/FilesystemPath.h"
 #include "sfm/core/Camera.h"
 #include "sfm/core/Pose.h"
 #include "sfm/core/Rig.h"
@@ -168,8 +170,10 @@ T rd(std::istream& f) {
 
 inline void Reconstruction::writeBinary(const std::string& dir) const {
     using namespace detail;
+    const std::filesystem::path model_dir(dir);
     {
-        std::ofstream f(dir + "/cameras.bin", std::ios::binary);
+        std::ofstream f(spirula::NativeFilesystemPath(model_dir / "cameras.bin"),
+                        std::ios::binary);
         if (!f) throw std::runtime_error("cannot write cameras.bin in " + dir);
         wr<uint64_t>(f, cameras.size());
         for (const auto& kv : cameras) {
@@ -184,7 +188,8 @@ inline void Reconstruction::writeBinary(const std::string& dir) const {
         }
     }
     {
-        std::ofstream f(dir + "/images.bin", std::ios::binary);
+        std::ofstream f(spirula::NativeFilesystemPath(model_dir / "images.bin"),
+                        std::ios::binary);
         if (!f) throw std::runtime_error("cannot write images.bin in " + dir);
         uint64_t nreg = numRegistered();
         wr<uint64_t>(f, nreg);
@@ -206,7 +211,8 @@ inline void Reconstruction::writeBinary(const std::string& dir) const {
         }
     }
     {
-        std::ofstream f(dir + "/points3D.bin", std::ios::binary);
+        std::ofstream f(spirula::NativeFilesystemPath(model_dir / "points3D.bin"),
+                        std::ios::binary);
         if (!f) throw std::runtime_error("cannot write points3D.bin in " + dir);
         wr<uint64_t>(f, points3D.size());
         for (const auto& kv : points3D) {
@@ -226,9 +232,11 @@ inline void Reconstruction::writeBinary(const std::string& dir) const {
 
 inline Reconstruction Reconstruction::readBinary(const std::string& dir) {
     using namespace detail;
+    const std::filesystem::path model_dir(dir);
     Reconstruction r;
     {
-        std::ifstream f(dir + "/cameras.bin", std::ios::binary);
+        std::ifstream f(spirula::NativeFilesystemPath(model_dir / "cameras.bin"),
+                        std::ios::binary);
         if (!f) throw std::runtime_error("cannot read cameras.bin");
         uint64_t n = rd<uint64_t>(f);
         for (uint64_t i = 0; i < n; i++) {
@@ -245,7 +253,8 @@ inline Reconstruction Reconstruction::readBinary(const std::string& dir) {
         }
     }
     {
-        std::ifstream f(dir + "/images.bin", std::ios::binary);
+        std::ifstream f(spirula::NativeFilesystemPath(model_dir / "images.bin"),
+                        std::ios::binary);
         if (!f) throw std::runtime_error("cannot read images.bin");
         uint64_t n = rd<uint64_t>(f);
         for (uint64_t i = 0; i < n; i++) {
@@ -271,7 +280,8 @@ inline Reconstruction Reconstruction::readBinary(const std::string& dir) {
         }
     }
     {
-        std::ifstream f(dir + "/points3D.bin", std::ios::binary);
+        std::ifstream f(spirula::NativeFilesystemPath(model_dir / "points3D.bin"),
+                        std::ios::binary);
         if (!f) throw std::runtime_error("cannot read points3D.bin");
         uint64_t n = rd<uint64_t>(f);
         for (uint64_t i = 0; i < n; i++) {

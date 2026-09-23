@@ -18,6 +18,8 @@
 #include <string>
 #include <vector>
 
+#include "core/FilesystemPath.h"
+
 namespace spirula {
 
 struct Sha256 {
@@ -106,7 +108,8 @@ struct Sha256 {
 
 // Lowercase hex SHA-256 of a file's contents. Empty when it cannot be read.
 inline std::string sha256_file(const std::string& path) {
-    std::ifstream fin(path, std::ios::binary);
+    std::ifstream fin(NativeFilesystemPath(std::filesystem::path(path)),
+                      std::ios::binary);
     if (!fin) return {};
     Sha256 sha;
     std::vector<char> chunk(1 << 20);

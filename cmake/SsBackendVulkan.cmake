@@ -30,6 +30,9 @@ target_compile_options(csrc_portable PRIVATE
 target_compile_definitions(csrc_portable PUBLIC SS_BACKEND_VULKAN)
 target_include_directories(csrc_portable PUBLIC ${SS_SRC} ${CMAKE_BINARY_DIR})
 target_link_libraries(csrc_portable PUBLIC ss_i18n)
+if(WIN32)
+    target_link_libraries(csrc_portable PUBLIC advapi32)
+endif()
 
 find_package(OpenMP)
 if(OpenMP_CXX_FOUND)

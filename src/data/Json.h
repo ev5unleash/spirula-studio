@@ -10,10 +10,13 @@
 // transforms.json-sized inputs), numbers are always double, and parse
 // errors throw std::runtime_error with a byte offset.
 
+#include "core/FilesystemPath.h"
+
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <cmath>
+#include <filesystem>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -241,7 +244,13 @@ inline JsonValue json_parse(const std::string& text) {
 }
 
 inline JsonValue json_parse_file(const std::string& path) {
-    FILE* f = std::fopen(path.c_str(), "rb");
+    const std::filesystem::path io_path =
+        spirula::NativeFilesystemPath(std::filesystem::path(path));
+#ifdef _WIN32
+    FILE* f = ::_wfopen(io_path.c_str(), L"rb");
+#else
+    FILE* f = std::fopen(io_path.c_str(), "rb");
+#endif
     if (!f) throw std::runtime_error("cannot open " + path);
     std::fseek(f, 0, SEEK_END);
     long n = std::ftell(f);

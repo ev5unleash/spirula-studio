@@ -1,12 +1,29 @@
 // GuiApp.cpp -- see GuiApp.h.
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <cerrno>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 #include "app/gui/GuiApp.h"
+#include "app/TextFile.h"
+#include "app/gui/DatasetPreset.h"
 
 #include "core/ColorSpace.h"
 #include "core/ExrImage.h"
 
 #include "checkpoint/SplatPly.h"
 #include "data/Json.h"
+#include "config/TrainConfigJson.h"
 #include "data/ProjectManifest.h"
 #include "app/AppPaths.h"
 #include "app/CrashLog.h"
@@ -22,6 +39,7 @@
 #include "i18n/catalog/Dataset.h"
 #include "i18n/catalog/Geometry.h"
 #include "i18n/catalog/Gui.h"
+#include "i18n/catalog/AgentPanel.h"
 #include "i18n/catalog/Log.h"
 #include "i18n/catalog/Train.h"
 #include "i18n/catalog/TrainFields.h"
@@ -47,6 +65,7 @@
 #endif
 #ifdef SS_TOOL_SFM
 #include "sfm/Pipeline.h"
+#include "sfm/core/FeatureWork.h"
 #endif
 
 #include <algorithm>
@@ -62,10 +81,13 @@
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
+#include <atomic>
+#include <set>
 
 namespace fs = std::filesystem;
 namespace i18n = spirula::i18n;
 namespace msg = spirula::i18n::msg::gui;
+namespace amsg = spirula::i18n::msg::agent_panel;
 namespace fld = spirula::i18n::msg::field;
 namespace dmsg = spirula::i18n::msg::dataset;
 namespace gmsg = spirula::i18n::msg::geometry;
@@ -351,7 +373,777 @@ std::string feature_scheduler_payload(const char* role,
            "\ncount=" + std::to_string(count) +
            "\nbatch=" + std::to_string(batch_row);
 }
+std::vector<app::agent::LeaderServer::WorkerSnapshot>
+eligible_training_workers(
+    std::vector<app::agent::LeaderServer::WorkerSnapshot> workers) {
+#ifdef SS_VERSION
+    const std::string required_build = SS_VERSION;
+#else
+    const std::string required_build = "unknown";
+#endif
+    workers.erase(std::remove_if(workers.begin(), workers.end(),
+        [&](const app::agent::LeaderServer::WorkerSnapshot& worker) {
+            const auto& status = worker.status;
+            std::string gpu = status.gpu;
+            std::transform(gpu.begin(), gpu.end(), gpu.begin(),
+                [](unsigned char ch) {
+                    return static_cast<char>(std::tolower(ch));
+                });
+            return !worker.ready || worker.revoked || !worker.connected ||
+                   worker.pairing_status !=
+                       app::agent::pairing::WorkerStatus::Paired ||
+                   status.compatibility !=
+                       app::agent::wire::CompatibilityState::Compatible ||
+                   required_build.empty() || required_build == "unknown" ||
+                   status.build != required_build ||
+                   gpu.find("vulkan") == std::string::npos ||
+                   gpu.find("nvidia") != std::string::npos ||
+                   std::find(status.capabilities.begin(),
+                             status.capabilities.end(),
+                             app::agent::wire::Capability::Training) ==
+                       status.capabilities.end();
+        }), workers.end());
+    std::sort(workers.begin(), workers.end(),
+        [](const auto& a, const auto& b) { return a.id < b.id; });
+    return workers;
+}
+bool valid_remote_training_id(const std::string& id) {
+    return !id.empty() && id.size() <= 128 &&
+           std::all_of(id.begin(), id.end(), [](unsigned char ch) {
+               return (ch >= 'a' && ch <= 'z') ||
+                      (ch >= '0' && ch <= '9') || ch == '-' || ch == '_';
+           });
+}
 
+std::string new_remote_training_id() {
+    static std::atomic<uint64_t> sequence{0};
+    const auto ticks = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    std::ostringstream id;
+    id << "training-" << std::hex << std::setw(16) << std::setfill('0')
+       << static_cast<uint64_t>(ticks) << '-' << std::setw(8)
+       << sequence.fetch_add(1, std::memory_order_relaxed);
+    return id.str();
+}
+
+std::string remote_training_config_json(const TrainConfig& config,
+                                        const std::string& preset) {
+    JsonWriter writer;
+    writer.object().field("preset", preset);
+    for (const auto& [key, value] : train_config_json_pairs(config))
+        writer.field_raw(key, value);
+    return writer.end().str();
+}
+
+
+#ifdef SS_TOOL_SFM
+std::string feature_request_path(const std::string& plan_dir, int shard) {
+    char name[64];
+    std::snprintf(name, sizeof(name), "request-shard-%04u-attempt-0001.json",
+                  static_cast<unsigned>(shard));
+    return (fs::u8path(plan_dir) / name).u8string();
+}
+
+std::string remote_feature_job_id(const std::string& plan_dir, int shard) {
+    return "feature-" + sfm::feature_work::sha256Text(
+        fs::u8path(plan_dir).lexically_normal().u8string() + ":" +
+        std::to_string(shard));
+}
+
+bool valid_remote_feature_id(const std::string& id) {
+    return !id.empty() && id.size() <= 128 &&
+           std::all_of(id.begin(), id.end(), [](unsigned char ch) {
+               return (ch >= 'a' && ch <= 'z') ||
+                      (ch >= 'A' && ch <= 'Z') ||
+                      (ch >= '0' && ch <= '9') ||
+                      ch == '_' || ch == '-' || ch == '.';
+           });
+}
+
+#endif
+void write_feature_metadata_string(std::ostringstream& output,
+                                   const std::string& value) {
+    output << static_cast<uint64_t>(value.size()) << '\n';
+    output.write(value.data(), static_cast<std::streamsize>(value.size()));
+    output.put('\n');
+}
+
+bool read_feature_metadata_count(std::ifstream& file, uint64_t limit,
+                                 uint64_t& count) {
+    std::string line;
+    if (!std::getline(file, line)) return false;
+    try {
+        size_t used = 0;
+        count = std::stoull(line, &used);
+        return used == line.size() && count <= limit;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool read_feature_metadata_string(std::ifstream& file, uint64_t limit,
+                                  std::string& value) {
+    uint64_t size = 0;
+    if (!read_feature_metadata_count(file, limit, size)) return false;
+    value.resize(static_cast<size_t>(size));
+    file.read(value.data(), static_cast<std::streamsize>(size));
+    return file && file.get() == '\n';
+}
+
+#ifdef SS_TOOL_SFM
+bool write_remote_feature_assignments(
+    const std::string& plan_dir, int shard_count,
+    const std::vector<std::string>& job_ids,
+    const std::vector<std::string>& worker_ids,
+    const std::vector<std::string>& attempt_ids, std::string& error) {
+    if (shard_count < 2 || shard_count > 256 ||
+        job_ids.size() != static_cast<size_t>(shard_count) ||
+        worker_ids.size() != job_ids.size() ||
+        attempt_ids.size() != job_ids.size()) {
+        error = "remote feature assignment metadata is invalid";
+        return false;
+    }
+    std::ostringstream output;
+    output << "gui:remote-feature-shards:v1\n"
+           << shard_count << '\n';
+    size_t assigned = 0;
+    for (const std::string& id : job_ids) assigned += !id.empty();
+    if (!assigned) {
+        error = "remote feature assignment metadata is empty";
+        return false;
+    }
+    output << assigned << '\n';
+    for (size_t i = 0; i < job_ids.size(); ++i) {
+        if (job_ids[i].empty()) continue;
+        if (!valid_remote_feature_id(job_ids[i]) ||
+            !valid_remote_feature_id(worker_ids[i]) ||
+            !valid_remote_feature_id(attempt_ids[i])) {
+            error = "remote feature assignment metadata is invalid";
+            return false;
+        }
+        output << i << '\n';
+        write_feature_metadata_string(output, job_ids[i]);
+        write_feature_metadata_string(output, worker_ids[i]);
+        write_feature_metadata_string(output, attempt_ids[i]);
+    }
+    const std::string bytes = output.str();
+    const fs::path target = fs::u8path(plan_dir) / "remote.assignments";
+    std::error_code ec;
+    if (fs::exists(target, ec) || ec) {
+        error = "remote feature assignments already exist";
+        return false;
+    }
+    static std::atomic<uint64_t> next_temporary_id{0};
+#ifdef _WIN32
+    HANDLE file = INVALID_HANDLE_VALUE;
+    fs::path temporary;
+    for (;;) {
+        const std::wstring name =
+            target.filename().wstring() + L".tmp-" +
+            std::to_wstring(GetCurrentProcessId()) + L"-" +
+            std::to_wstring(next_temporary_id.fetch_add(1));
+        temporary = target.parent_path() / name;
+        file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr,
+                           CREATE_NEW,
+                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH,
+                           nullptr);
+        if (file != INVALID_HANDLE_VALUE) break;
+        const DWORD code = GetLastError();
+        if (code == ERROR_FILE_EXISTS || code == ERROR_ALREADY_EXISTS)
+            continue;
+        error = "cannot create remote feature assignment metadata";
+        return false;
+    }
+    DWORD written = 0;
+    bool ok = WriteFile(file, bytes.data(), static_cast<DWORD>(bytes.size()),
+                        &written, nullptr) &&
+              written == bytes.size() && FlushFileBuffers(file);
+    if (!CloseHandle(file)) ok = false;
+    if (ok)
+        ok = MoveFileExW(temporary.c_str(), target.c_str(),
+                         MOVEFILE_WRITE_THROUGH) != 0;
+    if (!ok) {
+        DeleteFileW(temporary.c_str());
+        error = "cannot durably publish remote feature assignment metadata";
+    }
+    return ok;
+#else
+    const int directory =
+        ::open(target.parent_path().c_str(),
+               O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (directory < 0) {
+        error = "cannot open remote feature assignment directory";
+        return false;
+    }
+    const std::string target_name = target.filename().string();
+    std::string temporary;
+    int file = -1;
+    for (;;) {
+        temporary = target_name + ".tmp-" + std::to_string(::getpid()) +
+                    "-" + std::to_string(next_temporary_id.fetch_add(1));
+        file = ::openat(directory, temporary.c_str(),
+                        O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+                        0600);
+        if (file >= 0) break;
+        if (errno == EEXIST || errno == EINTR) continue;
+        ::close(directory);
+        error = "cannot create remote feature assignment metadata";
+        return false;
+    }
+    bool ok = ::fchmod(file, 0600) == 0;
+    size_t offset = 0;
+    while (ok && offset < bytes.size()) {
+        const ssize_t count =
+            ::write(file, bytes.data() + offset, bytes.size() - offset);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) {
+            ok = false;
+            break;
+        }
+        offset += static_cast<size_t>(count);
+    }
+    if (ok) ok = ::fsync(file) == 0;
+    if (::close(file) != 0) ok = false;
+    bool published = false;
+    if (ok) {
+        published = ::linkat(directory, temporary.c_str(), directory,
+                             target_name.c_str(), 0) == 0;
+        ok = published;
+    }
+    if (published) {
+        (void)::unlinkat(directory, temporary.c_str(), 0);
+        if (::fsync(directory) != 0) ok = false;
+    }
+    if (!ok) {
+        (void)::unlinkat(directory, temporary.c_str(), 0);
+        if (published) (void)::unlinkat(directory, target_name.c_str(), 0);
+        (void)::fsync(directory);
+    }
+    ::close(directory);
+    if (!ok) error = "cannot durably publish remote feature assignment metadata";
+    return ok;
+#endif
+}
+
+bool read_remote_feature_assignments(
+    const std::string& plan_dir, int& shard_count,
+    std::vector<std::string>& job_ids,
+    std::vector<std::string>& worker_ids,
+    std::vector<std::string>& attempt_ids, bool& found,
+    std::string& error) {
+    found = false;
+    const fs::path path = fs::u8path(plan_dir) / "remote.assignments";
+    std::error_code ec;
+    if (!fs::exists(path, ec)) {
+        if (ec) error = "cannot inspect " + path.u8string();
+        return !ec;
+    }
+    std::ifstream file(path, std::ios::binary);
+    std::string header;
+    uint64_t count = 0, assigned = 0;
+    if (!file || !std::getline(file, header) ||
+        header != "gui:remote-feature-shards:v1" ||
+        !read_feature_metadata_count(file, 256, count) || count < 2 ||
+        !read_feature_metadata_count(file, count, assigned) || assigned == 0) {
+        error = "remote feature assignment metadata is invalid";
+        return false;
+    }
+    shard_count = static_cast<int>(count);
+    job_ids.assign(count, {});
+    worker_ids.assign(count, {});
+    attempt_ids.assign(count, {});
+    for (uint64_t n = 0; n < assigned; ++n) {
+        uint64_t shard = 0;
+        if (!read_feature_metadata_count(file, count - 1, shard) ||
+            !job_ids[shard].empty() ||
+            !read_feature_metadata_string(file, 128, job_ids[shard]) ||
+            !read_feature_metadata_string(file, 128, worker_ids[shard]) ||
+            !read_feature_metadata_string(file, 128, attempt_ids[shard]) ||
+            !valid_remote_feature_id(job_ids[shard]) ||
+            !valid_remote_feature_id(worker_ids[shard]) ||
+            !valid_remote_feature_id(attempt_ids[shard]) ||
+            job_ids[shard] != remote_feature_job_id(plan_dir,
+                                                    static_cast<int>(shard))) {
+            error = "remote feature assignment metadata is invalid";
+            return false;
+        }
+        const std::string request_path =
+            feature_request_path(plan_dir, static_cast<int>(shard));
+        try {
+            const sfm::feature_work::FeatureRequest request =
+                sfm::feature_work::readRequestFile(request_path);
+            if (request.shard != shard ||
+                request.attempt_id != attempt_ids[shard])
+                throw std::runtime_error("request attempt does not match assignment");
+        } catch (const std::exception& exception) {
+            error = std::string("remote feature request metadata is invalid: ") +
+                    exception.what();
+            return false;
+        }
+    }
+    if (file.peek() != std::char_traits<char>::eof()) {
+        error = "remote feature assignment metadata has trailing data";
+        return false;
+    }
+    found = true;
+    return true;
+}
+
+std::vector<app::agent::LeaderServer::WorkerSnapshot>
+eligible_feature_workers(
+    std::vector<app::agent::LeaderServer::WorkerSnapshot> workers) {
+#ifdef SS_VERSION
+    const std::string required_build = SS_VERSION;
+#else
+    const std::string required_build = "unknown";
+#endif
+    workers.erase(std::remove_if(workers.begin(), workers.end(),
+        [&](const app::agent::LeaderServer::WorkerSnapshot& worker) {
+            const auto& status = worker.status;
+            std::string gpu = status.gpu;
+            std::transform(gpu.begin(), gpu.end(), gpu.begin(),
+                [](unsigned char ch) {
+                    return static_cast<char>(std::tolower(ch));
+                });
+            return !worker.ready || worker.revoked || !worker.connected ||
+                   worker.pairing_status != app::agent::pairing::WorkerStatus::Paired ||
+                   status.compatibility != app::agent::wire::CompatibilityState::Compatible ||
+                   required_build.empty() || required_build == "unknown" ||
+                   status.build != required_build || status.gpu.empty() ||
+                   gpu.find("nvidia") != std::string::npos ||
+                   std::find(status.capabilities.begin(),
+                             status.capabilities.end(),
+                             app::agent::wire::Capability::Feature) ==
+                       status.capabilities.end();
+        }), workers.end());
+    std::sort(workers.begin(), workers.end(),
+        [](const auto& a, const auto& b) { return a.id < b.id; });
+    return workers;
+}
+std::vector<app::agent::LeaderServer::WorkerSnapshot>
+eligible_reconstruction_workers(
+    std::vector<app::agent::LeaderServer::WorkerSnapshot> workers) {
+#ifdef SS_VERSION
+    const std::string required_build = SS_VERSION;
+#else
+    const std::string required_build = "unknown";
+#endif
+    workers.erase(std::remove_if(workers.begin(), workers.end(),
+        [&](const app::agent::LeaderServer::WorkerSnapshot& worker) {
+            const auto& status = worker.status;
+            std::string gpu = status.gpu;
+            std::transform(gpu.begin(), gpu.end(), gpu.begin(),
+                [](unsigned char ch) {
+                    return static_cast<char>(std::tolower(ch));
+                });
+            return !worker.ready || worker.revoked || !worker.connected ||
+                   worker.pairing_status !=
+                       app::agent::pairing::WorkerStatus::Paired ||
+                   status.compatibility !=
+                       app::agent::wire::CompatibilityState::Compatible ||
+                   required_build.empty() || required_build == "unknown" ||
+                   status.build != required_build ||
+                   gpu.find("vulkan") == std::string::npos ||
+                   gpu.find("nvidia") != std::string::npos ||
+                   std::find(status.capabilities.begin(),
+                             status.capabilities.end(),
+                             app::agent::wire::Capability::Reconstruction) ==
+                       status.capabilities.end();
+        }), workers.end());
+    std::sort(workers.begin(), workers.end(),
+        [](const auto& a, const auto& b) { return a.id < b.id; });
+    return workers;
+}
+
+#endif
+bool write_gui_job_record(
+    const fs::path& path, const char* header,
+    const std::vector<std::string>& fields,
+    const std::vector<std::string>& args, std::string& error) {
+    if (fields.size() != 17 || args.size() > 4096) {
+        error = "GUI job metadata is invalid";
+        return false;
+    }
+    std::ostringstream output;
+    output << header << '\n';
+    for (const std::string& field : fields)
+        write_feature_metadata_string(output, field);
+    output << args.size() << '\n';
+    for (const std::string& arg : args)
+        write_feature_metadata_string(output, arg);
+    const std::string bytes = output.str();
+    std::error_code ec;
+    fs::create_directories(path.parent_path(), ec);
+    if (ec) {
+        error = "cannot create GUI job metadata directory: " + ec.message();
+        return false;
+    }
+    static std::atomic<uint64_t> next_temporary_id{0};
+#ifdef _WIN32
+    fs::path temporary;
+    HANDLE file = INVALID_HANDLE_VALUE;
+    for (;;) {
+        temporary = path.parent_path() /
+            (path.filename().wstring() + L".tmp-" +
+             std::to_wstring(GetCurrentProcessId()) + L"-" +
+             std::to_wstring(next_temporary_id.fetch_add(1)));
+        file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr,
+                           CREATE_NEW,
+                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH,
+                           nullptr);
+        if (file != INVALID_HANDLE_VALUE) break;
+        const DWORD code = GetLastError();
+        if (code == ERROR_FILE_EXISTS || code == ERROR_ALREADY_EXISTS) continue;
+        error = "cannot create GUI job metadata";
+        return false;
+    }
+    size_t offset = 0;
+    bool ok = true;
+    while (offset < bytes.size()) {
+        const DWORD count = static_cast<DWORD>(
+            std::min<size_t>(bytes.size() - offset, MAXDWORD));
+        DWORD written = 0;
+        if (!WriteFile(file, bytes.data() + offset, count, &written, nullptr) ||
+            written != count) {
+            ok = false;
+            break;
+        }
+        offset += written;
+    }
+    if (ok) ok = FlushFileBuffers(file) != 0;
+    if (!CloseHandle(file)) ok = false;
+    if (ok)
+        ok = MoveFileExW(temporary.c_str(), path.c_str(),
+                         MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+    if (!ok) {
+        DeleteFileW(temporary.c_str());
+        error = "cannot durably publish GUI job metadata";
+    }
+    return ok;
+#else
+    const int directory =
+        ::open(path.parent_path().c_str(),
+               O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (directory < 0) {
+        error = "cannot open GUI job metadata directory";
+        return false;
+    }
+    const std::string target = path.filename().string();
+    std::string temporary;
+    int file = -1;
+    for (;;) {
+        temporary = target + ".tmp-" + std::to_string(::getpid()) + "-" +
+                    std::to_string(next_temporary_id.fetch_add(1));
+        file = ::openat(directory, temporary.c_str(),
+                        O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+                        0600);
+        if (file >= 0) break;
+        if (errno == EEXIST || errno == EINTR) continue;
+        ::close(directory);
+        error = "cannot create GUI job metadata";
+        return false;
+    }
+    bool ok = ::fchmod(file, 0600) == 0;
+    size_t offset = 0;
+    while (ok && offset < bytes.size()) {
+        const ssize_t count =
+            ::write(file, bytes.data() + offset, bytes.size() - offset);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) {
+            ok = false;
+            break;
+        }
+        offset += static_cast<size_t>(count);
+    }
+    if (ok) ok = ::fsync(file) == 0;
+    if (::close(file) != 0) ok = false;
+    if (ok) ok = ::renameat(directory, temporary.c_str(),
+                            directory, target.c_str()) == 0;
+    if (ok) ok = ::fsync(directory) == 0;
+    if (!ok) {
+        (void)::unlinkat(directory, temporary.c_str(), 0);
+        error = "cannot durably publish GUI job metadata";
+    }
+    ::close(directory);
+    return ok;
+#endif
+}
+
+bool read_gui_job_record(
+    const fs::path& path, const char* expected_header,
+    std::vector<std::string>& fields,
+    std::vector<std::string>& args, std::string& error) {
+    std::error_code ec;
+    const uintmax_t size = fs::file_size(path, ec);
+    if (ec || size > 16u * 1024u * 1024u) {
+        error = "GUI job metadata is missing or too large";
+        return false;
+    }
+    std::ifstream input(path, std::ios::binary);
+    std::string header;
+    uint64_t count = 0;
+    if (!input || !std::getline(input, header) ||
+        header != expected_header) {
+        error = "GUI job metadata is invalid";
+        return false;
+    }
+    fields.assign(17, {});
+    for (std::string& field : fields)
+        if (!read_feature_metadata_string(input, 131072, field)) {
+            error = "GUI job metadata is truncated";
+            return false;
+        }
+    if (!read_feature_metadata_count(input, 4096, count)) {
+        error = "GUI job argument list is invalid";
+        return false;
+    }
+    args.assign(static_cast<size_t>(count), {});
+    for (std::string& arg : args)
+        if (!read_feature_metadata_string(input, 65536, arg)) {
+            error = "GUI job argument list is truncated";
+            return false;
+        }
+    if (input.peek() != std::char_traits<char>::eof()) {
+        error = "GUI job metadata has trailing data";
+        return false;
+    }
+    return true;
+}
+#ifdef SS_TOOL_SFM
+bool import_remote_sparse_model(const fs::path& result_root,
+                                const fs::path& workspace,
+                                const std::string& job_id,
+                                std::string& error) {
+    const fs::path source = result_root / "0";
+    const fs::path sparse = workspace / "sparse";
+    const fs::path target = sparse / "0";
+    const fs::path stage = sparse / (".0.remote-stage-" + job_id);
+    const fs::path backup = sparse / (".0.remote-backup-" + job_id);
+    std::error_code ec;
+    const auto source_status = fs::symlink_status(source, ec);
+    if (ec || !fs::is_directory(source_status) ||
+        fs::is_symlink(source_status)) {
+        error = "leader reconstruction output has no sparse model 0";
+        return false;
+    }
+    fs::create_directories(sparse, ec);
+    if (ec) {
+        error = "cannot create sparse model directory: " + ec.message();
+        return false;
+    }
+    const auto target_status = fs::symlink_status(target, ec);
+    if (!ec && fs::is_symlink(target_status)) {
+        error = "workspace sparse model destination is linked";
+        return false;
+    }
+    ec.clear();
+    const auto backup_status = fs::symlink_status(backup, ec);
+    if (!ec && fs::is_symlink(backup_status)) {
+        error = "workspace sparse model backup is linked";
+        return false;
+    }
+    ec.clear();
+    const bool target_exists = fs::exists(target, ec);
+    if (ec) {
+        error = "cannot inspect workspace sparse model: " + ec.message();
+        return false;
+    }
+    const bool backup_exists = fs::exists(backup, ec);
+    if (ec) {
+        error = "cannot inspect workspace sparse model backup: " + ec.message();
+        return false;
+    }
+    if (!target_exists && backup_exists) {
+        fs::rename(backup, target, ec);
+        if (ec) {
+            error = "cannot recover previous sparse model: " + ec.message();
+            return false;
+        }
+    } else if (target_exists && backup_exists) {
+        fs::remove_all(backup, ec);
+        if (ec) {
+            error = "cannot clean previous sparse model backup: " + ec.message();
+            return false;
+        }
+    }
+    fs::remove_all(stage, ec);
+    if (ec) {
+        error = "cannot clear sparse model staging directory: " + ec.message();
+        return false;
+    }
+    fs::create_directory(stage, ec);
+    if (ec) {
+        error = "cannot stage sparse model import: " + ec.message();
+        return false;
+    }
+    std::set<std::string> files;
+    for (fs::directory_iterator it(source, ec), end; !ec && it != end;
+         it.increment(ec)) {
+        const fs::path path = it->path();
+        const std::string name = path.filename().u8string();
+        const auto status = fs::symlink_status(path, ec);
+        if (ec || fs::is_symlink(status) || !fs::is_regular_file(status) ||
+            (name != "cameras.bin" && name != "images.bin" &&
+             name != "points3D.bin" && name != "gauge.txt" &&
+             name != "rigs.txt")) {
+            error = "leader reconstruction output contains an invalid sparse artifact";
+            fs::remove_all(stage, ec);
+            return false;
+        }
+        if (!files.insert(name).second) {
+            error = "leader reconstruction output repeats a sparse artifact";
+            fs::remove_all(stage, ec);
+            return false;
+        }
+        fs::copy_file(path, stage / name, fs::copy_options::none, ec);
+        if (ec) {
+            error = "cannot copy leader sparse artifact: " + ec.message();
+            fs::remove_all(stage, ec);
+            return false;
+        }
+    }
+    if (ec || !files.count("cameras.bin") || !files.count("images.bin") ||
+        !files.count("points3D.bin")) {
+        error = ec ? "cannot read leader sparse model: " + ec.message()
+                   : "leader sparse model is incomplete";
+        fs::remove_all(stage, ec);
+        return false;
+    }
+    const auto final_status = fs::symlink_status(target, ec);
+    const bool had_target = !ec && fs::exists(final_status);
+    if (ec && ec != std::errc::no_such_file_or_directory) {
+        error = "cannot inspect workspace sparse model: " + ec.message();
+        fs::remove_all(stage, ec);
+        return false;
+    }
+    ec.clear();
+    if (had_target) {
+        fs::rename(target, backup, ec);
+        if (ec) {
+            error = "cannot preserve previous sparse model: " + ec.message();
+            fs::remove_all(stage, ec);
+            return false;
+        }
+    }
+    fs::rename(stage, target, ec);
+    if (ec) {
+        const std::string publish_error = ec.message();
+        if (had_target) {
+            std::error_code restore_error;
+            fs::rename(backup, target, restore_error);
+            if (restore_error)
+                error = "cannot publish sparse model: " + publish_error +
+                        "; cannot restore previous model: " +
+                        restore_error.message();
+            else
+                error = "cannot publish sparse model: " + publish_error;
+        } else {
+            error = "cannot publish sparse model: " + publish_error;
+        }
+        fs::remove_all(stage, ec);
+        return false;
+    }
+    if (had_target) {
+        fs::remove_all(backup, ec);
+        if (ec) {
+            error = "sparse model imported but old model backup remains: " +
+                    ec.message();
+            return false;
+        }
+    }
+    return true;
+}
+#endif
+
+struct RemoteFeatureStateText {
+    const char* raw;
+    const i18n::Msg* translated;
+};
+
+RemoteFeatureStateText remote_feature_state_name(
+    app::agent::LeaderServer::FeatureJobState state) {
+    using State = app::agent::LeaderServer::FeatureJobState;
+    switch (state) {
+        case State::Staging:
+            return {"staging", &amsg::feature_state_staging};
+        case State::Queued:
+            return {"queued", &amsg::feature_state_queued};
+        case State::Offered:
+            return {"offered", &amsg::feature_state_offered};
+        case State::TransferringInputs:
+            return {"transferring inputs",
+                    &amsg::feature_state_transferring_inputs};
+        case State::Running:
+            return {"running", &amsg::service_running};
+        case State::Unknown:
+            return {"unknown", &amsg::unknown};
+        case State::ReceivingOutput:
+            return {"receiving output",
+                    &amsg::feature_state_receiving_output};
+        case State::Succeeded:
+            return {"verified", &amsg::feature_state_verified};
+        case State::Failed:
+            return {"failed", &amsg::service_failed};
+        case State::Interrupted:
+            return {"interrupted", &amsg::feature_state_interrupted};
+        case State::Rejected:
+            return {"rejected", &amsg::command_rejected};
+        case State::Superseded:
+            return {"superseded", &amsg::feature_state_superseded};
+    }
+    return {"unknown", &amsg::unknown};
+}
+
+const Msg& remote_training_state_label(
+    app::agent::LeaderServer::TrainingJobState state) {
+    using State = app::agent::LeaderServer::TrainingJobState;
+    switch (state) {
+        case State::Staging: return amsg::feature_state_staging;
+        case State::Queued: return amsg::feature_state_queued;
+        case State::Offered: return amsg::feature_state_offered;
+        case State::TransferringInputs:
+            return amsg::feature_state_transferring_inputs;
+        case State::Running: return amsg::service_running;
+        case State::Unknown: return amsg::unknown;
+        case State::ReceivingOutput:
+            return amsg::feature_state_receiving_output;
+        case State::Succeeded: return amsg::feature_state_verified;
+        case State::Failed: return amsg::service_failed;
+        case State::Interrupted: return amsg::feature_state_interrupted;
+        case State::Rejected: return amsg::command_rejected;
+        case State::Superseded: return amsg::feature_state_superseded;
+    }
+    return amsg::feature_waiting_snapshot;
+}
+
+bool remote_training_state_terminal(
+    app::agent::LeaderServer::TrainingJobState state) {
+    using State = app::agent::LeaderServer::TrainingJobState;
+    return state == State::Succeeded || state == State::Failed ||
+           state == State::Interrupted || state == State::Rejected ||
+           state == State::Superseded;
+}
+#ifdef SS_TOOL_SFM
+const Msg& remote_reconstruction_state_label(
+    app::agent::LeaderServer::ReconstructionJobState state) {
+    using State = app::agent::LeaderServer::ReconstructionJobState;
+    switch (state) {
+        case State::Staging: return dmsg::remote_state_staging;
+        case State::Queued: return dmsg::remote_state_queued;
+        case State::Offered: return dmsg::remote_state_offered;
+        case State::TransferringInputs: return dmsg::remote_state_transferring;
+        case State::Running: return dmsg::remote_state_running;
+        case State::Unknown: return dmsg::remote_state_unknown;
+        case State::ReceivingOutput: return dmsg::remote_state_receiving;
+        case State::Succeeded: return dmsg::remote_state_succeeded;
+        case State::Failed: return dmsg::remote_state_failed;
+        case State::Interrupted: return dmsg::remote_state_interrupted;
+        case State::Rejected: return dmsg::remote_state_rejected;
+        case State::Superseded: return dmsg::remote_state_superseded;
+    }
+    return dmsg::remote_state_unknown;
+}
+#endif
 std::string phase_arg(const app::sched::Phase& phase, const char* name) {
     for (size_t i = 0; i + 1 < phase.args.size(); ++i)
         if (phase.args[i] == name) return phase.args[i + 1];
@@ -576,6 +1368,86 @@ GuiApp::GuiApp()
         }
     }
     apply_preset("3dgs");
+#ifdef SS_TOOL_SFM
+    for (const app::sched::Job& job : _scheduler.list()) {
+        if (job.options_payload.rfind("gui:remote-reconstruction:v1", 0) != 0 ||
+            scheduler_payload_field(job.options_payload, "role") != "prep")
+            continue;
+        RemoteReconstructionCoordinator c;
+        c.job_id = scheduler_payload_field(job.options_payload, "job");
+        c.prep_job_id = job.job_id;
+        c.metadata_dir =
+            (fs::u8path(job.workspace) / ".remote-reconstruction" / c.job_id)
+                .u8string();
+        std::vector<std::string> fields;
+        std::string recovery_error;
+        if (!valid_remote_feature_id(c.job_id) ||
+            !read_gui_job_record(
+                fs::u8path(c.metadata_dir) / "request.record",
+                "gui:remote-reconstruction:v1",
+                fields, c.request_args, recovery_error) ||
+            fields[0] != c.job_id) {
+            c.failed = true;
+            c.phase = "failed";
+            c.error = recovery_error.empty()
+                          ? "remote reconstruction recovery identity is invalid"
+                          : std::move(recovery_error);
+            _remote_reconstruction_coordinators.push_back(std::move(c));
+            continue;
+        }
+        c.worker_id = fields[1];
+        c.phase = fields[2];
+        c.manifest_path = fields[3];
+        c.manifest_sha256 = fields[4];
+        c.attempt_id = fields[5];
+        c.paired_leader_id = fields[6];
+        c.required_build = fields[7];
+        c.input_identity_sha256 = fields[8];
+        c.cancel_requested = fields[10] == "1";
+        c.error = fields[11];
+        c.prep_result.image_dir = fields[12];
+        c.prep_result.image_dir_cfg = fields[13];
+        c.prep_result.mask_dir = fields[14];
+        c.prep_result.mask_dir_cfg = fields[15];
+        c.prep_result.mask_dir_flipped = fields[16] == "1";
+        c.prep_result_valid = !fields[12].empty();
+        try {
+            size_t used = 0;
+            c.paired_leader_epoch = std::stoull(fields[9], &used);
+            if (used != fields[9].size()) throw std::invalid_argument("epoch");
+        } catch (...) {
+            c.failed = true;
+            c.phase = "failed";
+            c.error = "remote reconstruction recovery identity is invalid";
+        }
+        try {
+            const app::PrepJob frozen =
+                job.phases.empty()
+                    ? throw std::runtime_error("preparation phase is missing")
+                    : app::worker::deserialize_prep_job(
+                          job.phases.front().payload);
+            c.sfm = load_dataset_preset(
+                        (fs::u8path(c.metadata_dir) / "settings.preset")
+                            .u8string()).s.sfm;
+            c.sfm.prep = frozen;
+            c.sfm.device_selector = frozen.device;
+            c.sfm.geometry.device_uuid = frozen.device;
+        } catch (const std::exception& e) {
+            c.failed = true;
+            c.phase = "failed";
+            c.error = std::string("remote reconstruction settings cannot be recovered: ") +
+                      e.what();
+        }
+        c.completed = !c.failed && c.phase == "completed";
+        c.failed = c.failed || c.phase == "failed";
+        if (c.completed) _built_workspace = job.workspace;
+        if (_scheduled_dataset_id.empty() &&
+            !c.completed && !c.failed && c.phase != "cancelled" &&
+            (scheduler_state_live(job.state) || job.pending_resume))
+            _scheduled_dataset_id = job.job_id;
+        _remote_reconstruction_coordinators.push_back(std::move(c));
+    }
+#endif
     {
         std::map<std::string, size_t> by_key;
         bool recovered_batch_ids = false;
@@ -764,12 +1636,69 @@ GuiApp::GuiApp()
                     c.error = "feature-shard coordinator metadata is unavailable";
             }
 #ifdef SS_TOOL_SFM
+            int remote_shard_count = 0;
+            bool assignments_found = false;
+            std::vector<std::string> remote_job_ids;
+            std::vector<std::string> remote_worker_ids;
+            std::vector<std::string> remote_attempt_ids;
+            std::string assignment_error;
+            if (!c.plan_dir.empty() &&
+                !read_remote_feature_assignments(
+                    c.plan_dir, remote_shard_count, remote_job_ids,
+                    remote_worker_ids, remote_attempt_ids, assignments_found,
+                    assignment_error)) {
+                c.failed = true;
+                c.local_failure = true;
+                if (c.error.empty()) c.error = assignment_error;
+            } else if (assignments_found) {
+                const bool count_mismatch =
+                    !c.shard_job_ids.empty() &&
+                    c.shard_job_ids.size() !=
+                        static_cast<size_t>(remote_shard_count);
+                c.effective_shards = remote_shard_count;
+                c.shard_job_ids.resize(static_cast<size_t>(remote_shard_count));
+                c.request_paths.resize(static_cast<size_t>(remote_shard_count));
+                if (count_mismatch) {
+                    c.failed = true;
+                    c.local_failure = true;
+                    if (c.error.empty())
+                        c.error = "remote feature shard count does not match scheduler metadata";
+                } else {
+                    for (size_t shard = 0; shard < remote_job_ids.size(); ++shard) {
+                        if (remote_job_ids[shard].empty()) continue;
+                        if (!c.shard_job_ids[shard].empty()) {
+                            c.failed = true;
+                            c.local_failure = true;
+                            if (c.error.empty())
+                                c.error = "feature shard has both local and remote assignments";
+                            break;
+                        }
+                        c.request_paths[shard] =
+                            feature_request_path(c.plan_dir,
+                                                 static_cast<int>(shard));
+                    }
+                    c.remote_job_ids = std::move(remote_job_ids);
+                    c.remote_worker_ids = std::move(remote_worker_ids);
+                    c.remote_attempt_ids = std::move(remote_attempt_ids);
+                    c.remote_submission_attempted.assign(
+                        static_cast<size_t>(remote_shard_count), false);
+                    c.remote_assignments_persisted = true;
+                }
+            }
+#endif
+            if (!c.shard_job_ids.empty())
+                c.shard_job_ids.resize(static_cast<size_t>(c.effective_shards));
+            if (!c.request_paths.empty())
+                c.request_paths.resize(static_cast<size_t>(c.effective_shards));
+#ifdef SS_TOOL_SFM
             c.shard_images.clear();
             c.expected_images = 0;
             for (const std::string& path : c.request_paths) {
+                if (path.empty()) {
+                    c.shard_images.push_back(0);
+                    continue;
+                }
                 try {
-                    if (path.empty())
-                        throw std::runtime_error("feature-shard request path missing");
                     const auto request =
                         sfm::feature_work::readRequestFile(path);
                     const int images = (int)request.image_indices.size();
@@ -800,11 +1729,13 @@ GuiApp::GuiApp()
         open_pick(PickAction::AddSplatFile, msg::viewer_pick_file.get(),
                   FileDialog::Mode::File, kViewableExtensions);
     });
+    recover_remote_training_assignments();
 }
 
 GuiApp::~GuiApp() = default;
 
 void GuiApp::shutdown() {
+    _agent_panel.shutdown();
     _scheduler.shutdown();
     save_settings();
     save_batch_list(_batch);
@@ -893,6 +1824,10 @@ void GuiApp::load_settings() {
         else if (k == "python_exe" && !v.empty()) _python_exe = v;
         else if (k == "sfm_engine") _engine = v == "colmap" ? Engine::Colmap
                                                             : Engine::BuiltIn;
+#ifdef SS_TOOL_SFM
+        else if (k == "reconstruction_worker")
+            _reconstruction_worker_id = v;
+#endif
         else if (k == "batch_command") _batch_cmd = unescape_setting(v);
         else if (k == "accepted_license" && !v.empty() && !license_accepted(v))
             _accepted_licenses.push_back(v);
@@ -942,6 +1877,10 @@ void GuiApp::save_settings() {
     std::fprintf(f, "python_exe=%s\n", _python_exe.c_str());
     std::fprintf(f, "sfm_engine=%s\n",
                  _engine == Engine::Colmap ? "colmap" : "builtin");
+#ifdef SS_TOOL_SFM
+    std::fprintf(f, "reconstruction_worker=%s\n",
+                 _reconstruction_worker_id.c_str());
+#endif
     std::fprintf(f, "batch_command=%s\n", escape_setting(_batch_cmd).c_str());
     std::fprintf(f, "lang=%s\n", spirula::i18n::code(spirula::i18n::current()));
     std::fprintf(f, "ui_scale=%.3f\n", _scale.user());
@@ -1725,8 +2664,13 @@ void GuiApp::close_native_previews() {
     _geometry_panel.close();
 }
 
-void GuiApp::launch_training(const TrainConfig& cfg, const std::string& preset) {
+void GuiApp::launch_training(const TrainConfig& cfg, const std::string& preset,
+                             bool allow_remote) {
     if (cfg.data.empty() || native_work_busy()) return;
+    if (allow_remote && !_training_worker_id.empty()) {
+        submit_remote_training(cfg, preset);
+        return;
+    }
 #ifdef SS_BACKEND_VULKAN
     if (!freeze_native_device()) return;
 #else
@@ -1749,6 +2693,473 @@ void GuiApp::launch_training(const TrainConfig& cfg, const std::string& preset) 
 
 void GuiApp::start_training() {
     launch_training(_cfg, _preset);
+}
+
+bool GuiApp::persist_remote_training_assignment(
+    RemoteTrainingAssignment& assignment, std::string& error) {
+    const std::vector<std::string> fields{
+        assignment.job_id,
+        assignment.worker_id,
+        remote_training_config_json(assignment.config, assignment.preset),
+        assignment.preset,
+        assignment.resume_checkpoint,
+        assignment.submission_attempted ? "1" : "0",
+        assignment.cancel_requested ? "1" : "0",
+        assignment.paired_leader_id,
+        std::to_string(assignment.paired_leader_epoch),
+        assignment.required_build,
+        assignment.attempt_id,
+        assignment.input_identity_sha256,
+        "", "", "", assignment.identity_mismatch ? "1" : "0",
+        assignment.queue_rejected ? "1" : "0",
+    };
+    if (!write_gui_job_record(fs::u8path(assignment.metadata_path),
+                              "gui:remote-training:v1", fields, {}, error)) {
+        assignment.local_error = error;
+        return false;
+    }
+    assignment.local_error.clear();
+    return true;
+}
+
+bool GuiApp::submit_remote_training(const TrainConfig& cfg,
+                                   const std::string& preset) {
+    if (cfg.data.empty() || native_work_busy() ||
+        !_agent_panel.leader_running() || remote_training_pending())
+        return false;
+    const auto workers = eligible_training_workers(_agent_panel.workers());
+    const auto worker = std::find_if(workers.begin(), workers.end(),
+        [&](const auto& candidate) {
+            return candidate.id == _training_worker_id;
+        });
+    if (worker == workers.end()) return false;
+
+    RemoteTrainingAssignment assignment;
+    assignment.worker_id = worker->id;
+    assignment.preset = preset;
+    assignment.config = cfg;
+    assignment.resume_checkpoint = cfg.resume;
+    assignment.required_build = worker->status.build;
+    assignment.submission_attempted = true;
+    const fs::path record_dir = fs::path(app::config_dir()) / "remote-training";
+    fs::path record;
+    std::error_code ec;
+    do {
+        assignment.job_id = new_remote_training_id();
+        record = record_dir / (assignment.job_id + ".record");
+        if (fs::exists(record, ec) && !ec) continue;
+        if (ec) {
+            assignment.local_error =
+                "cannot inspect remote training assignment path: " +
+                ec.message();
+            assignment.queue_rejected = true;
+            _remote_training_assignments.push_back(std::move(assignment));
+            return false;
+        }
+        break;
+    } while (true);
+    assignment.metadata_path = record.u8string();
+    std::string error;
+    if (!persist_remote_training_assignment(assignment, error)) {
+        assignment.queue_rejected = true;
+        _remote_training_assignments.push_back(std::move(assignment));
+        return false;
+    }
+
+    AgentPanel::TrainingSubmission submission;
+    submission.worker_id = assignment.worker_id;
+    submission.job_id = assignment.job_id;
+    submission.config = assignment.config;
+    submission.preset = assignment.preset;
+    submission.resume_checkpoint = fs::u8path(assignment.resume_checkpoint);
+    submission.disk_budget_bytes = uint64_t{1} << 40;
+    if (!_agent_panel.submit_training(std::move(submission))) {
+        assignment.queue_rejected = true;
+        assignment.local_error.clear();
+        persist_remote_training_assignment(assignment, error);
+    }
+    _training_worker_id.clear();
+    _remote_training_assignments.push_back(std::move(assignment));
+    return true;
+}
+
+void GuiApp::recover_remote_training_assignments() {
+    const fs::path root = fs::path(app::config_dir()) / "remote-training";
+    std::error_code ec;
+    fs::directory_iterator it(root, ec), end;
+    while (!ec && it != end) {
+        const fs::directory_entry entry = *it;
+        it.increment(ec);
+        if (ec || entry.path().extension() != ".record") continue;
+        const fs::file_status status = entry.symlink_status(ec);
+        if (ec || fs::is_symlink(status) || !fs::is_regular_file(status))
+            continue;
+
+        RemoteTrainingAssignment assignment;
+        assignment.metadata_path = entry.path().u8string();
+        assignment.job_id = entry.path().stem().string();
+        std::vector<std::string> fields, args;
+        std::string error;
+        try {
+            if (!valid_remote_training_id(assignment.job_id) ||
+                !read_gui_job_record(entry.path(), "gui:remote-training:v1",
+                                     fields, args, error) ||
+                fields[0] != assignment.job_id || !args.empty())
+                throw std::runtime_error(error.empty()
+                    ? "remote training assignment identity is invalid"
+                    : error);
+            const JsonValue document = json_parse(fields[2]);
+            const JsonValue* recorded_preset = document.find("preset");
+            if (!document.is_object() || !train_config_json_has_fields(document) ||
+                !recorded_preset ||
+                recorded_preset->as_string() != fields[3] ||
+                (fields[5] != "0" && fields[5] != "1") ||
+                (fields[6] != "0" && fields[6] != "1") ||
+                (fields[15] != "0" && fields[15] != "1") ||
+                (fields[16] != "0" && fields[16] != "1"))
+                throw std::runtime_error("remote training assignment is malformed");
+            assignment.worker_id = fields[1];
+            assignment.preset = fields[3];
+            assignment.resume_checkpoint = fields[4];
+            assignment.submission_attempted = fields[5] == "1";
+            assignment.cancel_requested = fields[6] == "1";
+            assignment.paired_leader_id = fields[7];
+            size_t epoch_end = 0;
+            assignment.paired_leader_epoch =
+                std::stoull(fields[8], &epoch_end);
+            if (epoch_end != fields[8].size())
+                throw std::runtime_error("remote leader epoch is invalid");
+            assignment.required_build = fields[9];
+            assignment.attempt_id = fields[10];
+            assignment.input_identity_sha256 = fields[11];
+            assignment.identity_mismatch = fields[15] == "1";
+            assignment.queue_rejected = fields[16] == "1";
+            train_config_from_json(document, assignment.config);
+            if (assignment.worker_id.empty() || !assignment.submission_attempted ||
+                assignment.config.resume != assignment.resume_checkpoint)
+                throw std::runtime_error(
+                    "remote training assignment is incomplete");
+        } catch (const std::exception& e) {
+            assignment.identity_mismatch = true;
+            assignment.submission_attempted = true;
+            assignment.local_error = e.what();
+        }
+        _remote_training_assignments.push_back(std::move(assignment));
+    }
+    std::sort(_remote_training_assignments.begin(),
+              _remote_training_assignments.end(),
+              [](const auto& a, const auto& b) {
+                  return a.job_id < b.job_id;
+              });
+    const auto latest = std::find_if(
+        _remote_training_assignments.rbegin(),
+        _remote_training_assignments.rend(),
+        [](const auto& assignment) {
+            return !assignment.identity_mismatch &&
+                   !assignment.config.data.empty();
+        });
+    if (latest != _remote_training_assignments.rend()) {
+        apply_preset(latest->preset);
+        _cfg = latest->config;
+        _cfg_ui.touched.clear();
+        for (const auto& [key, value] : train_config_json_pairs(_cfg))
+            _cfg_ui.touched.insert(key);
+        _preset = latest->preset;
+        _screen = Screen::Train;
+        _runner.load_dataset(_cfg, _preset);
+    }
+}
+
+void GuiApp::advance_remote_training() {
+    const auto jobs = _agent_panel.training_jobs();
+    for (RemoteTrainingAssignment& assignment :
+         _remote_training_assignments) {
+        if (assignment.identity_mismatch) continue;
+        bool changed = false;
+        const std::string operation_error =
+            _agent_panel.training_error(assignment.job_id);
+        if (!operation_error.empty()) {
+            assignment.local_error = operation_error;
+            if (assignment.cancel_requested) {
+                assignment.supersede_queued = false;
+            } else if (!assignment.queue_rejected) {
+                assignment.queue_rejected = true;
+                changed = true;
+            }
+        }
+        auto found = jobs.end();
+        for (auto it = jobs.begin(); it != jobs.end(); ++it) {
+            if (it->job_id == assignment.job_id &&
+                (found == jobs.end() || it->current)) {
+                found = it;
+                if (it->current) break;
+            }
+        }
+        if (found == jobs.end()) {
+            assignment.snapshot.reset();
+            if (changed) {
+                std::string error;
+                persist_remote_training_assignment(assignment, error);
+            }
+            continue;
+        }
+        const auto& snapshot = *found;
+        if (!snapshot.current) {
+            assignment.snapshot = snapshot;
+            if (changed) {
+                std::string error;
+                persist_remote_training_assignment(assignment, error);
+            }
+            continue;
+        }
+        auto mismatch = [&] {
+            assignment.identity_mismatch = true;
+            assignment.snapshot = snapshot;
+            std::string error;
+            persist_remote_training_assignment(assignment, error);
+        };
+        if (snapshot.worker_id != assignment.worker_id ||
+            (!assignment.required_build.empty() &&
+             snapshot.required_build != assignment.required_build) ||
+            (!assignment.paired_leader_id.empty() &&
+             snapshot.paired_leader_id != assignment.paired_leader_id) ||
+            (assignment.paired_leader_epoch != 0 &&
+             snapshot.paired_leader_epoch != assignment.paired_leader_epoch) ||
+            (!assignment.attempt_id.empty() &&
+             snapshot.attempt_id != assignment.attempt_id) ||
+            (!assignment.input_identity_sha256.empty() &&
+             snapshot.input_identity_sha256 !=
+                 assignment.input_identity_sha256)) {
+            mismatch();
+            continue;
+        }
+        auto freeze_string = [&](std::string& target,
+                                 const std::string& value) {
+            if (target.empty() && !value.empty()) {
+                target = value;
+                changed = true;
+            }
+        };
+        freeze_string(assignment.paired_leader_id,
+                      snapshot.paired_leader_id);
+        if (!assignment.paired_leader_epoch &&
+            snapshot.paired_leader_epoch) {
+            assignment.paired_leader_epoch = snapshot.paired_leader_epoch;
+            changed = true;
+        }
+        freeze_string(assignment.attempt_id, snapshot.attempt_id);
+        freeze_string(assignment.input_identity_sha256,
+                      snapshot.input_identity_sha256);
+        assignment.snapshot = snapshot;
+        if (assignment.queue_rejected) {
+            assignment.queue_rejected = false;
+            changed = true;
+        }
+        if (operation_error.empty()) assignment.local_error.clear();
+        if (changed) {
+            std::string error;
+            persist_remote_training_assignment(assignment, error);
+        }
+    }
+}
+
+bool GuiApp::remote_training_pending() const {
+    return std::any_of(_remote_training_assignments.begin(),
+                       _remote_training_assignments.end(),
+        [](const RemoteTrainingAssignment& assignment) {
+            return !assignment.queue_rejected &&
+                   (!assignment.snapshot ||
+                    !remote_training_state_terminal(
+                        assignment.snapshot->state));
+        });
+}
+
+void GuiApp::resume_remote_training(const std::string& job_id) {
+    const auto found = std::find_if(
+        _remote_training_assignments.begin(),
+        _remote_training_assignments.end(),
+        [&](const auto& assignment) {
+            return assignment.job_id == job_id;
+        });
+    if (found == _remote_training_assignments.end() ||
+        found->identity_mismatch || found->cancel_requested ||
+        !found->snapshot || !found->snapshot->current ||
+        found->snapshot->state !=
+            app::agent::LeaderServer::TrainingJobState::Succeeded ||
+        training_busy() || native_work_busy() || _batch_active)
+        return;
+    const auto& snapshot = *found->snapshot;
+    TrainConfig config = snapshot.resume_config;
+    config.resume = snapshot.checkpoint_dir.u8string();
+    std::error_code ec;
+    if (snapshot.checkpoint_dir.empty() ||
+        !fs::is_directory(snapshot.checkpoint_dir, ec) || ec ||
+        config.data.empty() || !fs::exists(fs::u8path(config.data), ec) || ec) {
+        found->local_error = amsg::remote_training_checkpoint_unavailable.get();
+        return;
+    }
+    const std::string preset = found->preset;
+    _cfg = config;
+    _preset = preset;
+    _training_worker_id.clear();
+    save_settings();
+    _screen = Screen::Train;
+    launch_training(config, preset, false);
+}
+
+void GuiApp::draw_remote_training_controls() {
+    const auto workers = _agent_panel.leader_running()
+        ? eligible_training_workers(_agent_panel.workers())
+        : std::vector<app::agent::LeaderServer::WorkerSnapshot>{};
+    const auto selected = std::find_if(workers.begin(), workers.end(),
+        [&](const auto& worker) { return worker.id == _training_worker_id; });
+    const std::string preview = _training_worker_id.empty()
+        ? amsg::remote_training_local.get()
+        : selected == workers.end()
+            ? _training_worker_id
+            : (selected->label.empty()
+                ? selected->id
+                : selected->label + " [" + selected->id + "]");
+
+    ui::Text(amsg::remote_training_worker);
+    ImGui::SetNextItemWidth(-1.0f);
+    ImGui::BeginDisabled(training_busy() || _batch_active);
+    if (ImGui::BeginCombo("##remote-training-worker", preview.c_str())) {
+        if (ImGui::Selectable(amsg::remote_training_local.get(),
+                              _training_worker_id.empty())) {
+            _training_worker_id.clear();
+        }
+        for (const auto& worker : workers) {
+            ImGui::PushID(worker.id.c_str());
+            const std::string label = worker.label.empty()
+                ? worker.id
+                : worker.label + " [" + worker.id + "]";
+            if (ImGui::Selectable(label.c_str(),
+                                  worker.id == _training_worker_id)) {
+                _training_worker_id = worker.id;
+            }
+            if (worker.id == _training_worker_id)
+                ImGui::SetItemDefaultFocus();
+            ImGui::PopID();
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::EndDisabled();
+    ui::help_on_hover(amsg::remote_training_worker_help);
+    if (_training_worker_id.empty()) {
+        if (_agent_panel.leader_running() && workers.empty())
+            ui::TextDisabled(amsg::remote_training_no_workers);
+    } else if (!_agent_panel.leader_running()) {
+        ui::TextColoredWrapped(kWarn,
+                               amsg::remote_training_leader_unavailable);
+    } else if (selected == workers.end()) {
+        ui::TextColoredWrapped(kWarn,
+                               amsg::remote_training_worker_unavailable);
+    }
+
+    if (_remote_training_assignments.empty()) return;
+    ui::SeparatorText(amsg::remote_training_jobs);
+    using State = app::agent::LeaderServer::TrainingJobState;
+    for (RemoteTrainingAssignment& assignment :
+         _remote_training_assignments) {
+        ImGui::PushID(assignment.job_id.c_str());
+        ui::Text(amsg::remote_training_assignment,
+                 {assignment.worker_id, assignment.job_id});
+        if (assignment.identity_mismatch) {
+            ui::TextColoredWrapped(kErr,
+                                   amsg::remote_training_assignment_mismatch);
+        } else if (assignment.snapshot) {
+            const Msg& state = !assignment.snapshot->current
+                ? amsg::feature_state_superseded
+                : remote_training_state_label(assignment.snapshot->state);
+            ui::TextColored(kDim, state);
+        } else if (assignment.queue_rejected) {
+            ui::TextColoredWrapped(kWarn,
+                assignment.local_error.empty()
+                    ? amsg::remote_training_queue_rejected
+                    : amsg::command_rejected);
+        } else if (!_agent_panel.leader_running()) {
+            ui::TextColoredWrapped(kWarn,
+                                   amsg::remote_training_leader_unavailable);
+        } else {
+            ui::TextColored(kDim, amsg::feature_waiting_snapshot);
+        }
+        if (assignment.cancel_requested) {
+            if (assignment.snapshot &&
+                remote_training_state_terminal(assignment.snapshot->state)) {
+                ui::TextColored(kDim,
+                    amsg::remote_training_cancelled_no_resume);
+            } else {
+                ui::TextColoredWrapped(kWarn,
+                    amsg::remote_training_cancelling);
+        }
+        }
+        if (!assignment.local_error.empty())
+            ui::TextColoredWrappedRaw(kErr, assignment.local_error);
+        if (assignment.snapshot && !assignment.snapshot->error.empty())
+            ui::TextColoredWrappedRaw(kErr, assignment.snapshot->error);
+
+        const bool succeeded = !assignment.identity_mismatch &&
+            !assignment.cancel_requested && assignment.snapshot &&
+            assignment.snapshot->current &&
+            assignment.snapshot->state == State::Succeeded;
+        bool checkpoint_available = false, dataset_available = false;
+        if (succeeded) {
+            std::error_code ec;
+            checkpoint_available = !assignment.snapshot->checkpoint_dir.empty() &&
+                fs::is_directory(assignment.snapshot->checkpoint_dir, ec) && !ec;
+            ec.clear();
+            dataset_available = !assignment.snapshot->resume_config.data.empty() &&
+                fs::exists(
+                    fs::u8path(assignment.snapshot->resume_config.data), ec) &&
+                !ec;
+            if (checkpoint_available && dataset_available) {
+                ui::TextColoredWrapped(kOk,
+                                       amsg::remote_training_verified);
+                ui::TextDisabled(amsg::remote_training_checkpoint,
+                    {assignment.snapshot->checkpoint_dir.u8string()});
+                ui::TextDisabled(amsg::remote_training_dataset,
+                    {assignment.snapshot->resume_config.data});
+            } else {
+                ui::TextColoredWrapped(
+                    kWarn, amsg::remote_training_checkpoint_unavailable);
+            }
+        } else if (assignment.cancel_requested &&
+                   assignment.snapshot &&
+                   assignment.snapshot->state == State::Succeeded) {
+            ui::TextColoredWrapped(kDim,
+                                   amsg::remote_training_cancelled_no_resume);
+        }
+
+        if (!assignment.identity_mismatch && !assignment.queue_rejected &&
+            !assignment.supersede_queued &&
+            (!assignment.snapshot ||
+             !remote_training_state_terminal(assignment.snapshot->state))) {
+            if (ui::Button(amsg::remote_training_cancel)) {
+                assignment.cancel_requested = true;
+                std::string error;
+                if (persist_remote_training_assignment(assignment, error)) {
+                    if (_agent_panel.supersede_training(assignment.job_id)) {
+                        assignment.supersede_queued = true;
+                        assignment.local_error.clear();
+                    } else {
+                        assignment.local_error =
+                            amsg::remote_training_cancel_not_queued.get();
+                    }
+                }
+            }
+        }
+        if (succeeded) {
+            ImGui::BeginDisabled(!checkpoint_available ||
+                                 !dataset_available ||
+                                 training_busy() || native_work_busy() ||
+                                 _batch_active);
+            if (ui::Button(amsg::remote_training_resume_locally))
+                resume_remote_training(assignment.job_id);
+            ImGui::EndDisabled();
+        }
+        ImGui::PopID();
+    }
 }
 
 void GuiApp::detach_session_views() {
@@ -1808,6 +3219,615 @@ const app::sched::Job* GuiApp::scheduler_job(const std::string& id) const {
     return nullptr;
 }
 
+#ifdef SS_TOOL_SFM
+bool GuiApp::persist_remote_reconstruction(
+    RemoteReconstructionCoordinator& c, std::string& error) {
+    const std::vector<std::string> fields = {
+        c.job_id, c.worker_id, c.phase, c.manifest_path, c.manifest_sha256,
+        c.attempt_id, c.paired_leader_id, c.required_build,
+        c.input_identity_sha256, std::to_string(c.paired_leader_epoch),
+        c.cancel_requested ? "1" : "0", c.error,
+        c.prep_result.image_dir, c.prep_result.image_dir_cfg,
+        c.prep_result.mask_dir, c.prep_result.mask_dir_cfg,
+        c.prep_result.mask_dir_flipped ? "1" : "0"};
+    return write_gui_job_record(
+        fs::u8path(c.metadata_dir) / "request.record",
+        "gui:remote-reconstruction:v1", fields, c.request_args, error);
+}
+
+bool GuiApp::submit_remote_reconstruction_prep(
+    const SfmJob& sfm_job, const PrepJob& frozen,
+    const std::string& work_dir, const std::string& device,
+    const std::string& device_name) {
+    RemoteReconstructionCoordinator c;
+    c.worker_id = _reconstruction_worker_id;
+    c.metadata_dir =
+        (fs::absolute(fs::u8path(frozen.workspace)) /
+         ".remote-reconstruction" /
+         ("reconstruction-" + sfm::feature_work::sha256Text(
+             fs::absolute(fs::u8path(frozen.workspace)).lexically_normal()
+                     .u8string() +
+                 ":" + std::to_string(
+                           std::chrono::high_resolution_clock::now()
+                               .time_since_epoch().count()))
+                                   .substr(0, 32)))
+            .u8string();
+    c.job_id = fs::u8path(c.metadata_dir).filename().u8string();
+    c.phase = "preparing";
+    c.sfm = sfm_job;
+    c.sfm.prep = frozen;
+    c.sfm.device_selector = device;
+    c.sfm.geometry.device_uuid = device;
+
+    std::string error;
+    std::error_code ec;
+    fs::create_directories(fs::u8path(c.metadata_dir), ec);
+    if (ec) {
+        error = "cannot create remote reconstruction workspace metadata: " +
+                ec.message();
+        log(error);
+        return false;
+    }
+    try {
+        DatasetPreset settings;
+        settings.name = "remote-reconstruction";
+        settings.s.sfm = c.sfm;
+        save_dataset_preset(
+            settings,
+            (fs::u8path(c.metadata_dir) / "settings.preset").u8string());
+    } catch (const std::exception& e) {
+        log(e.what());
+        return false;
+    }
+    if (!persist_remote_reconstruction(c, error)) {
+        log(error);
+        return false;
+    }
+
+    app::sched::WorkflowSubmitOpts submit;
+    submit.work_dir = work_dir;
+    submit.workspace = frozen.workspace;
+    submit.options_payload = "gui:remote-reconstruction:v1\nrole=prep\njob=" +
+                             c.job_id;
+    submit.add_scheduler_publish = false;
+    const std::vector<fs::path> source_roots = prep_source_roots(frozen.inputs);
+    for (const fs::path& source : source_roots)
+        submit.source_paths.push_back(source.u8string());
+    if (!bind_project_reference(
+            static_cast<app::worker::ProjectReference&>(submit),
+            frozen.workspace, source_roots,
+            project_consumed_artifacts(frozen.workspace, frozen.inputs),
+            error)) {
+        c.phase = "failed";
+        c.error = error;
+        (void)persist_remote_reconstruction(c, error);
+        log(c.error);
+        return false;
+    }
+    const app::sched::PathClaim workspace_claim{frozen.workspace, true};
+    submit.path_claims.push_back(workspace_claim);
+    for (const fs::path& source : source_roots) {
+        const app::sched::PathClaim source_claim{source.u8string(), false};
+        if (!app::sched::path_claims_conflict(source_claim, workspace_claim))
+            submit.path_claims.push_back(source_claim);
+    }
+    app::sched::Phase prep;
+    prep.phase = "prep";
+    if (!app::reads_photos_in_place(frozen.inputs, frozen.photo_import))
+        prep.output = app::planned_prep(frozen).image_dir;
+    prep.planned_device = device;
+    prep.planned_device_name = device_name;
+    prep.payload = app::worker::serialize_prep_job(frozen);
+    submit.phases.push_back(std::move(prep));
+    c.prep_job_id = _scheduler.submit(submit);
+    if (c.prep_job_id.empty()) {
+        c.phase = "failed";
+        c.error = _scheduler.state_error();
+        std::string persist_error;
+        (void)persist_remote_reconstruction(c, persist_error);
+        log(c.error);
+        return false;
+    }
+    _remote_reconstruction_coordinators.push_back(std::move(c));
+    _scheduled_dataset_id = _remote_reconstruction_coordinators.back().prep_job_id;
+    _scheduler.pause_dispatch(false);
+    close_native_previews();
+    close_splat();
+    app::set_crash_note("building dataset " + frozen.workspace);
+    reset_dataset_preview(false);
+    _redo_frames = _redo_masks = _redo_model = _redo_geometry = false;
+    return true;
+}
+void GuiApp::advance_remote_reconstructions() {
+    using Snapshot = app::agent::LeaderServer::ReconstructionJobSnapshot;
+    using State = app::agent::LeaderServer::ReconstructionJobState;
+#ifdef SS_VERSION
+    const std::string build = SS_VERSION;
+#else
+    const std::string build = "unknown";
+#endif
+    const bool leader_running = _agent_panel.leader_running();
+    const auto workers = leader_running
+        ? eligible_reconstruction_workers(_agent_panel.workers())
+        : std::vector<app::agent::LeaderServer::WorkerSnapshot>{};
+    const auto snapshots = leader_running
+        ? _agent_panel.reconstruction_jobs()
+        : std::vector<Snapshot>{};
+    auto set_failure = [&](RemoteReconstructionCoordinator& c,
+                           const std::string& why) {
+        c.failed = true;
+        c.phase = "failed";
+        c.error = why;
+        std::string persist_error;
+        if (!persist_remote_reconstruction(c, persist_error))
+            c.error += "; " + persist_error;
+    };
+    auto prepare_request = [&](RemoteReconstructionCoordinator& c,
+                               const PrepResult& prep) {
+        try {
+            std::string manifest_payload;
+            const std::vector<std::string> scheduled =
+                _sfm.scheduler_args(c.sfm, prep, manifest_payload);
+            std::vector<std::string> args;
+            args.reserve(scheduled.size());
+            for (size_t i = 0; i < scheduled.size(); ++i) {
+                if (i == 0 && scheduled[i] == "auto") continue;
+                if (scheduled[i] == "--progress-dir") {
+                    if (i + 1 >= scheduled.size())
+                        throw std::runtime_error(
+                            "frozen SfM arguments have an incomplete progress option");
+                    ++i;
+                    continue;
+                }
+                if (scheduled[i] == "--manifest" &&
+                    i + 1 < scheduled.size()) {
+                    const fs::path path =
+                        fs::u8path(c.metadata_dir) / "source-manifest.yaml";
+                    std::string manifest = manifest_payload;
+                    if (!manifest.empty()) {
+                        const fs::path seed =
+                            fs::u8path(c.metadata_dir) / "manifest-seed.yaml";
+                        if (const std::string write_error =
+                                app::write_text_file(seed, manifest);
+                            !write_error.empty())
+                            throw std::runtime_error(write_error);
+                        sfm::Manifest portable =
+                            sfm::manifest_read(seed.u8string());
+                        fs::create_directories(
+                            fs::u8path(c.metadata_dir) / "telemetry");
+                        std::map<std::string, std::string> telemetry;
+                        for (size_t n = 0; n < portable.captures.size(); ++n) {
+                            sfm::ManifestCapture& capture = portable.captures[n];
+                            if (capture.telemetry.empty()) continue;
+                            const auto existing =
+                                telemetry.find(capture.telemetry);
+                            if (existing != telemetry.end()) {
+                                capture.telemetry = existing->second;
+                                continue;
+                            }
+                            fs::path source = fs::u8path(capture.telemetry);
+                            if (source.is_relative())
+                                source = fs::absolute(source);
+                            source = source.lexically_normal();
+                            std::ostringstream name;
+                            name << "telemetry/" << std::setw(8)
+                                 << std::setfill('0') << telemetry.size()
+                                 << ".bin";
+                            const fs::path target =
+                                fs::u8path(c.metadata_dir) / name.str();
+                            std::error_code copy_error;
+                            if (!fs::is_regular_file(source, copy_error) ||
+                                copy_error)
+                                throw std::runtime_error(
+                                    "video telemetry source is unavailable: " +
+                                    source.u8string());
+                            fs::copy_file(source, target,
+                                          fs::copy_options::overwrite_existing,
+                                          copy_error);
+                            if (copy_error)
+                                throw std::runtime_error(
+                                    "cannot freeze video telemetry: " +
+                                    copy_error.message());
+                            const std::string relative = name.str();
+                            telemetry.emplace(capture.telemetry, relative);
+                            capture.telemetry = relative;
+                        }
+                        manifest = sfm::manifest_write(portable);
+                        if (manifest.empty())
+                            throw std::runtime_error(
+                                "cannot serialize portable source manifest");
+                        if (const std::string write_error =
+                                app::write_text_file(path, manifest);
+                            !write_error.empty())
+                            throw std::runtime_error(write_error);
+                        c.manifest_path = path.u8string();
+                        c.manifest_sha256 =
+                            sfm::feature_work::sha256Text(manifest);
+                    }
+                    args.push_back("--manifest");
+                    args.push_back(manifest.empty() ? scheduled[++i]
+                                                    : c.manifest_path);
+                    if (manifest.empty())
+                        c.manifest_path.clear();
+                    continue;
+                }
+                args.push_back(scheduled[i]);
+            }
+            sfm::AutoRequest request;
+            if (const std::string parse_error =
+                    sfm::parse_auto_args(args, request, false);
+                !parse_error.empty())
+                throw std::runtime_error(parse_error);
+            if (request.in.feature_plan.size() ||
+                !request.progress_dir.empty() ||
+                request.cfg.device_request_set ||
+                !request.cfg.device_request.empty() ||
+                request.wants_help)
+                throw std::runtime_error(
+                    "remote whole-SfM does not support a feature plan, "
+                    "progress directory, help request, or source device");
+            c.prep_result = prep;
+            c.prep_result_valid = true;
+            c.request_args = std::move(args);
+            c.phase = "prepared";
+            c.error.clear();
+            std::string persist_error;
+            if (!persist_remote_reconstruction(c, persist_error))
+                throw std::runtime_error(persist_error);
+            return true;
+        } catch (const std::exception& e) {
+            set_failure(c, e.what());
+            return false;
+        }
+    };
+
+    for (RemoteReconstructionCoordinator& c :
+         _remote_reconstruction_coordinators) {
+        if (c.completed || c.failed || c.phase == "cancelled") continue;
+        if (c.completion_started) {
+            if (c.cancel_requested && _sfm.state() == SfmRunner::State::Running)
+                _sfm.cancel();
+            if (c.cancel_requested && leader_running) {
+                if (!c.supersede_queued)
+                    c.supersede_queued =
+                        _agent_panel.supersede_reconstruction(c.job_id);
+                const std::string error =
+                    _agent_panel.reconstruction_error(c.job_id);
+                if (!error.empty()) {
+                    c.error = error;
+                    c.supersede_queued = false;
+                }
+            }
+            if (_sfm.state() == SfmRunner::State::Done) {
+                if (c.cancel_requested) {
+                    c.completion_started = false;
+                    c.phase = "cancel_requested";
+                } else {
+                    c.completed = true;
+                    c.phase = "completed";
+                    c.error.clear();
+                    std::string error;
+                    if (!persist_remote_reconstruction(c, error))
+                        c.error = error;
+                    _built_workspace = c.sfm.prep.workspace;
+                    continue;
+                }
+            } else if (_sfm.state() == SfmRunner::State::Failed ||
+                       _sfm.state() == SfmRunner::State::Cancelled) {
+                if (c.cancel_requested) {
+                    c.completion_started = false;
+                    c.phase = "cancel_requested";
+                } else {
+                    c.failed = true;
+                    c.phase = "failed";
+                    c.error = _sfm.error();
+                }
+                std::string error;
+                if (!persist_remote_reconstruction(c, error) &&
+                    c.error.empty())
+                    c.error = error;
+                if (!c.cancel_requested) continue;
+            }
+            if (c.completion_started) continue;
+            continue;
+        }
+
+        const app::sched::Job* prep_job = scheduler_job(c.prep_job_id);
+        if (c.request_args.empty()) {
+            if (c.cancel_requested) {
+                if (prep_job && scheduler_state_live(prep_job->state)) continue;
+                c.phase = "cancelled";
+                c.error.clear();
+                std::string error;
+                (void)persist_remote_reconstruction(c, error);
+                continue;
+            }
+            if (!prep_job) {
+                set_failure(c, "remote reconstruction preparation job is missing");
+                continue;
+            }
+            if (prep_job->state == app::sched::JobState::Succeeded) {
+                try {
+                    if (prep_job->phases.empty())
+                        throw std::runtime_error(
+                            "preparation phase is missing");
+                    const app::sched::Phase& phase = prep_job->phases.front();
+                    const app::PrepJob frozen =
+                        app::worker::deserialize_prep_job(phase.payload);
+                    const PrepResult actual = app::resolve_prep_outputs(
+                        app::planned_prep(frozen), phase.outputs);
+                    c.sfm.prep = frozen;
+                    c.prep_result = actual;
+                    c.prep_result_valid = true;
+                    if (!prepare_request(c, actual)) continue;
+                    if (_scheduled_dataset_id == c.prep_job_id)
+                        _scheduled_dataset_id.clear();
+                } catch (const std::exception& e) {
+                    set_failure(c, e.what());
+                    continue;
+                }
+            } else if (scheduler_state_failed(prep_job->state) &&
+                       !prep_job->pending_resume) {
+                if (c.cancel_requested) {
+                    c.phase = "cancelled";
+                    c.error.clear();
+                    std::string error;
+                    (void)persist_remote_reconstruction(c, error);
+                } else {
+                    set_failure(c, prep_job->error.empty()
+                                       ? "local preparation did not complete"
+                                       : prep_job->error);
+                }
+                continue;
+            } else {
+                continue;
+            }
+        } else if (!c.prep_result_valid && prep_job &&
+                   !prep_job->phases.empty()) {
+            try {
+                const app::sched::Phase& phase = prep_job->phases.front();
+                const app::PrepJob frozen =
+                    app::worker::deserialize_prep_job(phase.payload);
+                c.prep_result = app::resolve_prep_outputs(
+                    app::planned_prep(frozen), phase.outputs);
+                c.prep_result_valid = true;
+            } catch (const std::exception& e) {
+                set_failure(c, e.what());
+                continue;
+            }
+        }
+
+        if (c.cancel_requested && c.phase == "prepared") {
+            c.phase = "cancelled";
+            c.error.clear();
+            std::string error;
+            (void)persist_remote_reconstruction(c, error);
+            continue;
+        }
+
+        auto snapshot = std::find_if(
+            snapshots.begin(), snapshots.end(),
+            [&](const Snapshot& item) {
+                return item.job_id == c.job_id && item.current;
+            });
+        if (snapshot == snapshots.end())
+            snapshot = std::find_if(
+                snapshots.begin(), snapshots.end(),
+                [&](const Snapshot& item) { return item.job_id == c.job_id; });
+        if (snapshot == snapshots.end()) {
+            c.has_snapshot = false;
+            const std::string operation_error =
+                _agent_panel.reconstruction_error(c.job_id);
+            if (!operation_error.empty()) c.error = operation_error;
+            if (c.cancel_requested) {
+                if (c.required_build.empty()) {
+                    c.phase = "cancelled";
+                    c.error.clear();
+                    std::string error;
+                    (void)persist_remote_reconstruction(c, error);
+                } else if (leader_running) {
+                    if (!c.supersede_queued)
+                        c.supersede_queued =
+                            _agent_panel.supersede_reconstruction(c.job_id);
+                    if (!operation_error.empty()) {
+                        c.supersede_queued = false;
+                        c.error = operation_error;
+                    }
+                }
+                continue;
+            }
+            if (c.phase == "prepared") {
+                if (!leader_running) continue;
+                const bool worker_ready = std::any_of(
+                    workers.begin(), workers.end(),
+                    [&](const auto& worker) { return worker.id == c.worker_id; });
+                if (!worker_ready) continue;
+                sfm::AutoRequest request;
+                if (const std::string parse_error =
+                        sfm::parse_auto_args(c.request_args, request, false);
+                    !parse_error.empty()) {
+                    set_failure(c, parse_error);
+                    continue;
+                }
+                c.required_build = build;
+                c.phase = "submission_possible";
+                std::string persist_error;
+                if (!persist_remote_reconstruction(c, persist_error)) {
+                    set_failure(c, persist_error);
+                    continue;
+                }
+                AgentPanel::ReconstructionSubmission submission;
+                submission.worker_id = c.worker_id;
+                submission.job_id = c.job_id;
+                submission.request = std::move(request);
+                submission.source_manifest = c.manifest_path;
+                submission.disk_budget_bytes = uint64_t{1} << 40;
+                if (_agent_panel.submit_reconstruction(std::move(submission))) {
+                    c.phase = "submitted";
+                    c.error.clear();
+                    if (!persist_remote_reconstruction(c, persist_error))
+                        c.error = persist_error;
+                } else {
+                    c.phase = "prepared";
+                    (void)persist_remote_reconstruction(c, persist_error);
+                }
+            }
+            continue;
+        }
+
+        const Snapshot& remote = *snapshot;
+        c.has_snapshot = true;
+        c.remote_state = remote.state;
+        if (remote.job_id != c.job_id || remote.worker_id != c.worker_id ||
+            remote.required_build != build ||
+            remote.required_build != c.required_build ||
+            remote.source_manifest_sha256 != c.manifest_sha256 ||
+            remote.attempt_id.empty() ||
+            (!remote.current && remote.state != State::Superseded) ||
+            (c.attempt_id.size() && c.attempt_id != remote.attempt_id) ||
+            (!c.paired_leader_id.empty() &&
+             c.paired_leader_id != remote.paired_leader_id) ||
+            (c.paired_leader_epoch &&
+             c.paired_leader_epoch != remote.paired_leader_epoch) ||
+            (!c.input_identity_sha256.empty() &&
+             c.input_identity_sha256 != remote.input_identity_sha256) ||
+            remote.paired_leader_id.empty() ||
+            !remote.paired_leader_epoch ||
+            remote.input_identity_sha256.empty()) {
+            set_failure(c, "leader reconstruction identity does not match the frozen request");
+            continue;
+        }
+        bool identity_changed = false;
+        if (c.attempt_id.empty()) {
+            c.attempt_id = remote.attempt_id;
+            identity_changed = true;
+        }
+        if (c.paired_leader_id.empty()) {
+            c.paired_leader_id = remote.paired_leader_id;
+            identity_changed = true;
+        }
+        if (!c.paired_leader_epoch) {
+            c.paired_leader_epoch = remote.paired_leader_epoch;
+            identity_changed = true;
+        }
+        if (c.input_identity_sha256.empty()) {
+            c.input_identity_sha256 = remote.input_identity_sha256;
+            identity_changed = true;
+        }
+        if (identity_changed) {
+            std::string error;
+            if (!persist_remote_reconstruction(c, error)) {
+                set_failure(c, error);
+                continue;
+            }
+        }
+        if (c.cancel_requested) {
+            if (remote.state == State::Superseded) {
+                c.phase = "cancelled";
+                c.error.clear();
+                std::string error;
+                (void)persist_remote_reconstruction(c, error);
+            } else if (leader_running) {
+                if (!c.supersede_queued)
+                    c.supersede_queued =
+                        _agent_panel.supersede_reconstruction(c.job_id);
+                const std::string error =
+                    _agent_panel.reconstruction_error(c.job_id);
+                if (!error.empty()) {
+                    c.error = error;
+                    c.supersede_queued = false;
+                }
+            }
+            continue;
+        }
+        if (remote.state == State::Failed ||
+            remote.state == State::Interrupted ||
+            remote.state == State::Rejected ||
+            remote.state == State::Superseded) {
+            set_failure(c, remote.error.empty()
+                               ? "remote reconstruction did not succeed"
+                               : remote.error);
+            continue;
+        }
+        if (remote.state != State::Succeeded) continue;
+        if (!c.prep_result_valid) {
+            set_failure(c, "prepared dataset metadata is unavailable for geometry");
+            continue;
+        }
+        try {
+            if (!import_remote_sparse_model(
+                    remote.result_root, fs::u8path(c.sfm.prep.workspace),
+                    c.job_id, c.error)) {
+                set_failure(c, c.error.empty()
+                                   ? "cannot import leader reconstruction output"
+                                   : c.error);
+                continue;
+            }
+            app::ReconStamp stamp;
+            stamp.present = true;
+            stamp.engine = "builtin";
+            stamp.args = _sfm.stamp_args(c.sfm, c.prep_result);
+            app::write_recon_stamp(c.sfm.prep.workspace, stamp);
+            c.phase = "geometry";
+            c.error.clear();
+            std::string error;
+            if (!persist_remote_reconstruction(c, error))
+                throw std::runtime_error(error);
+            _workspace = c.sfm.prep.workspace;
+            _sources = c.sfm.prep.inputs;
+            _sfm_job = c.sfm;
+            _built_workspace = _workspace;
+            _sfm.start_remote_completion(
+                c.sfm, c.prep_result,
+                {&_film_frames, &_film_masks, &_film_geometry});
+            c.completion_started = true;
+            if (_scheduled_dataset_id == c.prep_job_id)
+                _scheduled_dataset_id.clear();
+        } catch (const std::exception& e) {
+            set_failure(c, e.what());
+        }
+}
+}
+
+bool GuiApp::remote_reconstruction_pending() const {
+    for (const RemoteReconstructionCoordinator& c :
+         _remote_reconstruction_coordinators)
+        if (!c.completed && !c.failed && c.phase != "cancelled")
+            return true;
+    return false;
+}
+
+void GuiApp::cancel_remote_reconstruction() {
+    for (RemoteReconstructionCoordinator& c :
+         _remote_reconstruction_coordinators) {
+        if (c.completed || c.failed || c.phase == "cancelled") continue;
+        c.cancel_requested = true;
+        c.phase = "cancel_requested";
+        c.error.clear();
+        std::string error;
+        if (!persist_remote_reconstruction(c, error))
+            c.error = error;
+        const app::sched::Job* prep = scheduler_job(c.prep_job_id);
+        if (c.request_args.empty()) {
+            if (prep && prep->state == app::sched::JobState::Queued)
+                _scheduler.cancel(c.prep_job_id);
+            else if (prep && scheduler_state_live(prep->state))
+                _scheduler.stop_and_save(c.prep_job_id);
+            else {
+                c.phase = "cancelled";
+                (void)persist_remote_reconstruction(c, error);
+            }
+        } else if (c.completion_started) {
+            _sfm.cancel();
+            if (_agent_panel.leader_running())
+                c.supersede_queued =
+                    _agent_panel.supersede_reconstruction(c.job_id);
+        }
+        return;
+    }
+}
+#endif
+
 bool GuiApp::submit_feature_shard_prep(
     FeatureShardCoordinator& c, const PrepJob& frozen,
     const std::string& work_dir, const std::string& device,
@@ -1847,6 +3867,67 @@ bool GuiApp::submit_feature_shard_prep(
 }
 
 void GuiApp::advance_feature_shards() {
+    decltype(_agent_panel.feature_jobs()) remote_jobs;
+    for (const FeatureShardCoordinator& c : _feature_coordinators) {
+        if (std::any_of(c.remote_job_ids.begin(), c.remote_job_ids.end(),
+                        [](const std::string& id) { return !id.empty(); })) {
+            remote_jobs = _agent_panel.feature_jobs();
+            break;
+        }
+    }
+#ifdef SS_TOOL_SFM
+    std::vector<std::string> claimed_remote_workers;
+    for (const FeatureShardCoordinator& c : _feature_coordinators) {
+        if (c.finished) continue;
+        for (size_t shard = 0; shard < c.remote_job_ids.size(); ++shard) {
+            const std::string& id = c.remote_job_ids[shard];
+            if (id.empty() || shard >= c.remote_worker_ids.size() ||
+                c.remote_worker_ids[shard].empty())
+                continue;
+            const auto remote = std::find_if(
+                remote_jobs.begin(), remote_jobs.end(),
+                [&](const auto& job) { return job.job_id == id; });
+            if (remote == remote_jobs.end()) {
+                if (_agent_panel.feature_error(id).empty())
+                    claimed_remote_workers.push_back(c.remote_worker_ids[shard]);
+                continue;
+            }
+            using RemoteState = app::agent::LeaderServer::FeatureJobState;
+            if (remote->state != RemoteState::Succeeded &&
+                remote->state != RemoteState::Failed &&
+                remote->state != RemoteState::Interrupted &&
+                remote->state != RemoteState::Rejected &&
+                remote->state != RemoteState::Superseded)
+                claimed_remote_workers.push_back(c.remote_worker_ids[shard]);
+        }
+    }
+    auto enqueue_remote_shard = [this](FeatureShardCoordinator& c,
+                                       size_t shard) {
+        if (shard >= c.remote_submission_attempted.size())
+            c.remote_submission_attempted.resize(shard + 1);
+        c.remote_submission_attempted[shard] = true;
+        const auto request = sfm::feature_work::readRequestFile(
+            c.request_paths[shard]);
+        if (request.shard != shard ||
+            request.attempt_id != c.remote_attempt_ids[shard])
+            throw std::runtime_error(
+                "feature request does not match its persisted assignment");
+        const uint64_t disk_budget = std::min<uint64_t>(
+            1ULL << 40,
+            std::max<uint64_t>(
+                1ULL << 30,
+                static_cast<uint64_t>(request.image_indices.size()) << 30));
+        AgentPanel::FeatureShardSubmission submission;
+        submission.worker_id = c.remote_worker_ids[shard];
+        submission.job_id = c.remote_job_ids[shard];
+        submission.plan_path = fs::u8path(c.plan_path);
+        submission.request_path = fs::u8path(c.request_paths[shard]);
+        submission.image_root = fs::u8path(c.image_dir);
+        submission.mask_root = fs::u8path(c.mask_dir);
+        submission.disk_budget_bytes = disk_budget;
+        return _agent_panel.submit_feature_shard(std::move(submission));
+    };
+#endif
     for (FeatureShardCoordinator& c : _feature_coordinators) {
         if (c.finished) continue;
         if (c.failed) {
@@ -1887,10 +3968,55 @@ void GuiApp::advance_feature_shards() {
             continue;
         }
 
-        const bool missing_shards =
-            c.shard_job_ids.size() != (size_t)c.effective_shards ||
-            std::find(c.shard_job_ids.begin(), c.shard_job_ids.end(),
-                      std::string{}) != c.shard_job_ids.end();
+        const size_t shard_count = static_cast<size_t>(c.effective_shards);
+        c.shard_job_ids.resize(shard_count);
+        c.remote_job_ids.resize(shard_count);
+        c.remote_worker_ids.resize(shard_count);
+        c.remote_attempt_ids.resize(shard_count);
+        c.request_paths.resize(shard_count);
+#ifdef SS_TOOL_SFM
+        c.remote_submission_attempted.resize(shard_count);
+        if (c.remote_assignments_persisted && _agent_panel.leader_running()) {
+            for (size_t shard = 0; shard < shard_count; ++shard) {
+                const std::string& id = c.remote_job_ids[shard];
+                if (id.empty() || c.remote_submission_attempted[shard])
+                    continue;
+                const auto remote = std::find_if(
+                    remote_jobs.begin(), remote_jobs.end(),
+                    [&](const auto& job) { return job.job_id == id; });
+                if (remote != remote_jobs.end()) {
+                    c.remote_submission_attempted[shard] = true;
+                    continue;
+                }
+                if (!_agent_panel.feature_error(id).empty()) {
+                    c.remote_submission_attempted[shard] = true;
+                    continue;
+                }
+                try {
+                    if (!enqueue_remote_shard(c, shard)) {
+                        c.failed = true;
+                        c.local_failure = true;
+                        c.error = "remote feature shard could not be queued";
+                    }
+                } catch (const std::exception& e) {
+                    c.failed = true;
+                    c.local_failure = true;
+                    c.error = e.what();
+                }
+                if (c.failed) {
+                    log(c.error);
+                    cancel_feature_coordinator(c);
+                    break;
+                }
+            }
+            if (c.failed) continue;
+        }
+#endif
+        bool missing_shards = false;
+        for (size_t shard = 0; shard < shard_count; ++shard)
+            missing_shards = missing_shards ||
+                (c.shard_job_ids[shard].empty() &&
+                 c.remote_job_ids[shard].empty());
         if (missing_shards) {
             try {
                 if (prep->phases.empty())
@@ -1923,6 +4049,99 @@ void GuiApp::advance_feature_shards() {
                                       artifacts.shard_image_counts.end());
                 if (c.effective_shards <= 1)
                     throw std::runtime_error("feature plan produced one shard");
+                const size_t count =
+                    static_cast<size_t>(c.effective_shards);
+                if (c.remote_assignments_persisted &&
+                    c.remote_job_ids.size() != count)
+                    throw std::runtime_error(
+                        "remote feature shard count changed after assignment");
+                c.shard_job_ids.resize(count);
+                c.remote_job_ids.resize(count);
+                c.remote_worker_ids.resize(count);
+                c.remote_attempt_ids.resize(count);
+                c.remote_submission_attempted.resize(count);
+#ifdef SS_TOOL_SFM
+                std::vector<bool> new_remote(count, false);
+                if (!c.remote_assignments_persisted) {
+                    auto workers =
+                        eligible_feature_workers(_agent_panel.workers());
+                    workers.erase(
+                        std::remove_if(
+                            workers.begin(), workers.end(),
+                            [&](const auto& worker) {
+                                return std::find(
+                                           claimed_remote_workers.begin(),
+                                           claimed_remote_workers.end(),
+                                           worker.id) !=
+                                       claimed_remote_workers.end();
+                            }),
+                        workers.end());
+                    std::vector<bool> reserved(workers.size(), false);
+                    size_t cursor = workers.empty()
+                                        ? 0
+                                        : _feature_worker_cursor % workers.size();
+                    for (size_t shard = 0; shard < count && !workers.empty();
+                         ++shard) {
+                        if (!c.shard_job_ids[shard].empty() ||
+                            !c.remote_job_ids[shard].empty())
+                            continue;
+                        size_t selected = workers.size();
+                        for (size_t step = 0; step < workers.size(); ++step) {
+                            const size_t at = (cursor + step) % workers.size();
+                            if (!reserved[at]) {
+                                selected = at;
+                                break;
+                            }
+                        }
+                        if (selected == workers.size()) break;
+                        const auto request =
+                            sfm::feature_work::readRequestFile(
+                                c.request_paths[shard]);
+                        if (request.shard != shard || request.attempt_id.empty())
+                            throw std::runtime_error(
+                                "feature request does not match its shard");
+                        c.remote_job_ids[shard] =
+                            remote_feature_job_id(c.plan_dir,
+                                                  static_cast<int>(shard));
+                        c.remote_worker_ids[shard] = workers[selected].id;
+                        c.remote_attempt_ids[shard] = request.attempt_id;
+                        new_remote[shard] = true;
+                        reserved[selected] = true;
+                        claimed_remote_workers.push_back(
+                            workers[selected].id);
+                        cursor = (selected + 1) % workers.size();
+                        _feature_worker_cursor = cursor;
+                    }
+                    if (std::find(new_remote.begin(), new_remote.end(), true) !=
+                        new_remote.end()) {
+                        if (!write_remote_feature_assignments(
+                                c.plan_dir, c.effective_shards,
+                                c.remote_job_ids, c.remote_worker_ids,
+                                c.remote_attempt_ids, error)) {
+                            for (size_t shard = 0; shard < count; ++shard) {
+                                if (!new_remote[shard]) continue;
+                                c.remote_job_ids[shard].clear();
+                                c.remote_worker_ids[shard].clear();
+                                c.remote_attempt_ids[shard].clear();
+                            }
+                            throw std::runtime_error(error);
+                        }
+                        c.remote_assignments_persisted = true;
+                    }
+                    for (size_t shard = 0; shard < count; ++shard) {
+                        if (!new_remote[shard]) continue;
+                        if (!enqueue_remote_shard(c, shard)) {
+                            c.failed = true;
+                            c.local_failure = true;
+                            c.error = "remote feature shard could not be queued";
+                            log(c.error);
+                            cancel_feature_coordinator(c);
+                            break;
+                        }
+                    }
+                }
+                if (c.failed) continue;
+#endif
 
                 std::vector<std::pair<std::string, std::string>> devices;
                 load_native_devices();
@@ -1936,7 +4155,9 @@ void GuiApp::advance_feature_shards() {
                     fs::u8path(c.plan_dir).filename();
                 c.shard_job_ids.resize((size_t)c.effective_shards);
                 for (int shard = 0; shard < c.effective_shards; ++shard) {
-                    if (!c.shard_job_ids[(size_t)shard].empty()) continue;
+                    if (!c.shard_job_ids[(size_t)shard].empty() ||
+                        !c.remote_job_ids[(size_t)shard].empty())
+                        continue;
                     char name[64];
                     std::snprintf(name, sizeof(name), "shard-%04d", shard);
                     const std::string result_root =
@@ -1991,27 +4212,92 @@ void GuiApp::advance_feature_shards() {
 
         bool all_done = true;
         bool any_failed = false;
-        std::vector<std::string> roots;
-        roots.reserve(c.shard_job_ids.size());
-        for (const std::string& id : c.shard_job_ids) {
-            const app::sched::Job* shard = scheduler_job(id);
-            if (!shard) {
-                any_failed = true;
-                c.error = "feature-shard job disappeared";
-                c.local_failure = true;
+        bool remote_failed = false;
+        std::vector<std::string> roots(shard_count);
+        for (size_t index = 0; index < shard_count; ++index) {
+            const std::string& remote_id = c.remote_job_ids[index];
+            if (!remote_id.empty()) {
+                const auto remote = std::find_if(
+                    remote_jobs.begin(), remote_jobs.end(),
+                    [&](const auto& job) { return job.job_id == remote_id; });
+                if (remote == remote_jobs.end()) {
+                    const std::string admission_error =
+                        _agent_panel.feature_error(remote_id);
+                    if (admission_error.empty()) {
+                        all_done = false;
+                    } else {
+                        any_failed = remote_failed = true;
+                        c.error = "remote feature admission failed: " +
+                                  admission_error;
+                    }
+                    continue;
+                }
+                if (remote->worker_id != c.remote_worker_ids[index] ||
+                    remote->attempt_id != c.remote_attempt_ids[index]) {
+                    any_failed = remote_failed = true;
+                    c.error = "remote feature snapshot does not match its assignment";
+                    continue;
+                }
+                using RemoteState =
+                    app::agent::LeaderServer::FeatureJobState;
+                if (remote->state == RemoteState::Succeeded) {
+                    if (remote->result_root.empty()) {
+                        any_failed = remote_failed = true;
+                        c.error = "verified remote feature result root is missing";
+                    } else {
+                        roots[index] = remote->result_root.u8string();
+                    }
+                } else if (remote->state == RemoteState::Failed ||
+                           remote->state == RemoteState::Interrupted ||
+                           remote->state == RemoteState::Rejected ||
+                           remote->state == RemoteState::Superseded) {
+                    any_failed = remote_failed = true;
+                    c.error = remote->error.empty()
+                                  ? std::string("remote feature shard ") +
+                                        remote_feature_state_name(
+                                            remote->state).raw
+                                  : remote->error;
+                } else {
+                    all_done = false;
+                }
                 continue;
             }
-            all_done = all_done && shard->state == app::sched::JobState::Succeeded;
-            any_failed = any_failed || scheduler_state_failed(shard->state);
-            if (!shard->phases.empty()) {
-                const app::sched::Phase& phase = shard->phases.front();
-                roots.push_back(phase.outputs.empty() ? phase.output
-                                                       : phase.outputs.front());
+
+            const app::sched::Job* shard =
+                scheduler_job(c.shard_job_ids[index]);
+            if (!shard) {
+                any_failed = true;
+                c.local_failure = true;
+                c.error = "feature-shard job disappeared";
+                continue;
             }
+            if (scheduler_state_failed(shard->state)) {
+                any_failed = true;
+                if (c.error.empty())
+                    c.error = shard->error.empty()
+                                  ? "one or more feature shards failed"
+                                  : shard->error;
+                continue;
+            }
+            if (shard->state != app::sched::JobState::Succeeded) {
+                all_done = false;
+                continue;
+            }
+            if (shard->phases.empty()) {
+                any_failed = true;
+                c.local_failure = true;
+                c.error = "feature-shard output metadata is missing";
+                continue;
+            }
+            const app::sched::Phase& phase = shard->phases.front();
+            roots[index] = phase.outputs.empty() ? phase.output
+                                                  : phase.outputs.front();
         }
         if (any_failed) {
             c.failed = true;
+            c.local_failure = c.local_failure || remote_failed;
             if (c.error.empty()) c.error = "one or more feature shards failed";
+            log(c.error);
             continue;
         }
         if (!all_done) continue;
@@ -2141,6 +4427,31 @@ void GuiApp::advance_feature_shards() {
 bool GuiApp::feature_shard_job_live(
     const FeatureShardCoordinator& c) const {
     if (c.finished) return false;
+    decltype(_agent_panel.feature_jobs()) jobs;
+    if (std::any_of(c.remote_job_ids.begin(), c.remote_job_ids.end(),
+                    [](const std::string& id) { return !id.empty(); }))
+        jobs = _agent_panel.feature_jobs();
+    for (const std::string& id : c.remote_job_ids) {
+        if (id.empty()) continue;
+        const std::string admission_error = _agent_panel.feature_error(id);
+        const auto remote = std::find_if(
+            jobs.begin(), jobs.end(),
+            [&](const auto& job) { return job.job_id == id; });
+        if (remote == jobs.end()) {
+            if (admission_error.empty()) return true;
+        } else if (remote->state !=
+                       app::agent::LeaderServer::FeatureJobState::Succeeded &&
+                   remote->state !=
+                       app::agent::LeaderServer::FeatureJobState::Failed &&
+                   remote->state !=
+                       app::agent::LeaderServer::FeatureJobState::Interrupted &&
+                   remote->state !=
+                       app::agent::LeaderServer::FeatureJobState::Rejected &&
+                   remote->state !=
+                       app::agent::LeaderServer::FeatureJobState::Superseded) {
+            return true;
+        }
+    }
     for (const std::string& id : c.shard_job_ids) {
         const app::sched::Job* job = scheduler_job(id);
         if (job && scheduler_state_live(job->state)) return true;
@@ -2149,8 +4460,25 @@ bool GuiApp::feature_shard_job_live(
         if (scheduler_state_live(job->state)) return true;
     if (const app::sched::Job* job = scheduler_job(c.central_job_id))
         if (scheduler_state_live(job->state)) return true;
-    return !c.shard_job_ids.empty() && c.central_job_id.empty() &&
-           !c.failed && !c.collected;
+    return (!c.shard_job_ids.empty() || !c.remote_job_ids.empty()) &&
+           c.central_job_id.empty() && !c.failed && !c.collected;
+}
+
+void GuiApp::cancel_feature_coordinator(FeatureShardCoordinator& c) {
+    if (c.finished) return;
+    std::string error;
+    const bool closed = close_feature_coordinator(c.plan_dir, error);
+    if (closed) {
+        c.finished = true;
+    } else {
+        c.failed = true;
+        c.local_failure = true;
+        c.error = error;
+        log(error);
+    }
+    for (const std::string& id : c.remote_job_ids)
+        if (!id.empty() && !_agent_panel.supersede_feature_shard(id))
+            log("could not queue remote feature supersession for " + id);
 }
 
 void GuiApp::cancel_feature_shards() {
@@ -2160,18 +4488,10 @@ void GuiApp::cancel_feature_shards() {
         _scheduler.force_stop(id);
     };
     for (FeatureShardCoordinator& c : _feature_coordinators) {
+        cancel_feature_coordinator(c);
         stop(c.prep_job_id);
         for (const std::string& id : c.shard_job_ids) stop(id);
         stop(c.central_job_id);
-        std::string error;
-        if (close_feature_coordinator(c.plan_dir, error)) {
-            c.finished = true;
-        } else {
-            c.failed = true;
-            c.local_failure = true;
-            c.error = error;
-            log(error);
-        }
     }
     _scheduled_dataset_id.clear();
 }
@@ -2185,7 +4505,32 @@ bool GuiApp::scheduled_dataset_pending() const {
 }
 
 bool GuiApp::scheduled_dataset_active() const {
+    decltype(_agent_panel.feature_jobs()) remote_jobs;
     for (const FeatureShardCoordinator& c : _feature_coordinators) {
+        if (std::any_of(c.remote_job_ids.begin(), c.remote_job_ids.end(),
+                        [](const std::string& id) { return !id.empty(); })) {
+            remote_jobs = _agent_panel.feature_jobs();
+            break;
+        }
+    }
+    for (const FeatureShardCoordinator& c : _feature_coordinators) {
+        for (const std::string& id : c.remote_job_ids) {
+            if (id.empty()) continue;
+            const auto remote = std::find_if(
+                remote_jobs.begin(), remote_jobs.end(),
+                [&](const auto& job) { return job.job_id == id; });
+            if (remote == remote_jobs.end()) {
+                if (_agent_panel.feature_error(id).empty()) return true;
+                continue;
+            }
+            using RemoteState = app::agent::LeaderServer::FeatureJobState;
+            if (remote->state != RemoteState::Succeeded &&
+                remote->state != RemoteState::Failed &&
+                remote->state != RemoteState::Interrupted &&
+                remote->state != RemoteState::Rejected &&
+                remote->state != RemoteState::Superseded)
+                return true;
+        }
         const app::sched::Job* prep = scheduler_job(c.prep_job_id);
         if (prep && (prep->state == app::sched::JobState::Starting ||
                      prep->state == app::sched::JobState::Running ||
@@ -2236,13 +4581,24 @@ void GuiApp::handle_scheduler_dataset_done(const app::sched::Job& job) {
 
 void GuiApp::advance_scheduler_jobs() {
     _scheduler_jobs = _scheduler.list();
+    advance_remote_training();
     advance_feature_shards();
+#ifdef SS_TOOL_SFM
+    _scheduler_jobs = _scheduler.list();
+    advance_remote_reconstructions();
+#endif
     _scheduler_jobs = _scheduler.list();
     bool coordinator_job = false;
     for (const FeatureShardCoordinator& c : _feature_coordinators)
         coordinator_job = coordinator_job ||
                           c.prep_job_id == _scheduled_dataset_id ||
                           c.central_job_id == _scheduled_dataset_id;
+#ifdef SS_TOOL_SFM
+    for (const RemoteReconstructionCoordinator& c :
+         _remote_reconstruction_coordinators)
+        coordinator_job = coordinator_job ||
+                         c.prep_job_id == _scheduled_dataset_id;
+#endif
     if (!_scheduled_dataset_id.empty() && !coordinator_job) {
         const app::sched::Job* job = scheduler_job(_scheduled_dataset_id);
         if (job && job->state == app::sched::JobState::Succeeded)
@@ -2745,6 +5101,7 @@ void GuiApp::start_batch(bool skip_invalid) {
 
 void GuiApp::finish_batch() {
     int done = 0, failed = 0, other = 0;
+    const auto remote_jobs = _agent_panel.feature_jobs();
     for (const BatchRow& row : _batch) {
         for (const std::string& id : row.scheduler_ids) {
             const app::sched::Job* job = scheduler_job(id);
@@ -2762,7 +5119,8 @@ void GuiApp::finish_batch() {
         }
     }
     for (FeatureShardCoordinator& c : _feature_coordinators) {
-        if (c.batch_row < 0 || !c.failed) continue;
+        if (c.batch_row < 0) continue;
+        bool represented = false;
         auto failed_job = [this](const std::string& id) {
             const app::sched::Job* job = scheduler_job(id);
             return job &&
@@ -2770,11 +5128,40 @@ void GuiApp::finish_batch() {
                     job->state == app::sched::JobState::Interrupted ||
                     job->state == app::sched::JobState::Blocked);
         };
-        bool represented = failed_job(c.prep_job_id) ||
-                           failed_job(c.central_job_id);
+        represented = failed_job(c.prep_job_id) ||
+                     failed_job(c.central_job_id);
         for (const std::string& id : c.shard_job_ids)
             represented = represented || failed_job(id);
-        if (represented) continue;
+        for (const std::string& id : c.remote_job_ids) {
+            if (id.empty()) continue;
+            const auto remote = std::find_if(
+                remote_jobs.begin(), remote_jobs.end(),
+                [&](const auto& job) { return job.job_id == id; });
+            if (remote == remote_jobs.end()) {
+                const bool admission_failed =
+                    !_agent_panel.feature_error(id).empty();
+                if (admission_failed) {
+                    failed++;
+                    represented = true;
+                } else {
+                    other++;
+                }
+                continue;
+            }
+            using RemoteState = app::agent::LeaderServer::FeatureJobState;
+            if (remote->state == RemoteState::Succeeded) {
+                done++;
+            } else if (remote->state == RemoteState::Failed ||
+                       remote->state == RemoteState::Interrupted ||
+                       remote->state == RemoteState::Rejected ||
+                       remote->state == RemoteState::Superseded) {
+                failed++;
+                represented = true;
+            } else {
+                other++;
+            }
+        }
+        if (!c.failed || represented) continue;
         failed++;
         std::string error;
         if (close_feature_coordinator(c.plan_dir, error)) {
@@ -2851,6 +5238,8 @@ void GuiApp::poll_batch_command() {
 void GuiApp::cancel_batch(bool save) {
     if (!_batch_active) return;
     _scheduler.pause_dispatch(true);
+    for (FeatureShardCoordinator& c : _feature_coordinators)
+        if (c.batch_row >= 0) cancel_feature_coordinator(c);
     for (const BatchRow& row : _batch) {
         for (const std::string& id : row.scheduler_ids) {
             const app::sched::Job* job = scheduler_job(id);
@@ -3656,8 +6045,11 @@ void GuiApp::frame() {
     }
 
     const ImGuiViewport* vp = ImGui::GetMainViewport();
+    const float strip_height = ImGui::GetFrameHeightWithSpacing() +
+                               2.0f * ImGui::GetStyle().WindowPadding.y;
     ImGui::SetNextWindowPos(vp->WorkPos);
-    ImGui::SetNextWindowSize(vp->WorkSize);
+    ImGui::SetNextWindowSize(
+        ImVec2(vp->WorkSize.x, std::max(1.0f, vp->WorkSize.y - strip_height)));
     ImGuiWindowFlags flags =
         ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus |
@@ -3691,6 +6083,17 @@ void GuiApp::frame() {
     draw_force_stop_modal();
 
     ImGui::End();
+    _agent_panel.draw();
+    ImGui::SetNextWindowPos(ImVec2(
+        vp->WorkPos.x, vp->WorkPos.y + vp->WorkSize.y - strip_height));
+    ImGui::SetNextWindowSize(ImVec2(vp->WorkSize.x, strip_height));
+    const ImGuiWindowFlags strip_flags =
+        ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus |
+        ImGuiWindowFlags_NoNavFocus | ImGuiWindowFlags_NoFocusOnAppearing;
+    if (ImGui::Begin("##worker-management-strip", nullptr, strip_flags))
+        _agent_panel.draw_status_strip();
+    ImGui::End();
 }
 
 void GuiApp::draw_menu_bar() {
@@ -3716,6 +6119,7 @@ void GuiApp::draw_menu_bar() {
         ImGui::EndMenu();
     }
     if (ui::BeginMenu(msg::menu_view)) {
+        if (ui::MenuItem(amsg::menu_workers)) _agent_panel.open();
         if (ui::MenuItem(msg::menu_show_log, nullptr, &_show_log))
             _layout_dirty = true;
         if (ui::MenuItem(msg::menu_show_settings, nullptr, &_show_settings))
@@ -4035,12 +6439,19 @@ GuiApp::Engine GuiApp::effective_engine() const {
 bool GuiApp::dataset_busy() const {
     return _sfm.state() == SfmRunner::State::Running ||
            _colmap.state() == ColmapRunner::State::Running ||
-           scheduled_dataset_pending();
+           scheduled_dataset_pending()
+#ifdef SS_TOOL_SFM
+           || remote_reconstruction_pending()
+#endif
+           ;
 }
 bool GuiApp::native_work_busy() const {
     const TrainRunner::Phase phase = _runner.phase();
-    return _mesh.busy() || scheduled_dataset_pending() ||
-           _sfm.state() == SfmRunner::State::Running ||
+    return _mesh.busy() || scheduled_dataset_pending()
+#ifdef SS_TOOL_SFM
+           || remote_reconstruction_pending()
+#endif
+           || _sfm.state() == SfmRunner::State::Running ||
            _colmap.state() == ColmapRunner::State::Running ||
            phase == TrainRunner::Phase::Loading ||
            phase == TrainRunner::Phase::Preparing ||
@@ -4051,12 +6462,22 @@ RunProgress* GuiApp::dataset_steps() {
     if (!_feature_coordinators.empty() ||
         scheduler_job(_scheduled_dataset_id))
         return &_scheduled_steps;
+#ifdef SS_TOOL_SFM
+    if (remote_reconstruction_pending() &&
+        _sfm.state() != SfmRunner::State::Running)
+        return &_scheduled_steps;
+#endif
     return effective_engine() == Engine::BuiltIn ? &_sfm.steps() : &_colmap.steps();
 }
 
 bool GuiApp::dataset_locked(Stage s) {
     if (!dataset_busy()) return false;
     if (scheduled_dataset_pending()) return true;
+#ifdef SS_TOOL_SFM
+    if (remote_reconstruction_pending() &&
+        _sfm.state() != SfmRunner::State::Running)
+        return true;
+#endif
     const bool builtin = _sfm.state() == SfmRunner::State::Running;
     return (builtin ? _sfm.steps() : _colmap.steps()).ran(s);
 }
@@ -4066,6 +6487,12 @@ void GuiApp::cancel_dataset_job() {
         cancel_feature_shards();
         return;
     }
+#ifdef SS_TOOL_SFM
+    if (remote_reconstruction_pending()) {
+        cancel_remote_reconstruction();
+        return;
+    }
+#endif
     if (!_scheduled_dataset_id.empty()) {
         const app::sched::Job* job = scheduler_job(_scheduled_dataset_id);
         if (job && job->state == app::sched::JobState::Queued)
@@ -4235,8 +6662,13 @@ void GuiApp::sync_dataset_jobs() {
 }
 
 void GuiApp::update_dataset_job() {
-    if (!dataset_busy() || scheduled_dataset_pending()) return;
-    sync_dataset_jobs();
+    if (!dataset_busy() || scheduled_dataset_pending()
+#ifdef SS_TOOL_SFM
+        || (remote_reconstruction_pending() &&
+            _sfm.state() != SfmRunner::State::Running)
+#endif
+       )
+        return;
     if (_sfm.state() == SfmRunner::State::Running) _sfm.update(_sfm_job);
     else                                           _colmap.update(_colmap_job);
 }
@@ -4275,12 +6707,56 @@ void GuiApp::launch_dataset_job() {
     app::set_crash_note("building dataset " + _workspace);
     if (_redo_model || !workspace_state().model) _built_workspace = _workspace;
     sync_dataset_jobs();
+#ifdef SS_TOOL_SFM
+    const bool remote_selected = !_reconstruction_worker_id.empty();
+    if (remote_selected) {
+        if (effective_engine() != Engine::BuiltIn ||
+            _sfm_job.prep.force_external_masking ||
+            (_mask_enable && !backends().builtin_masking)) {
+            _native_device_error =
+                dmsg::remote_reconstruction_settings_unsupported.get();
+            log(_native_device_error);
+            return;
+        }
+        if (_sfm_job.feature_shards != 1) {
+            _native_device_error =
+                dmsg::remote_reconstruction_shards_unsupported.get();
+            log(_native_device_error);
+            return;
+        }
+        if (!_agent_panel.leader_running()) {
+            _native_device_error =
+                dmsg::remote_reconstruction_leader_unavailable.get();
+            log(_native_device_error);
+            return;
+        }
+        const auto workers =
+            eligible_reconstruction_workers(_agent_panel.workers());
+        if (std::none_of(workers.begin(), workers.end(),
+                         [&](const auto& worker) {
+                             return worker.id == _reconstruction_worker_id;
+                         })) {
+            _native_device_error =
+                dmsg::remote_reconstruction_unavailable.get();
+            log(_native_device_error);
+            return;
+        }
+    }
+#else
+    const bool remote_selected = false;
+#endif
 
     const bool schedule_native =
         effective_engine() == Engine::BuiltIn &&
         !_sfm_job.prep.force_external_masking &&
         (!_mask_enable || backends().builtin_masking);
-    if (!schedule_native) {
+    if (remote_selected && !schedule_native) {
+        _native_device_error =
+            dmsg::remote_reconstruction_settings_unsupported.get();
+        log(_native_device_error);
+        return;
+    }
+    if (!schedule_native && !remote_selected) {
 #ifdef SS_BACKEND_VULKAN
         if (!freeze_native_device()) return;
 #else
@@ -4347,9 +6823,20 @@ void GuiApp::launch_dataset_job() {
     const std::string image_dir = planned.image_dir;
     const std::string mask_dir = planned.mask_dir;
     const std::vector<std::string> feature_plan_args =
-        _sfm.feature_plan_model_args(scheduled_sfm, planned);
-    const bool reuse_model =
-        reuse_sfm_model(scheduled_sfm, feature_plan_args);
+        remote_selected ? std::vector<std::string>{}
+                        : _sfm.feature_plan_model_args(scheduled_sfm, planned);
+    const bool reuse_model = remote_selected
+        ? false : reuse_sfm_model(scheduled_sfm, feature_plan_args);
+
+#ifdef SS_TOOL_SFM
+    if (remote_selected) {
+        if (!submit_remote_reconstruction_prep(
+                scheduled_sfm, frozen, fs::current_path(ec).u8string(),
+                scheduled_device, scheduled_device_name))
+            return;
+        return;
+    }
+#endif
 
 
     if (_sfm_job.feature_shards > 1 && !reuse_model) {
@@ -6124,6 +8611,62 @@ void GuiApp::draw_dataset_steps() {
         else if (!p.detail.empty())
             ui::TextDisabledRaw(p.detail);
     }
+    decltype(_agent_panel.feature_jobs()) remote_jobs;
+    for (const FeatureShardCoordinator& c : _feature_coordinators) {
+        if (std::any_of(c.remote_job_ids.begin(), c.remote_job_ids.end(),
+                        [](const std::string& id) { return !id.empty(); })) {
+            remote_jobs = _agent_panel.feature_jobs();
+            break;
+        }
+    }
+    for (const FeatureShardCoordinator& c : _feature_coordinators) {
+        size_t total = 0, verified = 0, pending = 0, unknown = 0, failed = 0;
+        for (size_t shard = 0; shard < c.remote_job_ids.size(); ++shard) {
+            const std::string& id = c.remote_job_ids[shard];
+            if (id.empty()) continue;
+            ++total;
+            const auto remote = std::find_if(
+                remote_jobs.begin(), remote_jobs.end(),
+                [&](const auto& job) { return job.job_id == id; });
+            if (remote == remote_jobs.end()) {
+                if (_agent_panel.feature_error(id).empty())
+                    ++unknown;
+                else
+                    ++failed;
+            } else if (remote->worker_id != c.remote_worker_ids[shard] ||
+                       remote->attempt_id != c.remote_attempt_ids[shard] ||
+                       (remote->state ==
+                            app::agent::LeaderServer::FeatureJobState::Succeeded &&
+                        remote->result_root.empty())) {
+                ++failed;
+            } else if (remote->state ==
+                       app::agent::LeaderServer::FeatureJobState::Succeeded) {
+                ++verified;
+            } else if (remote->state ==
+                       app::agent::LeaderServer::FeatureJobState::Unknown) {
+                ++unknown;
+            } else if (remote->state ==
+                           app::agent::LeaderServer::FeatureJobState::Failed ||
+                       remote->state ==
+                           app::agent::LeaderServer::FeatureJobState::Interrupted ||
+                       remote->state ==
+                           app::agent::LeaderServer::FeatureJobState::Rejected ||
+                       remote->state ==
+                           app::agent::LeaderServer::FeatureJobState::Superseded) {
+                ++failed;
+            } else {
+                ++pending;
+            }
+        }
+        if (!total) continue;
+        ui::TextDisabled(
+            amsg::remote_feature_shards_summary,
+            {static_cast<unsigned long long>(verified),
+             static_cast<unsigned long long>(pending),
+             static_cast<unsigned long long>(unknown),
+             static_cast<unsigned long long>(failed)});
+        if (!c.error.empty()) ui::TextColoredRaw(kErr, c.error);
+    }
 }
 
 // How much the view changed along every input, as the adaptive pass measures
@@ -7305,6 +9848,59 @@ void GuiApp::draw_dataset_form(float height, bool running) {
     }
     ImGui::Spacing();
 #endif
+#ifdef SS_TOOL_SFM
+    if (effective_engine() == Engine::BuiltIn) {
+        const auto eligible =
+            eligible_reconstruction_workers(_agent_panel.workers());
+        const auto selected = std::find_if(
+            eligible.begin(), eligible.end(), [&](const auto& worker) {
+                return worker.id == _reconstruction_worker_id;
+            });
+        const std::string preview = _reconstruction_worker_id.empty()
+            ? dmsg::remote_reconstruction_local.get()
+            : selected == eligible.end()
+                ? _reconstruction_worker_id
+                : (selected->label.empty() ? selected->id : selected->label);
+        ImGui::SetNextItemWidth(px(280.0f));
+        if (ImGui::BeginCombo(dmsg::remote_reconstruction_worker.get(),
+                              preview.c_str())) {
+            if (ImGui::Selectable(
+                    dmsg::remote_reconstruction_local.get(),
+                    _reconstruction_worker_id.empty())) {
+                _reconstruction_worker_id.clear();
+                save_settings();
+            }
+            for (const auto& worker : eligible) {
+                ImGui::PushID(worker.id.c_str());
+                const std::string label = worker.label.empty()
+                    ? worker.id : worker.label + " (" + worker.id + ")";
+                if (ImGui::Selectable(label.c_str(),
+                                      worker.id == _reconstruction_worker_id)) {
+                    _reconstruction_worker_id = worker.id;
+                    save_settings();
+                }
+                ImGui::PopID();
+            }
+            ImGui::EndCombo();
+        }
+        ui::help_on_hover(dmsg::remote_reconstruction_worker_help);
+        if (!_reconstruction_worker_id.empty()) {
+            if (!_agent_panel.leader_running())
+                ui::TextColoredWrapped(kWarn,
+                    dmsg::remote_reconstruction_leader_unavailable);
+            else if (selected == eligible.end())
+                ui::TextColoredWrapped(kWarn,
+                    dmsg::remote_reconstruction_unavailable);
+            if (_sfm_job.feature_shards != 1)
+                ui::TextColoredWrapped(kWarn,
+                    dmsg::remote_reconstruction_shards_unsupported);
+        } else if (eligible.empty()) {
+            ui::TextDisabled(dmsg::remote_reconstruction_no_workers);
+        }
+        ImGui::Spacing();
+    }
+#endif
+
     draw_dataset_basics();
     ImGui::Spacing();
     ImGui::BeginDisabled(dataset_locked(Stage::Masks));
@@ -7338,17 +9934,48 @@ void GuiApp::draw_dataset_form(float height, bool running) {
             input_missing = input_missing || s.path.empty();
         const bool ready = !input_missing && _source_probes_ready;
         const bool need_mask_model = mask_model_missing();
-        const bool need_feat_model = feature_model_missing();
+        bool remote_selected = false;
+#ifdef SS_TOOL_SFM
+        remote_selected = !_reconstruction_worker_id.empty();
+#endif
+        const bool need_feat_model =
+            !remote_selected && feature_model_missing();
         const bool need_geom_model = geometry_model_missing();
-        const bool need_model = need_mask_model || need_feat_model || need_geom_model;
+        const bool need_model =
+            need_mask_model || need_feat_model || need_geom_model;
+        const Msg* remote_issue = nullptr;
+#ifdef SS_TOOL_SFM
+        if (remote_selected) {
+            if (effective_engine() != Engine::BuiltIn ||
+                _sfm_job.prep.force_external_masking ||
+                (_mask_enable && !backends().builtin_masking))
+                remote_issue = &dmsg::remote_reconstruction_settings_unsupported;
+            else if (_sfm_job.feature_shards != 1)
+                remote_issue = &dmsg::remote_reconstruction_shards_unsupported;
+            else if (!_agent_panel.leader_running())
+                remote_issue = &dmsg::remote_reconstruction_leader_unavailable;
+            else {
+                const auto eligible =
+                    eligible_reconstruction_workers(_agent_panel.workers());
+                if (std::none_of(eligible.begin(), eligible.end(),
+                        [&](const auto& worker) {
+                            return worker.id == _reconstruction_worker_id;
+                        }))
+                    remote_issue = &dmsg::remote_reconstruction_unavailable;
+            }
+        }
+#endif
         // The button names what pressing it does: a folder that already holds
         // a reconstruction is added to, not built.
         const bool adding = workspace_state().model && !_redo_model;
-        ImGui::BeginDisabled(!ready || need_model || native_work_busy());
+        ImGui::BeginDisabled(!ready || need_model || native_work_busy() ||
+                             remote_issue);
         if (ui::Button(adding ? dmsg::update_dataset : dmsg::create_dataset,
                        ImVec2(px(200.0f), px(34.0f))))
             start_dataset_job();
         ImGui::EndDisabled();
+        if (remote_issue)
+            ui::TextColoredWrapped(kWarn, *remote_issue);
         if (input_missing) {
             ImGui::SameLine();
             ui::TextDisabled(dmsg::pick_input_first);
@@ -7430,6 +10057,52 @@ void GuiApp::draw_dataset_form(float height, bool running) {
         _ds_action_h = ImGui::GetCursorPosY() - action_y0;
         return;
     }
+
+#ifdef SS_TOOL_SFM
+    const RemoteReconstructionCoordinator* remote_shown = nullptr;
+    for (auto it = _remote_reconstruction_coordinators.rbegin();
+         it != _remote_reconstruction_coordinators.rend(); ++it)
+        if (!it->completed) {
+            remote_shown = &*it;
+            break;
+        }
+    if (remote_shown) {
+        const RemoteReconstructionCoordinator& c = *remote_shown;
+        const auto ready_workers = _agent_panel.leader_running()
+            ? eligible_reconstruction_workers(_agent_panel.workers())
+            : std::vector<app::agent::LeaderServer::WorkerSnapshot>{};
+        if (c.phase == "cancelled")
+            ui::TextColored(kDim, dmsg::cancelled);
+        else if (c.cancel_requested)
+            ui::TextColored(kWarn, dmsg::remote_reconstruction_cancelling);
+        else if (c.failed)
+            ui::TextColored(kErr, dmsg::remote_state_failed);
+        else if (c.has_snapshot)
+            ui::TextColored(kDim,
+                remote_reconstruction_state_label(c.remote_state));
+        else if (!c.request_args.empty() && !_agent_panel.leader_running())
+            ui::TextColored(kWarn,
+                dmsg::remote_reconstruction_leader_unavailable);
+        else if (!c.request_args.empty() && c.phase == "prepared" &&
+                 std::none_of(ready_workers.begin(), ready_workers.end(),
+                     [&](const auto& worker) { return worker.id == c.worker_id; }))
+            ui::TextColored(kWarn, dmsg::remote_reconstruction_waiting_worker);
+        else if (!c.request_args.empty())
+            ui::TextColored(kDim, dmsg::remote_reconstruction_waiting_leader);
+        if (const app::sched::Job* prep =
+                scheduler_job(c.prep_job_id);
+            prep && !c.request_args.size()) {
+            ui::TextColored(kDim, scheduler_state_label(prep->state));
+            if (!prep->error.empty())
+                ui::TextColoredWrapped(kErr, msg::scheduler_reason,
+                                       {prep->error});
+        }
+        if (!c.error.empty())
+            ui::TextColoredWrappedRaw(kErr, c.error);
+        _ds_action_h = ImGui::GetCursorPosY() - action_y0;
+        return;
+    }
+#endif
 
     if (const app::sched::Job* scheduled =
             scheduler_job(_scheduled_dataset_id)) {
@@ -8279,9 +10952,76 @@ void GuiApp::draw_batch_device_picker(BatchRow& row) {
 
 void GuiApp::draw_scheduler_queue() {
     ui::SeparatorText(msg::scheduler_title);
-    if (_scheduler_jobs.empty()) {
+    bool has_remote = false;
+    for (const FeatureShardCoordinator& c : _feature_coordinators)
+        has_remote = has_remote ||
+            std::find_if(c.remote_job_ids.begin(), c.remote_job_ids.end(),
+                         [](const std::string& id) { return !id.empty(); }) !=
+                c.remote_job_ids.end();
+    if (_scheduler_jobs.empty() && !has_remote) {
         ui::TextDisabled(msg::scheduler_empty);
         return;
+    }
+    decltype(_agent_panel.feature_jobs()) remote_jobs;
+    if (has_remote) remote_jobs = _agent_panel.feature_jobs();
+    for (const FeatureShardCoordinator& c : _feature_coordinators) {
+        for (size_t shard = 0; shard < c.remote_job_ids.size(); ++shard) {
+            const std::string& id = c.remote_job_ids[shard];
+            if (id.empty()) continue;
+            ImGui::PushID(id.c_str());
+            const auto remote = std::find_if(
+                remote_jobs.begin(), remote_jobs.end(),
+                [&](const auto& job) { return job.job_id == id; });
+            const std::string admission_error =
+                _agent_panel.feature_error(id);
+            const char* status = amsg::unknown.get();
+            ImVec4 color = kWarn;
+            if (remote == remote_jobs.end()) {
+                if (admission_error.empty()) {
+                    status = amsg::feature_waiting_snapshot.get();
+                } else {
+                    status = amsg::feature_admission_failed.get();
+                    color = kErr;
+                }
+            } else {
+                if (remote->worker_id != c.remote_worker_ids[shard] ||
+                    remote->attempt_id != c.remote_attempt_ids[shard]) {
+                    status = amsg::feature_assignment_mismatch.get();
+                    color = kErr;
+                } else if (remote->state ==
+                               app::agent::LeaderServer::FeatureJobState::Succeeded &&
+                           remote->result_root.empty()) {
+                    status = amsg::feature_missing_verified_result.get();
+                    color = kErr;
+                } else {
+                    status =
+                        remote_feature_state_name(remote->state).translated->get();
+                    if (remote->state ==
+                        app::agent::LeaderServer::FeatureJobState::Succeeded)
+                        color = kOk;
+                    else if (remote->state ==
+                                 app::agent::LeaderServer::FeatureJobState::Failed ||
+                             remote->state ==
+                                 app::agent::LeaderServer::FeatureJobState::Rejected ||
+                             remote->state ==
+                                 app::agent::LeaderServer::FeatureJobState::Interrupted)
+                        color = kErr;
+                }
+                if (remote->progress) {
+                    ui::ProgressBarRaw(
+                        static_cast<float>(std::clamp(
+                            *remote->progress, 0.0, 1.0)),
+                        ImVec2(-1, 0), nullptr);
+                }
+                if (!remote->error.empty())
+                    ui::TextColoredRaw(kErr, remote->error);
+            }
+            ui::TextColored(color, amsg::remote_feature_shard_status,
+                            {id, c.remote_worker_ids[shard], status});
+            if (!admission_error.empty() && remote == remote_jobs.end())
+                ui::TextColoredRaw(kErr, admission_error);
+            ImGui::PopID();
+        }
     }
     for (const app::sched::Job& job : _scheduler_jobs) {
         ImGui::PushID(job.job_id.c_str());
@@ -9916,7 +12656,16 @@ void GuiApp::draw_basic_options() {
 }
 
 void GuiApp::draw_train_controls() {
+    draw_remote_training_controls();
     TrainRunner::Phase ph = _runner.phase();
+    bool remote_ready = _training_worker_id.empty();
+    if (!remote_ready && _agent_panel.leader_running()) {
+        const auto workers = eligible_training_workers(_agent_panel.workers());
+        remote_ready = std::any_of(workers.begin(), workers.end(),
+            [&](const auto& worker) {
+                return worker.id == _training_worker_id;
+            });
+    }
     switch (ph) {
         case TrainRunner::Phase::Idle:
         case TrainRunner::Phase::Ready:
@@ -9939,14 +12688,18 @@ void GuiApp::draw_train_controls() {
             }
             // A batch owns the runner between its tasks, so the queue's own
             // next row is what starts -- never a click here.
-            bool can_start = !_batch_active &&
-                             (ph == TrainRunner::Phase::Ready ||
-                              ph == TrainRunner::Phase::Done ||
-                              ph == TrainRunner::Phase::TrainError);
+            const bool can_start = !_batch_active && remote_ready &&
+                !native_work_busy() &&
+                (ph == TrainRunner::Phase::Ready ||
+                 ph == TrainRunner::Phase::Done ||
+                 ph == TrainRunner::Phase::TrainError) &&
+                (_training_worker_id.empty() || !remote_training_pending());
             ImGui::BeginDisabled(!can_start);
-            if (ui::Button(ph == TrainRunner::Phase::Done ? msg::train_again
-                                                          : msg::start_training,
-                           ImVec2(-8, 36)))
+            const Msg& start_label = _training_worker_id.empty()
+                ? (ph == TrainRunner::Phase::Done ? msg::train_again
+                                                  : msg::start_training)
+                : amsg::remote_training_submit;
+            if (ui::Button(start_label, ImVec2(-8, 36)))
                 start_training();
             ImGui::EndDisabled();
             break;
@@ -10045,7 +12798,32 @@ void GuiApp::draw_status_strip() {
 
     TrainRunner::Phase ph = _runner.phase();
     spirula::TrainerProgress p = _runner.latest_progress();
-    if (ph == TrainRunner::Phase::Training && p.total_steps > 0) {
+    const auto remote = std::find_if(
+        _remote_training_assignments.begin(),
+        _remote_training_assignments.end(),
+        [](const RemoteTrainingAssignment& assignment) {
+            return !assignment.queue_rejected &&
+                   (!assignment.snapshot ||
+                    !remote_training_state_terminal(
+                        assignment.snapshot->state));
+        });
+    if (remote != _remote_training_assignments.end() &&
+        ph != TrainRunner::Phase::Training &&
+        ph != TrainRunner::Phase::Preparing) {
+        if (remote->cancel_requested)
+            ui::TextColored(kWarn, amsg::remote_training_cancelling);
+        else if (remote->snapshot)
+            ui::TextColored(kWarn, !remote->snapshot->current
+                ? amsg::feature_state_superseded
+                : remote_training_state_label(remote->snapshot->state));
+        else if (!_agent_panel.leader_running())
+            ui::TextColored(kWarn,
+                amsg::remote_training_leader_unavailable);
+        else
+            ui::TextColored(kWarn, amsg::feature_waiting_snapshot);
+        ui::TextDisabled(amsg::remote_training_assignment,
+                         {remote->worker_id, remote->job_id});
+    } else if (ph == TrainRunner::Phase::Training && p.total_steps > 0) {
         float frac = (float)(p.step + 1) / (float)p.total_steps;
         ui::ProgressBar(frac, ImVec2(-8, 0), msg::status_step,
                         {p.step + 1, p.total_steps, (int)(frac * 100.0f)});

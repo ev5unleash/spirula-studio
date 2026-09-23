@@ -1252,9 +1252,13 @@ void TrainerSession::train(const TrainerCallbacks& cb) {
         // uncontended window to take the engine mutex.
         if (paused.load() && !stop_requested.load()) {
             pause_clock_start();
+            if (paused.load() && !stop_requested.load() && cb.on_pause_ack)
+                cb.on_pause_ack();
             while (paused.load() && !stop_requested.load())
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
             pause_clock_stop();
+            if (!stop_requested.load() && cb.on_resume_ack)
+                cb.on_resume_ack();
         }
         if (stop_requested.load()) break;
         // Clock starts before the yield: a render the trainer stood aside for

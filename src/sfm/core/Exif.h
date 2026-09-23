@@ -23,14 +23,16 @@
 // exactly as before.
 #pragma once
 
+#include "core/FilesystemPath.h"
+
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <limits>
 #include <string>
 #include <vector>
-
 namespace sfm {
 
 struct ExifData {
@@ -245,8 +247,15 @@ inline ExifData parseExifTiff(const uint8_t* data, size_t size) {
 // image for its Orientation, and a fixed prefix would read megabytes per image.
 inline std::vector<uint8_t> readExifSegment(const std::string& path) {
     std::vector<uint8_t> seg_buf;
-    FILE* f = fopen(path.c_str(), "rb");
+    const std::filesystem::path io_path =
+        spirula::NativeFilesystemPath(std::filesystem::path(path));
+#ifdef _WIN32
+    FILE* f = ::_wfopen(io_path.c_str(), L"rb");
+#else
+    FILE* f = std::fopen(io_path.c_str(), "rb");
+#endif
     if (!f) return seg_buf;
+
     auto at = [f](long off, void* dst, size_t n) {
         return std::fseek(f, off, SEEK_SET) == 0 && std::fread(dst, 1, n, f) == n;
     };

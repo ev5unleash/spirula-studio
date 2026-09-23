@@ -12,11 +12,14 @@ function(ss_register_test name labels timeout)
 endfunction()
 
 foreach(SS_TEST IN ITEMS source_path frame_motion_test frame_select_test
-        mesh_format_roundtrip delaunay_degenerate worker_request_test
-        checkpoint_resolution_test dataset_parser_test project_manifest_test
-        data_manager_sampler_test step_config_test)
+        mesh_format_roundtrip delaunay_degenerate device_lease_test agent_state_test
+        agent_config_test agent_wire_test worker_request_test checkpoint_resolution_test
+        agent_pairing_test agent_transfer_test dataset_parser_test
+        project_manifest_test data_manager_sampler_test step_config_test ply_reader_bounds_test
+        agent_training_job_test agent_update_package_test agent_admin_intent_test)
     ss_register_test(${SS_TEST} "headless;fast" 60)
 endforeach()
+ss_register_test(agent_leader_test "headless;fast" 180)
 
 ss_register_test(cli_training_smoke "gpu" 600 "$<TARGET_FILE:spirula>")
 set_tests_properties(cli_training_smoke PROPERTIES RESOURCE_LOCK training_gpu)
@@ -47,6 +50,10 @@ else()
 endif()
 if(SS_BUILD_SFM)
     ss_register_test(sfm_feature_work_test "headless;fast" 60)
+    ss_register_test(agent_feature_job_test "headless;fast" 60)
+    ss_register_test(agent_feature_worker_store_test "headless;fast" 60)
+    ss_register_test(agent_portable_worker_store_test "headless;fast" 60)
+    ss_register_test(agent_reconstruction_job_test "headless;fast" 60)
 endif()
 
 if(SS_ENABLE_PATENTED)

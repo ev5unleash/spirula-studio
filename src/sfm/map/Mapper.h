@@ -387,12 +387,13 @@ public:
             ProfTimer pb(g_map_prof.bootstrap);
             bootstrapFocalLength();
         }
+        cancel::pause_point();
 
         std::vector<Reconstruction> attempts;
         size_t seed_from = 0;
         seeded_.clear();  // seed blocking is a device of this loop alone (D58)
         for (int attempt = 0; attempt < std::max(1, opt_.max_init_trials); attempt++) {
-            cancel::check();
+            cancel::pause_point();
             resetModel();
             bool seeded;
             {
@@ -1929,7 +1930,7 @@ private:
         // would otherwise be over budget before it registered anything.
         const size_t shared_at_entry = sharedRegistered();
         while (true) {
-            cancel::check();
+            cancel::pause_point();
             if (max_reg && rec_.numRegistered() >= max_reg) break;
             // Both counts are of *this* pass, and both can be nudged by a
             // de-registration mid-pass, so neither subtraction may wrap.

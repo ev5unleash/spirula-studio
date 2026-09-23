@@ -13,6 +13,7 @@
 // ponytail: no survivor-PID start-token verification or host-RAM preflight.
 // Those belong in a phase-3b pass.
 
+#include "app/DeviceLease.h"
 #include "app/OutputLease.h"
 #include "app/WorkerRequest.h"
 
@@ -42,6 +43,8 @@ enum class JobState {
     Interrupted,
     Blocked,
 };
+
+enum class JobPauseStatus { Running, Pausing, Paused };
 
 // Fixed workflow phase.  `phase` is deliberately a string at this boundary:
 // the worker allowlist is the one place that knows how to dispatch it.
@@ -170,6 +173,11 @@ public:
     void stop_and_save(const std::string& job_id);
     void force_stop(const std::string& job_id);
     void cancel(const std::string& job_id);
+    // These requests are serialized with Stop/force-stop and never wait for
+    // a worker; pause_status reports the child's last safe-point ACK.
+    bool request_pause(const std::string& job_id);
+    bool request_resume(const std::string& job_id);
+    JobPauseStatus pause_status(const std::string& job_id) const;
     void set_device(const std::string& job_id, const std::string& device,
                     const std::string& device_name = {});
     using DeviceValidator =
@@ -193,8 +201,11 @@ private:
         size_t phase_index = 0;
         std::thread thread;
         std::vector<std::shared_ptr<OutputLease>> path_leases;
+        DeviceLease device_lease;
         int shutdown_grace_ms = 30000;
         std::atomic<bool> cancel{false};
+        std::atomic<bool> pause_requested{false};
+        std::atomic<bool> acknowledged_paused{false};
         std::atomic<bool> stop{false};
         std::atomic<bool> finished{false};
     };
@@ -236,6 +247,7 @@ private:
     // device lease: normalized device string → job_id
     std::unordered_map<std::string, std::string> _leases;
     std::string _foreground_device;
+    DeviceLease _foreground_lease;
     DeviceValidator _device_validator;
 
     std::function<void(const Event&)> _on_event;

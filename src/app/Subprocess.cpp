@@ -35,8 +35,23 @@ namespace app::proc {
 
 namespace {
 
+void emit_line(const std::string& line,
+               const std::function<void(const std::string&)>& on_line,
+               std::atomic<bool>* acknowledged_paused) {
+    if (acknowledged_paused && line == kWorkerPauseAcknowledgment) {
+        acknowledged_paused->store(true, std::memory_order_release);
+        return;
+    }
+    if (acknowledged_paused && line == kWorkerRunningAcknowledgment) {
+        acknowledged_paused->store(false, std::memory_order_release);
+        return;
+    }
+    if (on_line) on_line(line);
+}
+
 void emit_lines(std::string& acc, const char* buf, size_t n,
-                const std::function<void(const std::string&)>& on_line) {
+                const std::function<void(const std::string&)>& on_line,
+                std::atomic<bool>* acknowledged_paused = nullptr) {
     acc.append(buf, n);
     size_t pos = 0, nl;
     while ((nl = acc.find_first_of("\r\n", pos)) != std::string::npos) {
@@ -44,16 +59,21 @@ void emit_lines(std::string& acc, const char* buf, size_t n,
             break;
         size_t next = nl + 1;
         if (acc[nl] == '\r' && acc[next] == '\n') next++;
-        if (nl > pos && on_line) on_line(acc.substr(pos, nl - pos));
+        if (nl > pos)
+            emit_line(acc.substr(pos, nl - pos), on_line,
+                      acknowledged_paused);
         pos = next;
     }
     acc.erase(0, pos);
 }
 
-void emit_tail(std::string& acc, const std::function<void(const std::string&)>& on_line) {
-    if (!acc.empty() && on_line) on_line(acc);
+void emit_tail(std::string& acc,
+               const std::function<void(const std::string&)>& on_line,
+               std::atomic<bool>* acknowledged_paused) {
+    if (!acc.empty()) emit_line(acc, on_line, acknowledged_paused);
     acc.clear();
 }
+
 
 bool worker_control_active() {
     return spirula::env_on("WORKER_CONTROL");
@@ -292,12 +312,15 @@ ProcessResult run_process(const ProcessOptions& options) {
         return {ProcessOutcome::SpawnFailed, -1,
                 "cannot resume process: " + std::to_string(error)};
     }
+    if (options.on_started) options.on_started(pi.dwProcessId);
     CloseHandle(pi.hThread);
 
     std::string acc;
     char buf[4096];
     bool killed = false;
     bool stop_sent = false;
+    bool pause_sent = false;
+    bool process_exited = false;
     auto stop_time = std::chrono::steady_clock::time_point::min();
 
     for (;;) {
@@ -317,10 +340,26 @@ ProcessResult run_process(const ProcessOptions& options) {
                 if (!options.stop_token.empty()) {
                     DWORD written = 0;
                     WriteFile(stdin_wr, options.stop_token.data(),
-                              static_cast<DWORD>(options.stop_token.size()), &written, nullptr);
+                              static_cast<DWORD>(options.stop_token.size()),
+                              &written, nullptr);
                 }
                 CloseHandle(stdin_wr);
                 stdin_wr = nullptr;
+            }
+        }
+        if (!killed && !stop_sent && stdin_wr && options.pause_requested) {
+            const bool requested =
+                options.pause_requested->load(std::memory_order_acquire);
+            if (requested != pause_sent) {
+                const std::string& token =
+                    requested ? options.pause_token : options.resume_token;
+                DWORD written = 0;
+                if (token.empty() ||
+                    (WriteFile(stdin_wr, token.data(),
+                               static_cast<DWORD>(token.size()), &written,
+                               nullptr) &&
+                     written == static_cast<DWORD>(token.size())))
+                    pause_sent = requested;
             }
         }
         if (stop_sent && !killed) {
@@ -333,26 +372,43 @@ ProcessResult run_process(const ProcessOptions& options) {
             }
         }
 
-        DWORD avail = 0;
-        if (!PeekNamedPipe(stdout_rd, nullptr, 0, nullptr, &avail, nullptr)) break;
-        if (avail > 0) {
-            DWORD got = 0;
-            if (!ReadFile(stdout_rd, buf, static_cast<DWORD>(std::min<size_t>(sizeof buf, avail)), &got, nullptr) || !got)
-                break;
-            emit_lines(acc, buf, got, options.on_line);
-        } else {
-            if (WaitForSingleObject(pi.hProcess, 50) == WAIT_OBJECT_0) {
-                while (PeekNamedPipe(stdout_rd, nullptr, 0, nullptr, &avail, nullptr) && avail) {
-                    DWORD got = 0;
-                    if (!ReadFile(stdout_rd, buf, static_cast<DWORD>(std::min<size_t>(sizeof buf, avail)), &got, nullptr) || !got)
-                        break;
-                    emit_lines(acc, buf, got, options.on_line);
+        if (stdout_rd) {
+            DWORD avail = 0;
+            if (!PeekNamedPipe(stdout_rd, nullptr, 0, nullptr, &avail, nullptr)) {
+                CloseHandle(stdout_rd);
+                stdout_rd = nullptr;
+            } else if (avail > 0) {
+                DWORD got = 0;
+                if (!ReadFile(stdout_rd, buf,
+                              static_cast<DWORD>(std::min<size_t>(sizeof buf, avail)),
+                              &got, nullptr) || !got) {
+                    CloseHandle(stdout_rd);
+                    stdout_rd = nullptr;
+                } else {
+                    emit_lines(acc, buf, got, options.on_line,
+                               options.acknowledged_paused);
                 }
-                break;
             }
         }
+        if (!process_exited)
+            process_exited = WaitForSingleObject(pi.hProcess, 50) == WAIT_OBJECT_0;
+        else if (stdout_rd)
+            Sleep(50);
+        if (process_exited && stdin_wr) {
+            CloseHandle(stdin_wr);
+            stdin_wr = nullptr;
+        }
+        bool tree_exited = !job;
+        if (job) {
+            JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting{};
+            tree_exited = QueryInformationJobObject(
+                              job, JobObjectBasicAccountingInformation,
+                              &accounting, sizeof(accounting), nullptr) &&
+                          accounting.ActiveProcesses == 0;
+        }
+        if (process_exited && !stdout_rd && tree_exited) break;
     }
-    emit_tail(acc, options.on_line);
+    emit_tail(acc, options.on_line, options.acknowledged_paused);
     if (stdin_wr) {
         CloseHandle(stdin_wr);
         stdin_wr = nullptr;
@@ -362,7 +418,7 @@ ProcessResult run_process(const ProcessOptions& options) {
     GetExitCodeProcess(pi.hProcess, &exit_code);
     CloseHandle(pi.hProcess);
     if (job) CloseHandle(job);
-    CloseHandle(stdout_rd);
+    if (stdout_rd) CloseHandle(stdout_rd);
 
     ProcessResult res;
     res.exit_code = static_cast<int>(exit_code);
@@ -570,6 +626,7 @@ ProcessResult run_process(const ProcessOptions& options) {
                         std::strerror(group_error)};
         }
     }
+    if (options.on_started) options.on_started(static_cast<uint64_t>(pid));
 
     close(stdout_fds[1]);
     close(stdin_fds[0]);
@@ -578,6 +635,9 @@ ProcessResult run_process(const ProcessOptions& options) {
     char buf[4096];
     bool killed = false;
     bool stop_sent = false;
+    bool pause_sent = false;
+    bool process_exited = false;
+    int status = 0;
     auto stop_time = std::chrono::steady_clock::time_point::min();
 
     // Nested descendants inherit PDEATHSIG; the root group remains caller-owned.
@@ -606,6 +666,17 @@ ProcessResult run_process(const ProcessOptions& options) {
                 stdin_fds[1] = -1;
             }
         }
+        if (!killed && !stop_sent && stdin_fds[1] >= 0 &&
+            options.pause_requested) {
+            const bool requested =
+                options.pause_requested->load(std::memory_order_acquire);
+            if (requested != pause_sent) {
+                const std::string& token =
+                    requested ? options.pause_token : options.resume_token;
+                if (token.empty() || safe_pipe_write(stdin_fds[1], token))
+                    pause_sent = requested;
+            }
+        }
         if (stop_sent && !killed) {
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - stop_time).count();
@@ -618,24 +689,41 @@ ProcessResult run_process(const ProcessOptions& options) {
         int pr = poll(&pfd, 1, 50);
         if (pr > 0) {
             ssize_t got = read(stdout_fds[0], buf, sizeof buf);
-            if (got <= 0) break;
-            emit_lines(acc, buf, static_cast<size_t>(got), options.on_line);
+            if (got <= 0) {
+                close(stdout_fds[0]);
+                stdout_fds[0] = -1;
+            } else {
+                emit_lines(acc, buf, static_cast<size_t>(got),
+                           options.on_line, options.acknowledged_paused);
+            }
         } else if (pr < 0 && errno != EINTR) {
-            break;
+            close(stdout_fds[0]);
+            stdout_fds[0] = -1;
         }
+        if (!process_exited) {
+            const pid_t waited = waitpid(pid, &status, WNOHANG);
+            if (waited == pid) {
+                process_exited = true;
+            } else if (waited < 0 && errno != EINTR) {
+                if (stdout_fds[0] >= 0) close(stdout_fds[0]);
+                if (stdin_fds[1] >= 0) close(stdin_fds[1]);
+                return {ProcessOutcome::Crashed, -1,
+                        "waitpid failed: " + std::string(std::strerror(errno))};
+            }
+        }
+        if (process_exited && stdin_fds[1] >= 0) {
+            close(stdin_fds[1]);
+            stdin_fds[1] = -1;
+        }
+        bool tree_exited = nested_worker;
+        if (!nested_worker && process_exited) {
+            tree_exited = kill(-pid, 0) < 0 && errno == ESRCH;
+        }
+        if (process_exited && stdout_fds[0] < 0 && tree_exited) break;
     }
-    emit_tail(acc, options.on_line);
-    close(stdout_fds[0]);
+    emit_tail(acc, options.on_line, options.acknowledged_paused);
+    if (stdout_fds[0] >= 0) close(stdout_fds[0]);
     if (stdin_fds[1] >= 0) close(stdin_fds[1]);
-
-    int status = 0;
-    pid_t waited = -1;
-    do { waited = waitpid(pid, &status, 0); }
-    while (waited < 0 && errno == EINTR);
-    if (waited < 0) {
-        return {ProcessOutcome::Crashed, -1,
-                "waitpid failed: " + std::string(std::strerror(errno))};
-    }
 
     ProcessResult res;
     if (killed) {

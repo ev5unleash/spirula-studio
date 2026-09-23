@@ -302,6 +302,12 @@ std::vector<std::string> SfmRunner::scheduler_args(
                                       ? (double)job.prep.selection.video_fps
                                       : 0.0});
     }
+    return scheduler_args(job, prep, manifest_payload, feature_plan);
+}
+
+std::vector<std::string> SfmRunner::scheduler_args(
+    const SfmJob& job, const PrepResult& prep,
+    std::string& manifest_payload, const std::string& feature_plan) {
     const std::vector<std::string> model_args = recon_args(job, prep, false);
     std::vector<std::string> args = {
         "auto", prep.image_dir, "-o", job.prep.workspace,
@@ -327,6 +333,12 @@ std::vector<std::string> SfmRunner::feature_plan_model_args(
     const SfmJob& job, const PrepResult& prep) {
     return recon_args(job, prep, false);
 }
+
+std::vector<std::string> SfmRunner::stamp_args(
+    const SfmJob& job, const PrepResult& prep) {
+    return recon_args(job, prep, true);
+}
+
 
 bool sfm_make_feature_plan(const std::vector<std::string>& model_args,
                            const std::string& device_selector,
@@ -408,8 +420,10 @@ bool sfm_make_feature_plan(const std::vector<std::string>& model_args,
             const fs::path request_path = root / name;
             sfm::feature_work::FeatureRequest request;
             if (!fs::exists(request_path)) {
-                request =
-                    sfm::makeFeatureRequest(plan, shard, "attempt-0001");
+                request = sfm::makeFeatureRequest(
+                    plan, shard, "attempt-" +
+                    sfm::feature_work::sha256Text(
+                        root.u8string() + ":" + std::to_string(shard)).substr(0, 32));
                 sfm::feature_work::writeRequestFile(request_path.string(), request);
             } else {
                 request =
@@ -533,6 +547,44 @@ void SfmRunner::start(const SfmJob& job, RunFilms films) {
     _worker = std::thread([this, job, sweep = std::move(sweep)] {
         sweep_sfm_intermediates(sweep);
         run(job);
+    });
+}
+
+void SfmRunner::start_remote_completion(const SfmJob& job,
+                                       const PrepResult& prep,
+                                       RunFilms films) {
+    if (_state.load() == State::Running) return;
+    if (_worker.joinable()) _worker.join();
+    _cancel = false;
+    _partial = false;
+    _not_metric = false;
+    _have_status = false;
+    _status_mtime = 0;
+    _films = films;
+    _prog.reset();
+    if (_films.frames) _films.frames->clear();
+    if (_films.masks) _films.masks->clear();
+    if (_films.geometry) _films.geometry->clear();
+    std::string sweep;
+    {
+        std::lock_guard<std::mutex> lk(_mu);
+        _error.clear();
+        _dataset_dir.clear();
+        _image_dir.clear();
+        _mask_dir.clear();
+        _progress_dir.clear();
+        _features_dir.clear();
+        _matches_path.clear();
+        _sfm_image_dir = prep.image_dir;
+        _sfm_mask_dir = prep.mask_dir;
+        _mask_flipped = prep.mask_dir_flipped;
+        sweep.swap(_sweep_dir);
+        _live = job;
+    }
+    _state = State::Running;
+    _worker = std::thread([this, job, prep, sweep = std::move(sweep)] {
+        sweep_sfm_intermediates(sweep);
+        run_remote_completion(job, prep);
     });
 }
 
@@ -1174,6 +1226,46 @@ void SfmRunner::run(SfmJob job) {
         {
             std::lock_guard<std::mutex> lk(_mu);
             _dataset_dir = ws.string();
+            _image_dir = prep.image_dir_cfg;
+            _mask_dir = prep.mask_dir_cfg;
+            _mask_flipped = prep.mask_dir_flipped;
+        }
+        _state = State::Done;
+    } catch (const std::exception& e) {
+        fail(e.what());
+    }
+}
+
+void SfmRunner::run_remote_completion(SfmJob job, PrepResult prep) {
+    auto fail = [&](const std::string& why) {
+        _prog.finish(_cancel.load() ? StageStatus::Skipped : StageStatus::Failed);
+        std::lock_guard<std::mutex> lk(_mu);
+        _error = why;
+        _state = _cancel.load() ? State::Cancelled : State::Failed;
+    };
+    try {
+        const fs::path ws = fs::u8path(job.prep.workspace);
+        if (!has_model(ws / "sparse" / "0"))
+            return fail(lmsg::err_no_reconstruction.get());
+
+        take_geometry(job);
+        if (job.geometry.enable) {
+            std::string error;
+            if (!run_geometry_step(job.geometry, ws.u8string(), prep.image_dir,
+                                   _prog, _films.geometry, _cancel, error))
+                return fail(error);
+        }
+        {
+            std::lock_guard<std::mutex> lk(_mu);
+            _sweep_dir = job.keep_intermediate ? "" : ws.u8string();
+        }
+        if (reads_photos_in_place(job.prep.inputs, job.prep.photo_import))
+            log(fmt(lmsg::photos_referenced_in_place, {prep.image_dir_cfg}));
+        set_stage(Stage::Finishing, lmsg::stage_done.get());
+        _prog.finish(StageStatus::Done);
+        {
+            std::lock_guard<std::mutex> lk(_mu);
+            _dataset_dir = ws.u8string();
             _image_dir = prep.image_dir_cfg;
             _mask_dir = prep.mask_dir_cfg;
             _mask_flipped = prep.mask_dir_flipped;

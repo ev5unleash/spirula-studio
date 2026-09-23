@@ -15,6 +15,7 @@
 #include <utility>
 
 #include "core/Sha256.h"
+#include "core/FilesystemPath.h"
 #include "data/Json.h"
 #include "data/JsonWrite.h"
 #include "sfm/core/Features.h"
@@ -570,7 +571,8 @@ JsonValue parseJson(const std::string& json) {
 }
 
 std::string readFile(const std::string& path) {
-    std::ifstream f(path, std::ios::binary);
+    std::ifstream f(spirula::NativeFilesystemPath(std::filesystem::path(path)),
+                    std::ios::binary);
     if (!f) fail("cannot read " + path);
     f.seekg(0, std::ios::end);
     const std::streamoff size = f.tellg();
@@ -808,21 +810,23 @@ void validateReceipt(const plan& value, const request& request_value,
     if (!value_receipt.digest.empty() && value_receipt.digest != receiptDigest(value_receipt))
         fail("receipt digest is stale");
     if (!payload_root.empty()) {
-        const std::filesystem::path root = std::filesystem::path(payload_root);
+        const std::filesystem::path root(payload_root);
         const std::filesystem::path payload = root / value_receipt.feature_path;
         std::error_code ec;
-        if (!std::filesystem::is_regular_file(payload, ec) || ec)
+        if (!std::filesystem::is_regular_file(spirula::NativeFilesystemPath(payload), ec) || ec)
             fail("receipt payload is missing");
-        const std::filesystem::path rootCanonical = std::filesystem::weakly_canonical(root, ec);
+        const std::filesystem::path rootCanonical =
+            std::filesystem::weakly_canonical(spirula::NativeFilesystemPath(root), ec);
         if (ec) fail("receipt payload root cannot be resolved");
         const std::filesystem::path payloadCanonical =
-            std::filesystem::weakly_canonical(payload, ec);
+            std::filesystem::weakly_canonical(spirula::NativeFilesystemPath(payload), ec);
         if (ec) fail("receipt payload cannot be resolved");
         const std::filesystem::path relative = payloadCanonical.lexically_relative(rootCanonical);
         if (relative.empty() || relative == ".." ||
             relative.generic_string().rfind("../", 0) == 0)
             fail("receipt payload escapes its root");
-        if ((uint64_t)std::filesystem::file_size(payload, ec) != value_receipt.payload_bytes || ec)
+        if ((uint64_t)std::filesystem::file_size(spirula::NativeFilesystemPath(payload), ec) !=
+                value_receipt.payload_bytes || ec)
             fail("receipt payload size differs");
         if (sha256File(payload.string()) != value_receipt.payload_digest)
             fail("receipt payload digest differs");
@@ -1298,14 +1302,15 @@ void publishAtomic(const std::string& path, const std::string& bytes) {
     const std::filesystem::path destination(path);
     if (destination.empty()) fail("publication path is empty");
     std::error_code ec;
-    if (std::filesystem::exists(destination, ec) && !ec) {
+    if (std::filesystem::exists(spirula::NativeFilesystemPath(destination), ec) && !ec) {
         const std::string current = readFile(path);
         if (current == bytes) return;
         fail("immutable publication conflicts with " + path);
     }
     if (ec) fail("cannot inspect publication path " + path);
     if (!destination.parent_path().empty()) {
-        std::filesystem::create_directories(destination.parent_path(), ec);
+        std::filesystem::create_directories(
+            spirula::NativeFilesystemPath(destination.parent_path()), ec);
         if (ec) fail("cannot create publication directory " + destination.parent_path().string());
     }
     static std::atomic<uint64_t> serial{0};
@@ -1315,29 +1320,36 @@ void publishAtomic(const std::string& path, const std::string& bytes) {
     for (uint64_t i = 0; i != 1000; ++i) {
         temp = path + ".part." + std::to_string(stamp) + "." +
                std::to_string(serial.fetch_add(1));
-        if (!std::filesystem::exists(temp, ec) && !ec) break;
+        if (!std::filesystem::exists(spirula::NativeFilesystemPath(
+                std::filesystem::path(temp)), ec) && !ec) break;
         if (i == 999) fail("cannot create publication sibling " + path);
     }
     {
-        std::ofstream out(temp, std::ios::binary | std::ios::trunc);
+        std::ofstream out(spirula::NativeFilesystemPath(std::filesystem::path(temp)),
+                          std::ios::binary | std::ios::trunc);
         if (!out) fail("cannot write publication " + path);
         out.write(bytes.data(), (std::streamsize)bytes.size());
         out.flush();
         if (!out) {
             std::error_code removeError;
-            std::filesystem::remove(temp, removeError);
+            std::filesystem::remove(spirula::NativeFilesystemPath(
+                                        std::filesystem::path(temp)), removeError);
             fail("cannot write publication " + path);
         }
     }
-    std::filesystem::rename(temp, destination, ec);
+    std::filesystem::rename(spirula::NativeFilesystemPath(std::filesystem::path(temp)),
+                            spirula::NativeFilesystemPath(destination), ec);
     if (ec) {
         std::error_code existsError;
-        if (std::filesystem::exists(destination, existsError) && !existsError &&
+        if (std::filesystem::exists(spirula::NativeFilesystemPath(destination), existsError) &&
+            !existsError &&
             readFile(path) == bytes) {
-            std::filesystem::remove(temp, existsError);
+            std::filesystem::remove(spirula::NativeFilesystemPath(
+                                        std::filesystem::path(temp)), existsError);
             return;
         }
-        std::filesystem::remove(temp, existsError);
+        std::filesystem::remove(spirula::NativeFilesystemPath(
+                                    std::filesystem::path(temp)), existsError);
         fail("cannot publish " + path);
     }
 }

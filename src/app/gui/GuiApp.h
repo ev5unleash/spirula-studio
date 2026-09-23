@@ -8,6 +8,7 @@
 #include "app/JobScheduler.h"
 #include "config/TrainConfig.h"
 #include "i18n/Message.h"
+#include "app/gui/AgentPanel.h"
 #include "app/gui/BatchProcess.h"
 #include "app/gui/ColmapRunner.h"
 #include "app/gui/CommandRunner.h"
@@ -212,6 +213,7 @@ private:
     void draw_mesh_preset_picker();
     // Arm the shared save dialog for `kind`, seeded from what is on screen.
     void open_preset_save(PresetKind kind);
+    struct RemoteTrainingAssignment;
     void start_training();
     // Everything that renders from the training session, released together.
     // Every path that replaces or destroys the session goes through this.
@@ -220,7 +222,17 @@ private:
     // the splat viewer holding the engine, the viewport's render worker --
     // is released here, so both the Start button and the batch queue go
     // through it.
-    void launch_training(const TrainConfig& cfg, const std::string& preset);
+    void launch_training(const TrainConfig& cfg, const std::string& preset,
+                         bool allow_remote = true);
+    bool submit_remote_training(const TrainConfig& cfg,
+                                const std::string& preset);
+    void recover_remote_training_assignments();
+    bool persist_remote_training_assignment(
+        RemoteTrainingAssignment& assignment, std::string& error);
+    void advance_remote_training();
+    void draw_remote_training_controls();
+    bool remote_training_pending() const;
+    void resume_remote_training(const std::string& job_id);
     bool training_busy() const;   // Foreground training
     bool foreground_device_in_use() const;
     std::string desktop_device_selector() const;
@@ -272,6 +284,10 @@ private:
         std::string device;
         std::string prep_job_id;
         std::vector<std::string> shard_job_ids;
+        std::vector<std::string> remote_job_ids;
+        std::vector<std::string> remote_worker_ids;
+        std::vector<std::string> remote_attempt_ids;
+        std::vector<bool> remote_submission_attempted;
         std::vector<std::string> request_paths;
         std::string central_job_id;
         std::vector<std::string> central_args;
@@ -285,14 +301,58 @@ private:
         int expected_images = 0;
         std::vector<int> shard_images;
         int batch_row = -1;
+        bool remote_assignments_persisted = false;
         bool collected = false;
         bool failed = false;
-        // A coordinator-owned error stays latched; scheduler state changes
-        // cannot repair collection or recovery metadata.
+        // Coordinator errors cannot be repaired by retrying scheduler jobs.
         bool local_failure = false;
         bool finished = false;
         std::string error;
     };
+    struct RemoteTrainingAssignment {
+        std::string job_id, worker_id, metadata_path, preset;
+        std::string resume_checkpoint, paired_leader_id, required_build;
+        std::string attempt_id, input_identity_sha256, local_error;
+        TrainConfig config;
+        std::uint64_t paired_leader_epoch = 0;
+        std::optional<app::agent::LeaderServer::TrainingJobSnapshot> snapshot;
+        bool submission_attempted = false;
+        bool cancel_requested = false;
+        bool supersede_queued = false;
+        bool identity_mismatch = false;
+        bool queue_rejected = false;
+    };
+#ifdef SS_TOOL_SFM
+    struct RemoteReconstructionCoordinator {
+        std::string job_id, worker_id, metadata_dir, prep_job_id;
+        std::string phase, manifest_path, manifest_sha256;
+        std::string attempt_id, paired_leader_id, required_build;
+        std::string input_identity_sha256, leader_state, error;
+        uint64_t paired_leader_epoch = 0;
+        app::agent::LeaderServer::ReconstructionJobState remote_state =
+            app::agent::LeaderServer::ReconstructionJobState::Unknown;
+        bool has_snapshot = false;
+        PrepResult prep_result;
+        bool prep_result_valid = false;
+        std::vector<std::string> request_args;
+        SfmJob sfm;
+        bool cancel_requested = false;
+        bool supersede_queued = false;
+        bool completion_started = false;
+        bool completed = false;
+        bool failed = false;
+    };
+    bool submit_remote_reconstruction_prep(const SfmJob& sfm,
+                                          const PrepJob& prep,
+                                          const std::string& work_dir,
+                                          const std::string& device,
+                                          const std::string& device_name);
+    bool persist_remote_reconstruction(
+        RemoteReconstructionCoordinator& c, std::string& error);
+    void advance_remote_reconstructions();
+    bool remote_reconstruction_pending() const;
+    void cancel_remote_reconstruction();
+#endif
     bool submit_feature_shard_prep(FeatureShardCoordinator& c,
                                    const PrepJob& frozen,
                                    const std::string& work_dir,
@@ -300,6 +360,7 @@ private:
                                    const std::string& device_name);
     void advance_feature_shards();
     bool feature_shard_job_live(const FeatureShardCoordinator& c) const;
+    void cancel_feature_coordinator(FeatureShardCoordinator& c);
     void cancel_feature_shards();
     // ---- dataset creation ----
     // Which engines this build and this machine can actually offer.
@@ -779,11 +840,21 @@ private:
     bool _scheduled_preview_ready = false;
     std::vector<app::sched::Job> _scheduler_jobs;
     std::vector<FeatureShardCoordinator> _feature_coordinators;
+    std::string _training_worker_id;
+    std::vector<RemoteTrainingAssignment> _remote_training_assignments;
+#ifdef SS_TOOL_SFM
+    std::string _reconstruction_worker_id;
+    std::vector<RemoteReconstructionCoordinator>
+        _remote_reconstruction_coordinators;
+#endif
+    size_t _feature_worker_cursor = 0;
     std::map<std::string, std::deque<std::string>> _scheduler_log_tail;
     std::map<std::string, bool> _recovery_dismissed;
     std::string _force_stop_job;
     bool _force_stop_open = false;
     bool _recovery_shown = false;
+
+    AgentPanel _agent_panel;
 
     FileDialog _dialog;
     PickAction _pick = PickAction::None;

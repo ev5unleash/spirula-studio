@@ -19,6 +19,8 @@
 #include <string>
 #include <vector>
 
+#include "core/FilesystemPath.h"
+
 namespace sfm {
 
 // Similarity-covariant keypoint in *original*-image pixel coordinates (top-left
@@ -173,7 +175,9 @@ inline std::string tempSibling(const std::string& path) {
         const std::string candidate = path + ".part." + std::to_string(stamp) + "." +
                                       std::to_string(serial.fetch_add(1));
         std::error_code ec;
-        if (!std::filesystem::exists(candidate, ec) && !ec) return candidate;
+        if (!std::filesystem::exists(
+                spirula::NativeFilesystemPath(std::filesystem::path(candidate)), ec) && !ec)
+            return candidate;
     }
     throw std::runtime_error("cannot create temporary VKFT sibling for " + path);
 }
@@ -184,10 +188,13 @@ struct Reader {
     uint64_t size = 0;
     uint64_t offset = 0;
 
-    explicit Reader(const std::string& p) : file(p, std::ios::binary), path(p) {
+    explicit Reader(const std::string& p)
+        : file(spirula::NativeFilesystemPath(std::filesystem::path(p)),
+               std::ios::binary), path(p) {
         if (!file) throw std::runtime_error("cannot read " + p);
         std::error_code ec;
-        size = (uint64_t)std::filesystem::file_size(p, ec);
+        size = (uint64_t)std::filesystem::file_size(
+            spirula::NativeFilesystemPath(std::filesystem::path(p)), ec);
         if (ec) throw std::runtime_error("cannot stat " + p);
         if (size > kMaxFeatureFileBytes) bad(path, "file-size bound exceeded");
     }
@@ -384,7 +391,8 @@ inline void writeFeatures(const std::string& path, const FeatureSet& fs) {
     const std::string tmp = feature_detail::tempSibling(path);
     try {
         {
-            std::ofstream f(tmp, std::ios::binary);
+            std::ofstream f(spirula::NativeFilesystemPath(std::filesystem::path(tmp)),
+                            std::ios::binary);
             if (!f) throw std::runtime_error("cannot write " + path);
             const uint32_t version = 6, count = fs.count(), dtype = (uint32_t)fs.dtype;
             f.write("VKFT", 4);
@@ -419,17 +427,23 @@ inline void writeFeatures(const std::string& path, const FeatureSet& fs) {
             if (!f) throw std::runtime_error("cannot write " + path);
         }
         std::error_code ec;
-        std::filesystem::rename(tmp, path, ec);
+        std::filesystem::rename(
+            spirula::NativeFilesystemPath(std::filesystem::path(tmp)),
+            spirula::NativeFilesystemPath(std::filesystem::path(path)), ec);
         if (ec) {
             std::error_code removeError;
-            std::filesystem::remove(path, removeError);
+            std::filesystem::remove(
+                spirula::NativeFilesystemPath(std::filesystem::path(path)), removeError);
             if (removeError) throw std::runtime_error("cannot write " + path);
-            std::filesystem::rename(tmp, path, ec);
+            std::filesystem::rename(
+                spirula::NativeFilesystemPath(std::filesystem::path(tmp)),
+                spirula::NativeFilesystemPath(std::filesystem::path(path)), ec);
         }
         if (ec) throw std::runtime_error("cannot write " + path);
     } catch (...) {
         std::error_code ec;
-        std::filesystem::remove(tmp, ec);
+        std::filesystem::remove(
+            spirula::NativeFilesystemPath(std::filesystem::path(tmp)), ec);
         throw;
     }
 }

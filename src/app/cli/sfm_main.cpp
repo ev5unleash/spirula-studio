@@ -762,8 +762,10 @@ static int cmdPlan(int argc, char** argv) {
         makeFeaturePlan(image_root, cfg, options);
     feature_work::writePlanFile(plan_path.string(), plan);
     for (uint32_t shard = 0; shard < options.shards; ++shard) {
-        feature_work::FeatureRequest request =
-            makeFeatureRequest(plan, shard, "attempt-0001");
+        feature_work::FeatureRequest request = makeFeatureRequest(
+            plan, shard, "attempt-" +
+            feature_work::sha256Text(
+                root.u8string() + ":" + std::to_string(shard)).substr(0, 32));
         char name[80];
         std::snprintf(name, sizeof name,
                       "request-shard-%04u-attempt-0001.json", shard);

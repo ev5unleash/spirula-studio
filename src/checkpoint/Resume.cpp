@@ -4,6 +4,7 @@
 
 #include "config/TrainConfigJson.h"
 #include "core/CheckpointIO.h"
+#include "core/FilesystemPath.h"
 
 #include <algorithm>
 #include <cmath>
@@ -32,9 +33,10 @@ struct TarView {
 };
 
 TarView open_state_tar(const fs::path& ckpt_dir) {
-    fs::path tarpath = ckpt_dir / "state.tar";
+    const fs::path tarpath =
+        spirula::LogicalAbsoluteFilesystemPath(ckpt_dir) / "state.tar";
     TarView v;
-    v.in.open(tarpath.string(), std::ios::binary);
+    v.in.open(spirula::NativeFilesystemPath(tarpath), std::ios::binary);
     if (!v.in)
         throw std::runtime_error("cannot open " + tarpath.string() +
                                  " (not a checkpoint directory)");
@@ -387,7 +389,10 @@ bool valid_checkpoint(const fs::path& ckpt_dir, bool require_resume = false) {
 }  // namespace
 
 
-ResolvedCheckpoint resolve_checkpoint(const fs::path& path) {
+ResolvedCheckpoint resolve_checkpoint(const fs::path& supplied_path) {
+    const fs::path path = supplied_path.empty()
+        ? supplied_path
+        : spirula::LogicalAbsoluteFilesystemPath(supplied_path);
     const std::string name = path.filename().string();
     const bool unpublished = name.rfind(".staging-", 0) == 0 ||
                              name.rfind(".replaced-", 0) == 0;
@@ -396,26 +401,30 @@ ResolvedCheckpoint resolve_checkpoint(const fs::path& path) {
 
     std::vector<fs::path> ckpts;
     fs::path run_dir = path;
-    if (fs::is_directory(path)) {
-        for (const auto& e : fs::directory_iterator(path)) {
-            const std::string b = e.path().filename().string();
+    const fs::path io_path = spirula::NativeFilesystemPath(path);
+    if (fs::is_directory(io_path)) {
+        for (const auto& e : fs::directory_iterator(io_path)) {
+            const fs::path candidate = spirula::LogicalFilesystemPath(e.path());
+            const std::string b = candidate.filename().string();
             if (b.rfind("step-", 0) == 0 && b.size() > 5 &&
                 b.compare(b.size() - 5, 5, ".ckpt") == 0)
-                ckpts.push_back(e.path());
+                ckpts.push_back(candidate);
         }
-    } else if (!fs::exists(path) && name.rfind("step-", 0) == 0 &&
+    } else if (!fs::exists(io_path) && name.rfind("step-", 0) == 0 &&
                name.size() > 5 &&
                name.compare(name.size() - 5, 5, ".ckpt") == 0) {
         run_dir = path.parent_path();
         if (run_dir.empty()) run_dir = ".";
         const std::string prefix =
             name.substr(0, name.size() - 5) + "-replaced-";
-        if (fs::is_directory(run_dir)) {
-            for (const auto& e : fs::directory_iterator(run_dir)) {
-                const std::string b = e.path().filename().string();
+        const fs::path io_run_dir = spirula::NativeFilesystemPath(run_dir);
+        if (fs::is_directory(io_run_dir)) {
+            for (const auto& e : fs::directory_iterator(io_run_dir)) {
+                const fs::path candidate = spirula::LogicalFilesystemPath(e.path());
+                const std::string b = candidate.filename().string();
                 if (b.rfind(prefix, 0) == 0 && b.size() > 5 &&
                     b.compare(b.size() - 5, 5, ".ckpt") == 0)
-                    ckpts.push_back(e.path());
+                    ckpts.push_back(candidate);
             }
         }
     }
@@ -476,21 +485,24 @@ TrainConfig build_resume_config(const TrainConfig& cli,
     ResolvedCheckpoint r = resolve_checkpoint(cli.resume);
     check_resumable(r.ckpt_dir);
 
-    const fs::path run_dir = fs::absolute(r.run_dir);
+    const fs::path run_dir =
+        spirula::LogicalAbsoluteFilesystemPath(r.run_dir);
     fs::path cfg_path = r.ckpt_dir / "config.json";
-    if (!fs::is_regular_file(cfg_path)) cfg_path = run_dir / "config.json";
-    if (!fs::is_regular_file(cfg_path))
+    if (!fs::is_regular_file(spirula::NativeFilesystemPath(cfg_path)))
+        cfg_path = run_dir / "config.json";
+    if (!fs::is_regular_file(spirula::NativeFilesystemPath(cfg_path)))
         throw std::runtime_error("no config.json in " + r.ckpt_dir.string() +
                                  " or " + run_dir.string() +
                                  " (needed to reconstruct the run's config)");
 
     TrainConfig base = config_from_json(cfg_path);
-    base.resume = cli.resume;
+    base.resume = spirula::LogicalFilesystemPath(fs::u8path(cli.resume)).u8string();
 
     // Continue writing into the checkpoint's own run folder, so new
     // checkpoints, eval images and logs land beside the old ones. An explicit
     // --output-dir-* below overrides this.
-    base.output_dir_prefix = run_dir.parent_path().string();
+    base.output_dir_prefix =
+        spirula::LogicalFilesystemPath(run_dir.parent_path()).u8string();
     base.output_dir_name   = run_dir.filename().string();
 
     // A preset named on the resume command line re-imposes its deviations on

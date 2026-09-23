@@ -8,6 +8,7 @@
 #include "data/Json.h"
 
 #include "core/CameraModel.h"   // camera_model_from_name (CUDA-free)
+#include "core/FilesystemPath.h"
 #include "data/DistortionFit.h"
 #include "data/SourceCamera.h"
 #include "sfm/core/Exif.h"
@@ -121,7 +122,13 @@ std::vector<std::string> split_ws(const std::string& s) {
 
 
 ColmapPoints3D read_ply_points(const std::string& path) {
-    FILE* f = std::fopen(path.c_str(), "rb");
+    const fs::path io_path =
+        spirula::NativeFilesystemPath(fs::path(path));
+#ifdef _WIN32
+    FILE* f = ::_wfopen(io_path.c_str(), L"rb");
+#else
+    FILE* f = std::fopen(io_path.c_str(), "rb");
+#endif
     if (!f) throw std::runtime_error("PLY: cannot open " + path);
     struct Closer { FILE* f; ~Closer() { std::fclose(f); } } closer{f};
 
@@ -142,11 +149,16 @@ ColmapPoints3D read_ply_points(const std::string& path) {
             else throw std::runtime_error("PLY: unsupported format " + tok[1] +
                                           " (big-endian not supported)");
         } else if (tok[0] == "element") {
+            if (tok.size() != 3) throw std::runtime_error("PLY: bad element line");
             PlyElement e;
             e.name = tok[1];
-            e.count = std::stoll(tok[2]);
+            size_t parsed = 0;
+            e.count = std::stoll(tok[2], &parsed);
+            if (parsed != tok[2].size() || e.count < 0)
+                throw std::runtime_error("PLY: bad element count");
             elements.push_back(std::move(e));
         } else if (tok[0] == "property") {
+            if (tok.size() < 3) throw std::runtime_error("PLY: bad property line");
             if (elements.empty()) throw std::runtime_error("PLY: property before element");
             if (tok[1] == "list") { elements.back().has_list = true; continue; }
             if (tok.size() < 3) throw std::runtime_error("PLY: bad property line");
@@ -157,10 +169,8 @@ ColmapPoints3D read_ply_points(const std::string& path) {
     }
 
     // ---- Slurp the data section once ----------------------------------------
-    // Per-row fgetc/fread through the stdio layer (worse still under
-    // Emscripten's virtual FS) made large ascii clouds take tens of seconds;
-    // reading the rest of the file into one buffer and pointer-walking it
-    // parses the same 60+ MB in well under a second.
+    // Buffering the data section avoids slow per-scalar stdio, especially in
+    // Emscripten's virtual filesystem.
     long data_off = std::ftell(f);
     std::fseek(f, 0, SEEK_END);
     long fsize = std::ftell(f);
@@ -181,8 +191,11 @@ ColmapPoints3D read_ply_points(const std::string& path) {
                 throw std::runtime_error(
                     "PLY: list property before vertex element not supported in " + path);
             if (binary) {
-                p += el.count * el.stride();
-                if (p > end) throw std::runtime_error("PLY: truncated " + path);
+                const size_t stride = el.stride();
+                if (!stride || static_cast<uint64_t>(el.count) >
+                                   static_cast<size_t>(end - p) / stride)
+                    throw std::runtime_error("PLY: truncated " + path);
+                p += static_cast<size_t>(el.count) * stride;
             } else {
                 for (int64_t i = 0; i < el.count; i++) {
                     const char* nl = (const char*)std::memchr(p, '\n', end - p);
@@ -209,6 +222,12 @@ ColmapPoints3D read_ply_points(const std::string& path) {
             off += ply_type_size(el.props[i].type);
         }
         const size_t stride = off;
+        const size_t remaining = static_cast<size_t>(end - p);
+        const size_t min_row = binary ? stride : nprops;
+        if (!min_row || static_cast<uint64_t>(el.count) > remaining / min_row ||
+            static_cast<uint64_t>(el.count) > pts.xyz.max_size() / 3 ||
+            static_cast<uint64_t>(el.count) > pts.rgb.max_size() / 3)
+            throw std::runtime_error("PLY: truncated " + path);
 
         // Colors stored as float/double are 0..1; integer types pass through.
         auto to_u8 = [&](double v, PlyType t) -> uint8_t {
@@ -216,11 +235,9 @@ ColmapPoints3D read_ply_points(const std::string& path) {
             return (uint8_t)std::min(std::max(v, 0.0), 255.0);
         };
 
-        pts.xyz.resize(el.count * 3);
-        pts.rgb.resize(el.count * 3);
+        pts.xyz.resize(static_cast<size_t>(el.count) * 3);
+        pts.rgb.resize(static_cast<size_t>(el.count) * 3);
         if (binary) {
-            if ((int64_t)(end - p) < el.count * (int64_t)stride)
-                throw std::runtime_error("PLY: truncated " + path);
             for (int64_t i = 0; i < el.count; i++) {
                 const uint8_t* row = (const uint8_t*)p + (size_t)i * stride;
                 pts.xyz[i*3 + 0] = ply_read_scalar(row + offsets[ix], el.props[ix].type);
@@ -409,12 +426,14 @@ std::string rel_to_image_dir(const std::string& file_path, const std::string& im
 
 ParsedDataset parse_nerfstudio_dataset(const std::string& dataset_dir,
                                        const DatasetParserConfig& cfg) {
-    fs::path transforms_path = fs::path(dataset_dir) / "transforms.json";
-    if (!fs::exists(transforms_path))
+    const fs::path root =
+        spirula::LogicalFilesystemPath(fs::path(dataset_dir));
+    fs::path transforms_path = root / "transforms.json";
+    if (!fs::exists(spirula::NativeFilesystemPath(transforms_path)))
         throw std::runtime_error("NerfstudioParser: " + transforms_path.string() +
                                  " does not exist");
     JsonValue meta = json_parse_file(transforms_path.string());
-    return parse_nerfstudio_meta(meta, dataset_dir, cfg);
+    return parse_nerfstudio_meta(meta, root.string(), cfg);
 }
 
 // Shared back-end: consumes an already-built transforms.json-shaped meta.
@@ -423,7 +442,8 @@ ParsedDataset parse_nerfstudio_dataset(const std::string& dataset_dir,
 ParsedDataset parse_nerfstudio_meta(const JsonValue& meta,
                                     const std::string& dataset_dir,
                                     const DatasetParserConfig& cfg) {
-    fs::path root(dataset_dir);
+    fs::path root =
+        spirula::LogicalFilesystemPath(fs::path(dataset_dir));
     const JsonValue* jframes = meta.find("frames");
     if (!jframes || !jframes->is_array() || jframes->arr.empty())
         throw std::runtime_error("NerfstudioParser: no frames in transforms.json");
@@ -441,8 +461,9 @@ ParsedDataset parse_nerfstudio_meta(const JsonValue& meta,
                                                {file_path}).c_str());
             continue;
         }
-        fs::path abs = root / file_path;
-        if (cfg.require_image_files && !fs::exists(abs)) {
+        fs::path abs = spirula::LogicalFilesystemPath(root / file_path);
+        if (cfg.require_image_files &&
+            !fs::exists(spirula::NativeFilesystemPath(abs))) {
             std::fprintf(stderr, "%s %s\n", dmsg::word_warning.get(),
                          spirula::i18n::format(dmsg::image_missing,
                                                {file_path}).c_str());
@@ -498,7 +519,10 @@ ParsedDataset parse_nerfstudio_meta(const JsonValue& meta,
         if (const JsonValue* v = meta.find("ply_file_path")) ply_rel = v->as_string();
         else {
             for (const char* cand : {"sparse_pc.ply", "pointcloud.ply"})
-                if (fs::exists(root / cand)) { ply_rel = cand; break; }
+                if (fs::exists(spirula::NativeFilesystemPath(root / cand))) {
+                    ply_rel = cand;
+                    break;
+                }
         }
         if (ply_rel.empty()) {
             // Lenient (viewer) mode: a transforms.json with no point cloud
@@ -508,7 +532,8 @@ ParsedDataset parse_nerfstudio_meta(const JsonValue& meta,
                 throw std::runtime_error(
                     "NerfstudioParser: no initial point cloud found (ply_file_path / "
                     "sparse_pc.ply / pointcloud.ply)");
-        } else if (cfg.require_image_files || fs::exists(root / ply_rel)) {
+        } else if (cfg.require_image_files ||
+                   fs::exists(spirula::NativeFilesystemPath(root / ply_rel))) {
             points = read_ply_points((root / ply_rel).string());
         }
     }

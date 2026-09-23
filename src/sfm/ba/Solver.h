@@ -457,7 +457,7 @@ public:
         double reject_mult = 2.0;
         int consec_fallbacks = 0;
         for (int it = 0; it < opt_.max_iters; it++) {
-            sfm::cancel::check();
+            sfm::cancel::pause_point();
             if (opt_.verbose)
                 sfm::slog::diag(sfm::slog::Tag::Map, "iter %3d: cost = %.9e, damping = %.3g%s", it,
                                 cost,

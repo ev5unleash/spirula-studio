@@ -686,7 +686,7 @@ inline std::vector<TwoViewMatches> verifyPairs(
                 verifyOne(p, m);
                 if (progress) progress(p + 1, pairs.size());
                 tick(p);
-                cancel::check();
+                cancel::pause_point();
             }
         }
     } else {
@@ -776,7 +776,7 @@ inline std::vector<TwoViewMatches> verifyPairs(
         for (std::thread& w : workers) w.join();
         if (failure) std::rethrow_exception(failure);
     }
-    cancel::check();   // safe now: every worker has been joined
+    cancel::pause_point();   // safe now: every worker has been joined
 
     if (putative_out) *putative_out = putative;
 

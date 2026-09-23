@@ -527,6 +527,15 @@ int main() {
     write_checkpoint(first, 1000);
     check(ckpt::resolve_checkpoint(root).ckpt_dir == first,
           "selects the only valid checkpoint");
+    std::istringstream metadata(std::string(
+        static_cast<size_t>(ckpt::kMaxCheckpointMetadataBytes + 1), ' '));
+    try {
+        (void)ckpt::tar_read_member(
+            metadata, {"state.json", 0, ckpt::kMaxCheckpointMetadataBytes + 1});
+        check(false, "rejects oversized checkpoint JSON before allocation");
+    } catch (const std::runtime_error&) {
+        check(true, "rejects oversized checkpoint JSON before allocation");
+    }
 
     const fs::path staging = root / ".staging-step-000002000.ckpt-42";
     write_checkpoint(staging, 2000);

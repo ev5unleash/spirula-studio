@@ -54,6 +54,8 @@ if(SS_BUILD_SAM)
     include(SsNn)
 endif()
 
+include(SsAgentTls)
+
 include(SsApps)
 include(SsTests)
 

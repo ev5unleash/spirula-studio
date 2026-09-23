@@ -106,6 +106,23 @@ list(APPEND SS_TOOL_DEFS SS_TOOL_TRAIN=1)
 list(APPEND SS_TOOL_SOURCES ${SS_SRC}/app/cli/worker_main.cpp)
 list(APPEND SS_TOOL_DEFS SS_TOOL_WORKER=1)
 
+# ---- persistent agent host and M0 service probe ----
+list(APPEND SS_TOOL_SOURCES
+     ${SS_SRC}/app/cli/agent_main.cpp
+     ${SS_SRC}/app/AgentClient.cpp
+     ${SS_SRC}/app/AgentLeader.cpp
+     ${SS_SRC}/app/cli/agent_service.cpp
+     ${SS_SRC}/app/AgentServiceManager.cpp)
+list(APPEND SS_TOOL_SOURCES ${SS_SRC}/app/AgentTrainingJob.cpp
+     ${SS_SRC}/app/AgentUpdatePackage.cpp)
+list(APPEND SS_TOOL_SOURCES
+     ${SS_SRC}/app/AgentAdminIntent.cpp
+     ${SS_SRC}/app/AgentAdminBroker.cpp)
+list(APPEND SS_TOOL_DEFS SS_TOOL_AGENT=1)
+if(WIN32)
+    list(APPEND SS_TOOL_LIBS advapi32 shell32 ole32)
+endif()
+
 # ---- mesh extraction ----
 # Both backends: the host side is portable (mesh/OccupancyEvaluator.cpp) and
 # each has kernels (mesh/Meshing.cu, backend/vulkan/kernels/Meshing.cpp).
@@ -121,6 +138,27 @@ if(SS_BUILD_SFM)
          ${SS_SRC}/app/cli/sfm_ba.cpp)
     list(APPEND SS_TOOL_DEFS SS_TOOL_SFM=1)
     list(APPEND SS_TOOL_LIBS ss_sfm)
+    list(APPEND SS_TOOL_SOURCES ${SS_SRC}/app/AgentFeatureJob.cpp)
+    list(APPEND SS_TOOL_SOURCES
+         ${SS_SRC}/app/AgentFeatureWorker.cpp
+         ${SS_SRC}/app/AgentFeatureWorkerStore.cpp
+         ${SS_SRC}/app/AgentPortableWorkerStore.cpp)
+    target_sources(agent_feature_worker_store_test PRIVATE
+                   ${SS_SRC}/app/AgentFeatureWorkerStore.cpp)
+    ss_configure_app(agent_feature_worker_store_test)
+    target_link_libraries(agent_feature_worker_store_test PRIVATE ss_agent_tls)
+    target_sources(agent_portable_worker_store_test PRIVATE
+                   ${SS_SRC}/app/AgentPortableWorkerStore.cpp)
+    ss_configure_app(agent_portable_worker_store_test)
+    target_link_libraries(agent_portable_worker_store_test PRIVATE ss_agent_tls)
+    target_sources(agent_feature_job_test PRIVATE ${SS_SRC}/app/AgentFeatureJob.cpp)
+    target_link_libraries(agent_feature_job_test PRIVATE ss_agent_tls)
+    list(APPEND SS_TOOL_SOURCES ${SS_SRC}/app/AgentReconstructionJob.cpp)
+    target_sources(agent_reconstruction_job_test PRIVATE
+                   ${SS_SRC}/app/AgentReconstructionJob.cpp)
+    ss_configure_app(agent_reconstruction_job_test)
+    target_compile_definitions(agent_reconstruction_job_test PRIVATE
+                               SS_VERSION="${SS_VERSION}")
 endif()
 
 if(SS_BUILD_SAM)
@@ -235,7 +273,7 @@ if(SS_BUILD_GUI)
     # macOS need the platform toolkit for it; Linux spawns zenity/kdialog and
     # links nothing.
     if(WIN32)
-        list(APPEND SS_TOOL_LIBS ole32 uuid shell32)
+        list(APPEND SS_TOOL_LIBS uuid)
     elseif(APPLE)
         # Deliberately no enable_language(OBJCXX): CMake would then hand every
         # .m in the build to clang as Objective-C++, and GLFW's whole Cocoa
@@ -278,7 +316,7 @@ endif()
 
 add_executable(spirula ${SS_SRC}/app/Main.cpp ${SS_TOOL_SOURCES})
 ss_configure_app(spirula)
-target_link_libraries(spirula PRIVATE ${SS_TOOL_LIBS})
+target_link_libraries(spirula PRIVATE ${SS_TOOL_LIBS} ss_agent_tls)
 target_compile_definitions(spirula PRIVATE
     ${SS_TOOL_DEFS} SS_VERSION="${SS_VERSION}" ${SS_I18N_DEFS})
 if(WIN32)
@@ -346,6 +384,39 @@ foreach(test_src ${SS_CORE_TESTS})
     add_executable(${test_name} ${test_src})
     ss_configure_app(${test_name})
 endforeach()
+target_link_libraries(agent_pairing_test PRIVATE ss_agent_tls)
+target_link_libraries(agent_transfer_test PRIVATE ss_agent_tls)
+target_sources(agent_leader_test PRIVATE
+               ${SS_SRC}/app/AgentLeader.cpp
+               ${SS_SRC}/app/AgentTrainingJob.cpp
+               ${SS_SRC}/app/AgentAdminIntent.cpp
+               ${SS_SRC}/app/AgentUpdatePackage.cpp)
+target_compile_definitions(agent_leader_test PRIVATE
+                           SS_TOOL_TRAIN=1 SS_VERSION="${SS_VERSION}")
+target_link_libraries(agent_leader_test PRIVATE ss_agent_tls)
+if(SS_BUILD_SFM)
+    target_sources(agent_leader_test PRIVATE
+                   ${SS_SRC}/app/AgentFeatureJob.cpp
+                   ${SS_SRC}/app/AgentReconstructionJob.cpp)
+    target_compile_definitions(agent_leader_test PRIVATE SS_TOOL_SFM=1)
+    target_link_libraries(agent_leader_test PRIVATE ss_sfm)
+endif()
+add_executable(agent_training_job_test
+    ${SS_SRC}/app/tests/agent_training_job_test.cpp
+    ${SS_SRC}/app/AgentTrainingJob.cpp)
+ss_configure_app(agent_training_job_test)
+add_executable(agent_update_package_test
+    ${SS_SRC}/app/tests/agent_update_package_test.cpp
+    ${SS_SRC}/app/AgentUpdatePackage.cpp)
+ss_configure_app(agent_update_package_test)
+target_link_libraries(agent_update_package_test PRIVATE ss_agent_tls)
+target_compile_definitions(agent_update_package_test PRIVATE
+    SS_VERSION="${SS_VERSION}")
+add_executable(agent_admin_intent_test
+    ${SS_SRC}/app/tests/agent_admin_intent_test.cpp
+    ${SS_SRC}/app/AgentAdminIntent.cpp)
+ss_configure_app(agent_admin_intent_test)
+target_link_libraries(agent_admin_intent_test PRIVATE ss_agent_tls)
 
 # The frame plan and Pano360 source-region geometry: no device, no image files,
 # and a wrong answer is silent.

@@ -29,6 +29,7 @@
 #include <thread>
 #include <vector>
 
+#include "core/FilesystemPath.h"
 #include "core/ColorSpace.h"
 #include "data/Json.h"
 #include "core/Env.h"
@@ -1640,6 +1641,7 @@ int extractBatch(const std::string& image_root, const SfmConfig& cfg,
             fs::create_directories(outputs[k].parent_path());
             writeFeatures(outputs[k].string(), features);
             if (written) written(k, features, img);
+            cancel::pause_point();
             stats.features += features.count();
             stats.features_new += features.count();
             stats.images++;
@@ -2038,6 +2040,7 @@ int extractFeatureRequest(const std::string& image_root,
             receipt.digest = feature_work::receiptDigest(receipt);
             feature_work::writeReceiptFile(current_receipt.string(), receipt);
             accept_receipt(std::move(receipt), true);
+            cancel::pause_point();
             continue;
         }
         int width = 0, height = 0;
@@ -2228,13 +2231,15 @@ int loadFeatureDir(const std::string& featdir, const SfmConfig& cfg,
 }
 void validateFeatureResult(const std::string& request_path,
                            const fs::path& result_root) {
-    const fs::path request_file = fs::absolute(fs::u8path(request_path));
+    const fs::path request_file =
+        spirula::LogicalAbsoluteFilesystemPath(fs::u8path(request_path));
     const auto request =
         feature_work::readRequestFile(request_file.string());
     const auto plan = feature_work::readPlanFile(
         (request_file.parent_path() / fs::u8path(request.plan_path)).string());
     feature_work::validateRequest(plan, request);
-    const fs::path root = fs::absolute(result_root);
+    const fs::path root =
+        spirula::LogicalAbsoluteFilesystemPath(result_root);
     const auto binding = feature_work::readWorkerBindingFile(
         (root / "binding.json").string());
     feature_work::validateWorkerBinding(plan, binding);
@@ -2944,6 +2949,7 @@ int matchFeatureDir(const std::string& featdir, const SfmConfig& cfg,
 
 AutoResult run_auto(SfmConfig& cfg, const AutoInputs& in) {
     AutoResult r;
+    cancel::pause_point();
     std::string _imagedir = in.image_dir;
     const std::string& _workspace = in.workspace;
     const bool verbose = !cfg.quiet;
@@ -3046,6 +3052,7 @@ AutoResult run_auto(SfmConfig& cfg, const AutoInputs& in) {
         return r;
     }
     double t_extract = now() - t0;
+    cancel::pause_point();
     if (est.images < 2) {
         L::fail(Tag::Run, M::run_too_few_images, {(long long)est.images});
         { r.exit_code = 1; return r; }
@@ -3212,6 +3219,7 @@ AutoResult run_auto(SfmConfig& cfg, const AutoInputs& in) {
                     "\nfeature-set=" + featureSetSignature(products, db));
         }
     }
+    cancel::pause_point();
     // Nothing past this point reads a descriptor -- the mapper works on
     // keypoints, the correspondence graph and the per-keypoint colors -- and on
     // a large capture they are the biggest thing in the process: 8k features
@@ -3245,6 +3253,7 @@ AutoResult run_auto(SfmConfig& cfg, const AutoInputs& in) {
     mapopt.measured_focal_cameras = cs.focal_measured;
 
     t0 = now();
+    cancel::pause_point();
     events::stage_begin(Stage::Map, (int64_t)db.images.size());
     events::map_begin(db.images.size());
     RigTable rigs;
@@ -3270,6 +3279,7 @@ AutoResult run_auto(SfmConfig& cfg, const AutoInputs& in) {
         events::stage_end(Stage::Refine);
     }
     events::stage_end(Stage::Map);
+    cancel::pause_point();
 
     if (imported_plan) resolveImageNames(models, *imported_plan);
     else resolveImageNames(models, _imagedir);
@@ -3431,6 +3441,7 @@ RunContext::~RunContext() {
     slog::set_sink({});
     events::set_sink({});
     cancel::set_token(nullptr);
+    cancel::set_pause_token(nullptr);
     progress::set_dir("");
 }
 

@@ -221,11 +221,13 @@ inline std::vector<TarMember> tar_index(std::istream& in) {
     }
     return members;
 }
+inline constexpr uint64_t kMaxCheckpointMetadataBytes = 16ULL * 1024 * 1024;
 
 // Read a whole small member (e.g. state.json) into a string.
 inline std::string tar_read_member(std::istream& in, const TarMember& m) {
-    if (m.size > (uint64_t)std::numeric_limits<std::streamsize>::max())
-        throw std::runtime_error("checkpoint archive member is too large");
+    if (m.size > kMaxCheckpointMetadataBytes ||
+        m.size > (uint64_t)std::numeric_limits<std::streamsize>::max())
+        throw std::runtime_error("checkpoint metadata member is too large");
     std::string s((size_t)m.size, '\0');
     in.clear();
     in.seekg((std::streamoff)m.data_offset, std::ios::beg);

@@ -231,15 +231,21 @@ public:
     std::vector<std::string> scheduler_args(
         const SfmJob& job, std::string& manifest_payload,
         const std::string& feature_plan = {});
+    std::vector<std::string> scheduler_args(
+        const SfmJob& job, const PrepResult& prep,
+        std::string& manifest_payload,
+        const std::string& feature_plan = {});
     std::vector<std::string> feature_plan_model_args(
         const SfmJob& job, const PrepResult& prep);
+    std::vector<std::string> stamp_args(const SfmJob& job,
+                                        const PrepResult& prep);
     // `films` are the screen's picture reels, null for a caller with no
     // screen; they outlive the run.
     void start(const SfmJob& job, RunFilms films = {});
-    // Replace the settings no stage has read yet, so the screen's masking and
-    // reconstruction options stay live while an earlier stage works. The
-    // inputs, the output folder and the frame settings define the run and are
-    // never taken from here.
+    // A leader-verified sparse model is already in the workspace. Continue
+    // only with the normal geometry and GUI completion path.
+    void start_remote_completion(const SfmJob& job, const PrepResult& prep,
+                                 RunFilms films = {});
     void update(const SfmJob& job);
     void cancel();
 
@@ -292,6 +298,7 @@ public:
 
 private:
     void run(SfmJob job);
+    void run_remote_completion(SfmJob job, PrepResult prep);
     // The three parts of update(), applied where the run reaches them.
     void take_reconstruction(SfmJob& job);
     void take_masking(PrepJob& prep);

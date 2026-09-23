@@ -167,6 +167,13 @@ struct TrainerCallbacks {
     // Called after every completed step, engine mutex released.
     std::function<void(const TrainerProgress&)> on_step;
 
+    // Called at the trainer's pre-iteration pause gate, not by the input
+    // listener, so an acknowledgment means the engine is actually quiescent.
+    std::function<void()> on_pause_ack;
+
+    // Called after a requested resume has actually left the pre-iteration gate.
+    std::function<void()> on_resume_ack;
+
     // A dataset file went unreadable mid-run; blocks as long as the front end
     // needs. true retries the decode, false stops the run (still saving a
     // checkpoint). Unset fails the run outright, which is what a script wants.

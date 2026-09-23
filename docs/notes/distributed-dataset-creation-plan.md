@@ -1,18 +1,21 @@
 # Distributed dataset creation
 
-Status: implementation present in the working tree; acceptance is not yet closed.
-Sections 1–12 retain the design contracts and acceptance scope; their
-implementation phases are not evidence that their gates have passed.
-The current P1 provenance status and next dependency are tracked in
-[section 14](#14-p1-provenance-closeout).
+Status: implementation present in the working tree; scoped runtime acceptance
+is closed. Sections 1–12 retain the design and implementation contracts; they
+do not expand the runtime campaign beyond the two tests below.
+P1 provenance is closed in [section 14](#14-p1-provenance-closeout).
+The runtime campaign is specified in the
+[execution runbook](#15-acceptance-execution-runbook) and recorded in
+[section 16](#16-acceptance-execution-record--2026-09-22).
 
 Prior-session results are recorded separately from repeatable acceptance evidence.
-Remote connectivity, a representative reconstructable corpus, real cross-host
-recovery, trainer handoff, and performance measurements remain open.
+Distributed jobs across two physical machines and multi-GPU jobs across two
+on-host GPUs are evidenced independently. A combined distributed-plus-parallel
+GPU scenario is not an acceptance requirement.
 
 ## 1. Goal and scope
 
-Create one trainable dataset using feature-extraction work performed on several machines or GPUs, then one coordinator for matching, mapping, model assembly, and publication.
+Create one trainable dataset using feature-extraction work performed on several machines or GPUs, then one coordinator for matching, mapping, model assembly, and publication. Runtime acceptance treats cross-machine distribution and on-host multi-GPU execution as two independent cases; no test combines them.
 
 Implement **feature shards first**, then **overlapping scene chunks using the same artifact protocol**. A chunk is an image-membership and pairing hint, not an independently numbered reconstruction. Workers produce features only. Matching, geometric verification, camera grouping/calibration, mapping, merge validation, bundle adjustment, and final gauge fixing remain centralized.
 
@@ -26,7 +29,7 @@ This is deliberately not distributed bundle adjustment or distributed training. 
 - Exactly one coordinator owns a mutable reconstruction workspace. Workers never write into its feature directory, match database, resume journal, or sparse output.
 - Prepare source frames, names, masks, and capture metadata before freezing the work plan. Do not independently resample the same source video on each worker.
 - Support existing extractor families when their modules/models are available. Pin model content, not just model filenames. Use existing model acquisition/licensing policy; do not bundle weights into work packages.
-- Default GPU policy remains Vulkan on non-NVIDIA hardware. For this acceptance campaign the user explicitly authorizes **Vulkan on the designated Windows NVIDIA testing nodes**, alongside the local AMD lane. This is not a general restoration of NVIDIA support. CUDA builds, execution, reference dumps, and CUDA-specific work remain out of scope. Keep `SS_ENABLE_PATENTED=OFF`.
+- GPU policy remains Vulkan on non-NVIDIA hardware. Do not use CUDA or NVIDIA for this campaign. Keep `SS_ENABLE_PATENTED=OFF`.
 - No runtime Python, database service, message broker, generic DAG engine, new mapper, or custom remote process launcher.
 
 ## 2. Implementation baseline and ownership
@@ -341,7 +344,16 @@ Implement staged import, idempotence/conflict handling, collection sealing, and 
 
 Do not expose `collect` success until the collection is complete. Validate final dataset loading and the existing partial/non-metric contract.
 
-**Gate / first complete release:** two physical worker hosts in the authorized Vulkan lanes extract one planned dataset; a coordinator imports their transferred artifacts and produces a dataset the existing trainer can load. The coordinator may also be one worker, provided it sequences central compute after extraction. Delivery order and shard count preserve the dataset snapshot, logical/global image mapping, and per-image artifact keys. With identical payload bytes they also preserve accepted collection order/digest; plan, shard, request, and result identities may change. An interruption resumes without recomputing unaffected completed work.
+**Gate / first complete release:** workers on two physical machines in the
+supported Vulkan lanes extract one planned dataset; the coordinator may be one
+of those workers. A coordinator imports their transferred artifacts and
+produces a dataset the existing trainer can load. Cross-machine workers need
+not run concurrently, and neither machine needs multiple GPUs. Delivery order
+and shard count preserve the dataset snapshot, logical/global image mapping,
+and per-image artifact keys. With identical payload bytes they also preserve
+accepted collection order/digest; plan, shard, request, and result identities
+may change. An interruption resumes without recomputing unaffected completed
+work.
 
 ### Phase E — overlapping scene chunks
 
@@ -359,7 +371,10 @@ Implement the local extraction phase and UI barrier using the existing queue and
 
 After successful runtime acceptance, update existing SfM/application/build/testing documentation with the command contract, portability requirements, transfer procedure, recovery behavior, final dataset layout, and measured limitations. Remove any throwaway acceptance artifacts; do not commit datasets, model weights, private paths, or benchmark captures.
 
-**Gate:** both manual cross-machine CLI and managed local multi-device flows work, restart/cancellation cannot publish false success, and the normal single-machine workflow remains intact.
+**Gate:** manual cross-machine CLI and local multi-device flows each work as
+independent scenarios. The cross-machine scenario needs at least two physical
+machines; the local scenario needs two GPUs on one host. No combined scenario
+is required.
 
 ### Implementation ownership
 
@@ -368,6 +383,10 @@ Keep one integration owner for `Pipeline.cpp` and `sfm_main.cpp`. After the sche
 ## 10. Verification matrix
 
 Register new host-only artifact checks through [`cmake/SsTests.cmake`](../../cmake/SsTests.cmake) and its existing isolated runner. [`cmake/SsSfm.cmake`](../../cmake/SsSfm.cmake) creates SfM test executables, but the current headless label does not automatically run all of them. Do not mistake an unregistered test or empty CTest selection for a pass.
+
+V01–V17 are implementation regression contracts, not additional runtime
+campaign modes. Runtime acceptance consists only of V18 and V19, evaluated
+independently; no scenario combines them.
 
 | ID | Scenario | Observable acceptance |
 |---|---|---|
@@ -388,8 +407,8 @@ Register new host-only artifact checks through [`cmake/SsTests.cmake`](../../cma
 | V15 | Ordered chunks with boundary overlap and non-adjacent loop closure | Bridge evidence reaches verification/mapping; duplicate memberships do not duplicate image IDs or extraction. |
 | V16 | Insufficient or contradictory overlap | Existing merge gates refuse unsafe joins; multiple models/partial status are retained without forced success. |
 | V17 | Geometry equivalence | With frozen features and matching policy, coverage, component structure, reprojection, and aligned poses stay within the predeclared baseline repeatability envelope. Do not demand byte-identical BA output across devices. |
-| V18 | Real cross-machine pipeline | At least two physical worker hosts in the authorized Vulkan lanes, actual file transfer, central reconstruction, parser load, and a short real training run on the resulting dataset. |
-| V19 | Scheduler/GUI | Correct unique-image progress, no conflicting writers/device ownership, cancellation/recovery, localized errors, and trainer handoff on the real desktop. |
+| V18 | Distributed jobs | A plan is split across at least two physical machines, one of which may be the coordinator; complete results transfer and seal into one collection. Concurrent execution and multiple GPUs per machine are not required. |
+| V19 | Multi-GPU jobs | At least two shards run concurrently on two distinct GPUs in one host with isolated outputs and seal into one collection. No remote worker participates. |
 
 Reuse `sfm_resume_test`, `sfm_manifest_test`, `sfm_feature_compaction_test`, `sfm_merge_test`, `sfm_map_test`, and `sfm_rig_test` for their actual contracts; add cases only where the changed behavior needs protection. Reuse `worker_request_test`, `scheduler_test`, `scheduler_result_test`, `command_argv_test`, `preset_roundtrip_test`, and `dataset_parser_test` when their surfaces change.
 
@@ -402,7 +421,7 @@ Linux:   bash build_develop.bash -DSS_BACKEND=vulkan
 cmake -E chdir build_vulkan ctest -L headless --output-on-failure --no-tests=error
 ```
 
-Also build the headless configuration when changing CLI/core boundaries. Run selected SfM GPU binaries and the real distributed CLI scenario explicitly on the authorized Vulkan devices; they are not implied by the headless result. Test SIFT without learned modules and available learned frontends with approved weights. Preserve CPU BA fallback rather than requiring unsupported GPU arithmetic. Use `--keep-viewer-alive 0` for scripted training. Record unavailable hardware/model lanes as unverified; the scoped Windows NVIDIA authorization in section 1 does not waive any non-NVIDIA regression gate.
+Also build the headless configuration when changing CLI/core boundaries. Run selected SfM GPU binaries and the two scoped job scenarios explicitly on supported Vulkan devices; they are not implied by the headless result. Test SIFT without learned modules and available learned frontends with approved weights. Preserve CPU BA fallback rather than requiring unsupported GPU arithmetic. Use `--keep-viewer-alive 0` for scripted training. Record unavailable hardware/model lanes as unverified.
 
 ## 11. Performance expectations and rollout criteria
 
@@ -584,5 +603,498 @@ accepted clock-ownership verification now.
 
 The Matroska ordering item is closed: semantics, fixture, implementation,
 exported provenance, and supported-lane evidence agree. This does not reopen
-the separate optional native-video CLI gap or claim closure of the remaining
-distributed reconstruction/transfer/training/performance acceptance work.
+the separate optional native-video CLI gap or add runtime acceptance beyond the
+two scoped job scenarios.
+
+## 15. Acceptance execution runbook
+
+Runtime acceptance contains exactly two independent scenarios:
+
+1. **Distributed jobs:** split one immutable plan across at least two physical
+   machines. The coordinator host may execute one shard. Each machine needs
+   only one selected GPU, and the jobs need not overlap in wall-clock time.
+2. **Multi-GPU jobs:** split one immutable plan across two distinct GPUs on one
+   host and run the two shard jobs concurrently with isolated outputs.
+
+Both scenarios pass when every assigned shard produces a complete,
+identity-bound result and the coordinator seals the union with every planned
+image exactly once. They do not require pose equivalence between independently
+recomputed GPU payloads, central reconstruction/training, recovery injection,
+chunk variants, GUI automation or performance measurement.
+
+Do not combine the scenarios: the distributed test does not require multiple
+GPUs per machine or concurrent workers, and the multi-GPU test has no remote
+worker. Existing headless and artifact-contract tests remain supporting
+regressions, not additional runtime modes.
+
+### Distributed-jobs procedure
+
+1. Freeze one plan with at least two shards and retain authority on the
+   coordinator.
+2. Run at least one shard on the coordinator or another physical machine and
+   at least one shard on a second physical machine. Bind each worker to an
+   explicit supported Vulkan device.
+3. Transfer complete remote result directories and verify their identities.
+4. Collect all results into a fresh workspace and require a sealed index that
+   covers the plan exactly once.
+
+### Multi-GPU-jobs procedure
+
+1. Reuse the same frozen plan or create an equivalent fresh plan.
+2. On one host, run two shard jobs concurrently, binding each to a different
+   physical GPU UUID and output directory.
+3. Require both results to be complete, verify their recorded device bindings,
+   and collect them into a fresh sealed workspace.
+
+### Superseded broader campaign
+
+The E0–E7 runbook below is retained as historical planning and diagnostic
+context. It is not the active acceptance scope and its unrun recovery, chunk,
+desktop, quality and performance scenarios do not leave either scoped job test
+open.
+
+#### E0 — Restore the default build and bind the campaign
+
+1. Preserve the working tree and the completed P1 changes. Record the exact
+   source snapshot, build options, toolchain and executable/dependency hashes;
+   a commit ID alone does not identify an uncommitted build. No commit, push,
+   source cleanup or implementation change is authorized by this runbook.
+2. Build through the existing Windows entry point, explicitly selecting Vulkan
+   so the script cannot choose its legacy CUDA default:
+
+   ```powershell
+   .\build_develop.bat -DSS_BACKEND=vulkan -DSS_ENABLE_PATENTED=OFF -DSS_BUILD_GUI=ON -DSS_BUILD_SFM=ON -DSS_BUILD_SAM=ON
+   cmake -E chdir build_vulkan ctest -L headless --output-on-failure --no-tests=error -j 2
+   ```
+
+   Check the build's exit status before starting CTest. Record the resulting
+   cache and actual test inventory/count; do not hard-code 23 as a requirement.
+   This validates the OFF configuration, not the already-passed native ON lane.
+   Do not invoke bare CTest, enable patented code again, or run CUDA tooling.
+   Capture a versioned runnable package outside `build_vulkan/` before testing
+   another configuration. `$Exe` refers to that immutable package, so a
+   subsequent rebuild cannot silently change the control or worker binary.
+3. Bind coordinator **C** and a second physical host **W**. C may also execute
+   shard 0; W executes shard 1. Prefer the existing local AMD lane for C.
+   Use supported non-NVIDIA Vulkan devices. Record physical
+   device UUID, name, driver, relevant capabilities and the actual selected
+   device for each participating runtime; host ordinals are not portable.
+   Retain the existing CPU BA fallback when a Vulkan capability is unavailable.
+4. Use the existing pinned, non-interactive SSH configuration and authenticated
+   file transfer for W, only inside its already-approved workspace. Preserve
+   host-key verification; do not change firewall, VPN, credentials, drivers or
+   user-wide GPU settings. SSH reachability is a prerequisite, not inferred
+   from NetBird/TCP/Paseo status. A missing transport blocks the two-host gate;
+   two processes or devices on C are not a substitute.
+5. Stage the validated Vulkan binary and required runtime files, or build the
+   same captured source/options on W when its platform requires it. Verify
+   transferred hashes. Never copy secrets, personal configuration, whole
+   machine-local caches or unrelated files. Check writable space for sources, results and
+   import/publication staging, and reserve devices against other workloads.
+6. Select a small, textured, known-reconstructable prepared photo corpus with
+   adjacent overlap and a genuine later revisit. Use owned campaign copies;
+   freeze image, mask, camera, rig, telemetry and recipe identities. Do not use
+   the eight timing-fixture frames as reconstruction evidence, redo raw-video
+   preparation, or infer new sharpness thresholds. Start with SIFT and no
+   learned-model download. Use unique basenames for the pose-scoring corpus;
+   collision/Unicode cases have separate identity checks.
+
+Keep logs, requests, hashes and measurements in an owned evidence directory,
+not in committed source. Resolve these bindings before running examples:
+
+| PowerShell binding | Meaning |
+|---|---|
+| `$Exe` | Absolute path to the captured Vulkan executable on the current host |
+| `$Images` | C's complete frozen image root |
+| `$CoordinatorDevice`, `$WorkerDevice` | Verified host-local `uuid:<32 hex digits>` selectors |
+| `$Baseline`, `$Workspace` | Different, initially unused central reconstruction roots |
+| `$PlanDir` | C's authoritative plan/request/cancellation directory, dedicated to one plan |
+| `$WorkerImages`, `$WorkerPlanDir`, `$WorkerResult` | W's source subset, copied plan/request directory and isolated attempt output |
+| `$Result0`, `$Delivered1` | C's shard-0 output and completed transferred shard-1 directory |
+| `$TrainRoot` | Separate training output root; use a unique run name per invocation |
+
+Commands are PowerShell examples, executed on the host named above each block.
+Stop after an unexpected exit status; PowerShell does not automatically stop
+after a failing native executable. Keep the full command, resolved settings,
+exit status and output paths as evidence.
+
+#### E1 — Establish the ordinary single-host control
+
+Run normal centralized SfM before debugging any distributed result:
+
+```powershell
+$Recipe = @('--features', 'sift', '--quality', 'high')
+& $Exe sfm auto $Images -o $Baseline @Recipe --device $CoordinatorDevice
+```
+
+Freeze any corpus-specific mask, camera, rig, color and pairing options too,
+using the same applicable settings in `plan` and central `auto`. The example
+profile assumes no additional local mask/model paths. Inspect actual resolved
+settings rather than assuming that a GUI preset and CLI defaults are equal.
+
+Record registered **logical image names**, camera/rig grouping, component
+count, point/observation counts, reprojection statistics and metric/partial
+status. `auto` returns 2 for failed geometry, 3 for partial and 4 for a
+non-metric model: exit 0 alone is neither the quality comparison nor the
+definition of a usable monocular reconstruction. Do not relax the baseline
+because a later distributed run loses images or splits a connected model.
+If ordinary SfM cannot reconstruct this corpus, establish a valid control
+before proceeding with distributed diagnosis.
+
+Repeat the control in fresh workspaces to establish a baseline repeatability
+envelope; record numerical tolerances before inspecting distributed quality.
+Use the existing [pose evaluator](../../tools/sfm/eval_poses.py) for relative
+and Sim(3)-aligned comparisons where its basename-matching precondition holds.
+It is a dev-time analysis tool, not a new build/runtime dependency; it does
+not prove full-relative-name identity for collision cases.
+
+Load and train the actual control reconstruction. Apply this same command to
+E2's result by changing `$Dataset` and the unique output name:
+
+```powershell
+$Dataset = $Baseline
+& $Exe train --data $Dataset --data-format colmap --image-dir $Images --colmap-recon-dir "$Dataset\sparse\0" --output-dir-prefix $TrainRoot --output-dir-name baseline-smoke --num-iterations 100 --steps-per-save 50 --save-full-checkpoint true --disable-viewer true --keep-viewer-alive false --device $CoordinatorDevice
+```
+
+Require successful real parser/image loading, the requested training iterations,
+finite reported training values and a readable checkpoint. Prove checkpoint
+usability with a bounded resume through the existing trainer. A stock
+`cli_training_smoke` pass on its own fixture does not replace this handoff.
+
+```powershell
+& $Exe train --resume "$TrainRoot\baseline-smoke" --num-iterations 120 --output-dir-prefix $TrainRoot --output-dir-name baseline-resume-120 --disable-viewer true --keep-viewer-alive false --device $CoordinatorDevice
+```
+
+Require continuation from the saved step toward iteration 120, not a fresh
+run or 120 additional iterations. Use E2's own checkpoint and unique output
+name for its resume check.
+
+Also exercise the headless, SIFT-only build in a separate fresh
+`$SiftOnlyBaseline` workspace. Selecting SIFT in the full build alone does not
+prove compilation/execution without the inference and learned modules:
+
+```powershell
+.\build_develop.bat -DSS_BACKEND=vulkan -DSS_ENABLE_PATENTED=OFF -DSS_BUILD_GUI=OFF -DSS_BUILD_SFM=ON -DSS_BUILD_SAM=OFF
+cmake -E chdir build_vulkan ctest -L headless --output-on-failure --no-tests=error -j 2
+& .\build_vulkan\spirula.exe sfm auto $Images -o $SiftOnlyBaseline @Recipe --device $CoordinatorDevice
+```
+
+Capture that configuration's binary fingerprint and real SfM result, then
+restore the GUI/SAM-enabled configuration with E0's build command. Continue
+using the same captured `$Exe` for the ordinary control, two-host comparison
+and timings. Available approved learned-frontends get their own E1–E4 profile
+and control after SIFT succeeds; do not download weights or compare one
+frontend against another as if only distribution had changed.
+
+#### E2 — Run the two-host extraction and trainer handoff
+
+On C, create a new two-shard plan:
+
+```powershell
+& $Exe sfm plan $Images -o $PlanDir --shards 2 @Recipe
+```
+
+`plan` writes `plan.json` and
+`request-shard-0000-attempt-0001.json` / `request-shard-0001-attempt-0001.json`.
+Keep authority on C. Copy W's request **with `plan.json` in the same directory**;
+do not edit signed/digested contents to rebind paths. W needs only the images
+assigned by its request, with the exact relative names and bytes in the plan,
+plus assigned masks and approved model files if applicable. Machine-local
+mask/model paths must be bound explicitly. C retains the complete corpus:
+imported `auto` validates every planned source, unlike subset extraction.
+
+Run these two commands concurrently, with separate output roots.
+
+On C:
+
+```powershell
+& $Exe sfm extract $Images --feature-request "$PlanDir\request-shard-0000-attempt-0001.json" -o $Result0 --device $CoordinatorDevice
+```
+
+On W, with `$Exe` resolved to W's captured binary:
+
+```powershell
+& $Exe sfm extract $WorkerImages --feature-request "$WorkerPlanDir\request-shard-0001-attempt-0001.json" -o $WorkerResult --device $WorkerDevice
+```
+
+Workers inherit the plan's extraction recipe. Require complete, identity-bound
+results, not merely process exit or a nonempty directory. Transfer W's whole
+result (`binding.json`, `result.json`, `receipts/`, `payload/`) into an incoming
+directory on C, finish and verify the transfer, then expose it as `$Delivered1`.
+Do not hand a still-changing transfer directory to the success-path collector.
+
+After both workers have exited and released their devices, on C:
+
+```powershell
+& $Exe sfm collect "$PlanDir\plan.json" $Result0 $Delivered1 -o $Workspace --requests $PlanDir
+& $Exe sfm auto $Images -o $Workspace @Recipe --feature-plan "$PlanDir\plan.json" --device $CoordinatorDevice
+```
+
+Gate central `auto` on successful collection. Require a sealed
+`features/index.json` covering every planned image exactly once, valid payload
+digests and retained producer provenance. Require central extraction to be
+skipped, then observe the normal matching, mapping and assembly path; do not
+append a redundant standalone `merge`.
+
+Compare coverage, identities, components and geometry against E1. Recomputed
+features on different GPUs need not have identical bytes; delivery-order and
+ownership invariance must instead be checked with the **same frozen payloads**.
+Run E1's parser/training/resume handoff on `$Workspace`, with a new training
+output name. Preserve binary/device evidence from both hosts and transfer
+hashes. This closes the real two-host gate only if the actual resulting
+dataset reaches training (V14, V17, V18).
+
+#### E3 — Exercise worker, delivery and coordinator recovery
+
+Use a fresh isolated plan/workspace copy per scenario. Preserve the successful
+E2 artifacts; never corrupt the original sources, authority or sealed index.
+Synchronize interruptions on an observed receipt/staging/phase boundary, not
+an arbitrary sleep. Control only owned, supervised process trees and verify
+their exit before restart. An SSH disconnect is not proof a worker stopped.
+
+| Scenario | Required observation and recovery |
+|---|---|
+| Worker interrupted after some receipts, before terminal completion (V10) | No complete result or central launch. Issue a new superseding attempt and adopt valid old receipts. Verify reused payload digests/producer provenance and that only missing work is extracted; the other shard is not recomputed. |
+| Duplicate delivery, relocated roots and reversed arrival order (V01, V11) | Collect frozen deliveries into separate fresh workspaces. Exact duplicates are idempotent; logical order, artifact keys and collection digest agree. A conflicting payload for one image is rejected. |
+| Interrupted transfer, truncated payload, bad digest or missing receipt (V08–V09) | Collector rejects or remains explicitly incomplete without a sealed index. Finish/retransfer a clean copy and collect successfully. Distinguish a valid zero-feature receipt from missing or corrupt output. |
+| Superseded or cancelled late delivery (V11) | The authoritative request graph rejects stale completion. Stop the real remote process separately, verify its exit and preserve its old receipts without granting them new authority. |
+| Coordinator killed during import (V12) | Partial staging never becomes a complete `features/`. Restart the normal collector with the same authorized deliveries; require a valid sealed result and no worker recomputation. |
+| Coordinator killed during matching and sparse publication (V12) | Run both windows separately. Preserve the sealed feature collection and valid published model, reject incomplete publication as success, then restart imported `auto` without extraction. Reuse only matching caches whose identities still match. If the publication window is not actually hit, record it as unverified. |
+| Changed source/mask/recipe/metadata, absent index or wrong matching-cache identity (V03, V05–V06, V13) | Use copied cases. Refuse stale inputs at the appropriate boundary, never silently scan partial features or re-extract under imported `auto`. Complete clean reruns still succeed. |
+| Same-stem, case/Unicode and escaping-name boundaries (V07–V08) | Use the existing host-only artifact/portability cases and a transferred portable-name case. Preserve full relative names or reject before work; do not use basename-only pose scoring as identity evidence. |
+
+The retry operation is a new request, not an edit to an old attempt. For an
+interrupted shard 0 in that scenario's `$PlanDir`:
+
+```powershell
+& $Exe sfm request "$PlanDir\plan.json" --supersedes "$PlanDir\request-shard-0000-attempt-0001.json" --attempt attempt-0002 -o "$PlanDir\request-shard-0000-attempt-0002.json"
+& $Exe sfm extract $Images --feature-request "$PlanDir\request-shard-0000-attempt-0002.json" --adopt-from $InterruptedResult -o $RetriedResult --device $CoordinatorDevice
+```
+
+For the separate cancellation scenario:
+
+```powershell
+& $Exe sfm request "$PlanDir\plan.json" --cancel "$PlanDir\request-shard-0000-attempt-0001.json" -o "$PlanDir\cancel-shard-0000-attempt-0001.json"
+```
+
+Request outputs must remain beside their plan. A retry keeps the predecessor
+in the authoritative directory and forms one linear supersession chain per
+shard; collection always receives that scenario's `--requests` directory.
+Use a fresh result directory for the new attempt and collect it with the
+unaffected shard. An already sealed collection is validated and reused, not
+overwritten; use fresh destinations to test changed deliveries or authority.
+
+#### E4 — Prove shard-count and overlap invariants
+
+1. Replan the frozen corpus with 1, 2 and 4 shards into distinct directories.
+   Import the same accepted payloads with explicit
+   `collect --adopt-from <old-workspace>/features`, each time using the new
+   plan's authoritative request directory and a fresh output workspace.
+   Verify stable dataset/global image identities, artifact keys, canonical
+   collection ordering/digest and producer provenance. Plan/request/shard IDs
+   may change. Old delivery authority must not carry over implicitly (V02, V04).
+2. Make ordered chunk plans with `--chunk-window 32 --chunk-overlap 8`, then
+   overlap 16, on a capture long enough to create multiple chunks. Also make
+   explicit `--chunk-memberships` from the corpus's real adjacent/revisit
+   relationships. The file lists chunk IDs and logical image names; preserve
+   whole rig frames. Window and explicit-membership modes are alternatives.
+3. Adopt the frozen features into each plan and run central `auto` with the
+   same global pairing/mapper policy. Inspect actual verified bridge edges,
+   pair deduplication and reconstructed connectivity, not just chunk metadata.
+   Shared images still have one owner/artifact/row; increased overlap cannot
+   increase extraction ownership. Preserve the non-adjacent revisit that the
+   ordinary control can connect (V15).
+4. Run a separate genuinely disconnected/insufficient or contradictory-overlap
+   case. Expect honest separate components, partial/non-metric status or
+   rejected joins under existing assembly gates, never forced success.
+   Compare against its own ordinary control, not the connected corpus (V16).
+
+#### E5 — Verify the real desktop and local scheduler
+
+Use the actual native application with an isolated campaign configuration and
+owned outputs. Capture screenshots and scheduler/result artifacts at the
+important transitions; headless tests alone cannot close V19.
+
+1. In **New Dataset**, bind the frozen photo inputs and a fresh workspace.
+   Under **Advanced**, choose SIFT and **Feature extraction shards: 2**;
+   retain **Resume previous run** and **Keep intermediate files**. Under
+   **Settings**, inspect **Desktop GPU** and **Job GPU** separately.
+2. Check the whole usable native-device roster first. Current shard assignment
+   cycles through that roster; **Job GPU is not a shard-device allowlist**.
+   Reserve the devices that will be used. Two shards on one GPU prove
+   serialization, not local multi-device acceptance. If a second compatible
+   local Vulkan device is unavailable, keep that gate explicitly open.
+3. Select **Create Dataset**. In **Batch Processing → Scheduled jobs**, observe
+   distinct extraction outputs, actual device assignments and exclusive
+   device/output ownership. Require unique-image progress
+   (**Validated images: …; shards: …**), collection sealing only after all
+   shards validate, and central reconstruction only after that barrier.
+4. In separate runs exercise queued cancellation, an active shard interruption,
+   **Retry**, and an application restart followed by **Recover scheduled jobs
+   → Retry job**. Verify persisted identities, unaffected-result reuse,
+   released leases and no duplicate central phase. Dataset-level **Cancel**
+   closes the feature coordinator; do not promise that an explicitly closed
+   coordinator can be reopened with per-job Retry.
+5. Surface a real failure and check useful localized status/logs without false
+   completion. Missing coordinator metadata, collection validation failure,
+   stranded cancellation or broken recovery is a defect/blocker, not a reason
+   to substitute a headless result or manually rewrite scheduler state.
+6. On direct New Dataset success, verify the actual result opens in the
+   foreground dataset/trainer view, then select **Start Training** for a bounded
+   run. Separately run a distributed dataset+training batch row: its training
+   remains scheduler-worker-owned and must not attach to the foreground trainer.
+7. Save/reload a dataset preset and confirm shard settings survive without
+   replacing source/output paths. Run an ordinary one-shard dataset workflow
+   too. The GUI schedules local children only; the manual SSH workers in E2
+   are not remote rows or a remote dashboard.
+
+#### E6 — Measure end-to-end cost after correctness
+
+- Compare ordinary E1 `auto` against two-host plan/extract/transfer/collect/
+  imported-`auto`, keeping corpus, recipe, central device and pairing/mapper
+  policy fixed. Use an extraction-heavy corpus after the small correctness
+  pilot if the pilot cannot meaningfully expose extraction cost.
+- Record at least three measured runs per variant for **empty worker staging**
+  and **already-staged worker inputs** separately. Use fresh feature/match/model
+  outputs: adopting completed features is not extraction speedup. Document
+  warm-up and cache conditions without clearing user-wide caches. Reuse earlier
+  trials only if their settings, instrumentation and cache class match.
+- Measure total creation time on C's monotonic clock, including plan/hashing,
+  input staging, worker startup/extraction, result transfer/import, central
+  matching/mapping/assembly and publication. Do not subtract timestamps from
+  different hosts or count overlapping stages twice. Report worker elapsed
+  times/stragglers, bytes moved, pair counts, central RAM/VRAM, aggregate compute
+  cost and the same quality metrics as E1. Report training handoff separately.
+- Publish individual values and medians, including failed runs rather than
+  silently dropping them. Apply section 11's Amdahl bound to the measured
+  extraction fraction. If overhead erases the gain, report no established
+  acceleration; do not add a cache, change quality, or expand into distributed
+  matching/BA to rescue the headline.
+
+#### E7 — Close the evidence ledger, not just the processes
+
+Map V01–V19 and the Phase D/E/F gates to concrete artifacts and mark each
+**passed**, **failed** or **unverified**. Keep the binary/source fingerprint,
+OFF build/test evidence, device identities, corpus/profile hashes, authoritative
+requests, receipts/collections, transfer evidence, recovery records, models,
+training/resume checkpoints, GUI captures and timing table together.
+Existing host-only test results support their actual cases; they do not imply
+two-host, GPU, desktop or performance coverage.
+
+Include the SIFT-only build evidence and the available approved learned-frontend
+profiles required by section 10; do not invent coverage for an unavailable
+lane. A missing second host,
+local second device, reconstructable corpus or required capability remains a
+named open gate. Report an exposed implementation defect before further
+source changes; any later authorized fix invalidates and reruns its affected
+gates, not the unrelated closed P1 work.
+
+Only after successful smoke scenarios, remove campaign-owned transient
+staging/throwaway helpers while retaining the evidence needed to reproduce
+results. Update this existing plan with measured outcomes and remaining gates.
+No automatic commit, push, upstream PR or deletion of unrelated work.
+
+## 16. Acceptance execution record — 2026-09-22
+
+Both scoped scenarios passed. Distributed jobs were split across the
+coordinator and a second physical machine; multi-GPU jobs were split across two
+GPUs on the coordinator host. No combined distributed-plus-parallel scenario
+was run or required. No source fix, commit, push, learned-weight download, CUDA
+run or NVIDIA run was made.
+
+### Bound build and hosts
+
+| Evidence | Observed result |
+|---|---|
+| Source | `df223925d843ce060e68b00b589de633730fe850` with the pre-existing plan edit fingerprint `a5c9cd78759f037f4e66bd8b96c8e683d97e3256` |
+| Full executable | SHA-256 `85bbbe4e2dc8694062f2659a836aa939bc4f2ccbe2e1b496fbb2199f2c9a94be`; Vulkan, patented OFF, GUI/SfM/SAM ON |
+| Full headless suite | **23/23 passed** |
+| SIFT-only executable | SHA-256 `ee0387675c37e9e00fe2b20db47a4cbfa0f14d02052ed397b8dcf841458436e8`; GUI/SAM OFF |
+| SIFT-only headless suite | **18/18 passed**; its real 101-image reconstruction was byte-identical to the full build's control model |
+| Host GPU 0 | AMD Radeon AI PRO R9700, `uuid:00000000020000000000000000000000`, Vulkan 1.4.349, AMD proprietary 2.0.395 / 26.Q3 |
+| Host GPU 1 | AMD Radeon AI PRO R9700, `uuid:00000000010000000000000000000000` |
+| Worker | Intel(R) Graphics, `uuid:8680677d060000000002000000000000`, Vulkan 1.4.348, Intel 101.8860; physical host distinct from the coordinator |
+| Transfer/binary binding | Pinned SSH host key; transferred executable, plan and request hashes matched the coordinator copies |
+
+The frozen one-camera corpus contains 101 manually accepted 3840x3840 fisheye
+frames and spans the prepared capture's adjacent sequence and later revisit.
+Its image-manifest SHA-256 is
+`d5f458a918dd9cbbf2db325df8902606ee712045f7cd7f6859c9a135dc2b86cb`.
+No raw extraction or new sharpness decision was performed.
+
+### Scoped job results
+
+| Test | State | Evidence |
+|---|---|---|
+| Distributed jobs | **passed** | The 4096-feature plan assigned 51 images to host GPU 0 and 50 to the Intel worker on a second physical machine. Both results completed, the remote result transferred with matching identity, and collection validated 101/101 images with 0 invalid and sealed digest `e363a0c3931966721999784cd66fe6eaf0980c6ca1550fd1b8eb7a6015373c1e`. The coordinator being one worker is permitted; cross-host concurrency was incidental, not required. |
+| Multi-GPU jobs | **passed** | Two fresh shard processes ran concurrently on the coordinator host. Shard 0 recorded GPU `uuid:00000000020000000000000000000000` and completed 51/51 images with result digest `3bc8e8224142b9aa32e8227d1cedfb467fd45ca4da6420fefce18aac0cd6aa99`. Shard 1 recorded GPU `uuid:00000000010000000000000000000000` and completed 50/50 with result digest `26c5c0ea406b9cc53819502fb5db7d8b1c6d884650d04e7d43162cb007a76115`. Collection validated 101/101 with 0 invalid and sealed digest `f7d11f0b111626992f8f6766ea20023fae843952f3d86fa3261b33df81967d31`. No remote worker participated. |
+
+The remaining E1/E2 material records useful diagnostics from the earlier,
+broader campaign. It does not add gates to the scoped job results.
+
+### Non-gating E1 control
+
+The initial high-quality SIFT profile used 8192 features. Two fresh centralized
+runs were byte-identical and each produced one model with 86/101 registered
+images, 11,824 points and 0.945 px mean reprojection error. The real trainer
+loaded all 86 cameras, completed 100 finite iterations, wrote a full checkpoint,
+and resumed from step 100 through step 120.
+
+The Intel worker reproducibly stopped making progress in the descriptor stage
+for `frame_0038_cam0.jpg` at 8192 features, both in the shard and as an isolated
+single-image run. It reached 46,459 raw keypoints, 56,476 oriented keypoints and
+8,236 selected keypoints but did not write the feature artifact within ten
+minutes. The same isolated image completed with 4096 features. This is retained
+as a profile-specific limitation; the campaign did not isolate application, driver
+and hardware causality or report it as an SSH or NVIDIA result.
+
+An Intel-compatible profile therefore capped SIFT at 4096 without changing the
+frozen images. Its profile SHA-256 is
+`cbfdd4e4fbf696bb748195fcf1fa9439b14905fcefff90093e9b65016f2df61f`.
+Two fresh AMD controls were again byte-identical: one model, 97/101 images,
+6,037 points, 1.079 px mean reprojection, and 46.3 seconds total. Training and
+resume again completed 100 then 20 iterations from the saved step.
+
+### Non-gating E2 two-host result
+
+The 4096-feature plan assigned 51 images to the AMD coordinator and 50 to the
+Intel worker. The plan SHA-256 is
+`c78853acd41b19dffc211a4ef2439fd6eb07664fd52f2f10c38fa16a74ec0472`;
+the dataset digest is
+`c9ed9ec3fbf3fd6537a7267934d7c76f6534c2e969583cff44f7ee580b8ecdcd`.
+Both workers completed on their explicitly bound devices. The transferred
+worker result contained 104 files and matched its remote canonical manifest
+digest `d02caeb2887e5e14589cc347dd388857adfe2058862a3ffa01140fb842b2ed4d`.
+
+Collection validated 101/101 images with no invalid result and sealed digest
+`e363a0c3931966721999784cd66fe6eaf0980c6ca1550fd1b8eb7a6015373c1e`.
+Imported `auto` reported zero extraction time, then produced one model with
+98/101 images, 4,249 points and 1.027 px mean reprojection error. The trainer
+loaded all 98 cameras, completed 100 finite iterations, wrote a checkpoint and
+resumed from step 100 through step 120. This proves the physical-host transport,
+identity-bound collection, central reconstruction and trainer handoff mechanics.
+
+The later cross-device geometry comparison was outside the clarified job-split
+acceptance scope. The centralized repeatability envelope was exact, while
+`eval_poses.py` for the distributed model against the control
+reported 94/97 common control images, median relative rotation 0.978 degrees,
+median relative translation-direction error 63.03 degrees, median aligned
+absolute rotation error 15.94 degrees and position RMSE 18.49% of scene extent.
+The focal/width ratio differed by 1.84%. Explicit sequential pairing worsened
+the pose disagreement; bottom-up mapping fragmented the distributed result into
+three models. A 98-frame dual-fisheye rig trial was also partial centrally, with
+three components covering 182/196 images, so it is not a replacement control.
+Because the AMD and Intel workers recomputed rather than shared identical
+feature bytes, this is not the frozen-payload V17 scenario.
+
+The first 8192-feature worker attempt was interrupted after 18 durable receipts.
+A superseding request was issued and the old result supplied through
+`--adopt-from`, but the retry reached the same Intel descriptor stall before it
+could prove completed-work reuse. Recovery is not part of the scoped runtime
+acceptance.
+
+The 8192-feature Intel stall and the cross-device reconstruction divergence are
+retained as limitations of those diagnostic profiles. They do not invalidate
+the successful 4096-feature distributed-job or multi-GPU-job splits, and no
+further recovery, chunk, GUI, learned-frontend, geometry-equivalence or
+performance campaign is required for the clarified scope.

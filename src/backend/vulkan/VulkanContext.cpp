@@ -690,6 +690,8 @@ DeviceInfo device_info(int index) {
     std::snprintf(info.name, sizeof(info.name), "%s", d.name.c_str());
     info.type = vk::deviceTypeName(d.props.deviceType);
     info.uuid = sel::selectorFor(d);
+    info.api_version = d.props.apiVersion;
+    info.driver_version = d.props.driverVersion;
     info.vram_bytes = d.vram_bytes;
     info.usable = d.usable;
     return info;

@@ -1,12 +1,15 @@
 #include "app/Subprocess.h"
 #include "app/OutputLease.h"
 
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -38,7 +41,135 @@ void check(bool condition, const char* message) {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 2 && std::string(argv[1]) == "--closed-output-delay") {
+#ifdef _WIN32
+        HANDLE stdout_handle = GetStdHandle(STD_OUTPUT_HANDLE);
+        HANDLE stderr_handle = GetStdHandle(STD_ERROR_HANDLE);
+        if (stdout_handle && stdout_handle != INVALID_HANDLE_VALUE)
+            CloseHandle(stdout_handle);
+        if (stderr_handle && stderr_handle != INVALID_HANDLE_VALUE &&
+            stderr_handle != stdout_handle)
+            CloseHandle(stderr_handle);
+#else
+        close(STDOUT_FILENO);
+        close(STDERR_FILENO);
+#endif
+        char byte = 0;
+#ifdef _WIN32
+        DWORD got = 0;
+        while (ReadFile(GetStdHandle(STD_INPUT_HANDLE), &byte, 1, &got, nullptr) &&
+               got) {}
+#else
+        while (read(STDIN_FILENO, &byte, 1) > 0) {}
+#endif
+        std::this_thread::sleep_for(std::chrono::milliseconds(700));
+        return 0;
+    }
+
+    if (argc == 2 && std::string(argv[1]) == "--spawn-survivor") {
+#ifdef _WIN32
+        const std::wstring exe = fs::absolute(argv[0]).wstring();
+        std::wstring command = L"\"" + exe + L"\" --closed-output-delay";
+        std::vector<wchar_t> command_line(command.begin(), command.end());
+        command_line.push_back(L'\0');
+        STARTUPINFOW startup{};
+        startup.cb = sizeof(startup);
+        startup.dwFlags = STARTF_USESTDHANDLES;
+        startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+        startup.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+        startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+        PROCESS_INFORMATION process{};
+        const BOOL created = CreateProcessW(
+            nullptr, command_line.data(), nullptr, nullptr, TRUE,
+            CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process);
+        if (!created) return 1;
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+        return 0;
+#else
+        const pid_t child = fork();
+        if (child < 0) return 1;
+        if (child == 0) {
+            close(STDOUT_FILENO);
+            close(STDERR_FILENO);
+            std::this_thread::sleep_for(std::chrono::milliseconds(700));
+            _exit(0);
+        }
+        return 0;
+#endif
+
+    }
+    if (argc == 2 && std::string(argv[1]) == "--emit-pause-acks") {
+        std::puts("WORKER_PAUSED");
+        std::puts("visible output");
+        std::puts("WORKER_RUNNING");
+        return 0;
+    }
+
+    if (argc == 2 && std::string(argv[1]) == "--close-output-hold") {
+#ifdef _WIN32
+        HANDLE stdout_handle = GetStdHandle(STD_OUTPUT_HANDLE);
+        HANDLE stderr_handle = GetStdHandle(STD_ERROR_HANDLE);
+        if (stdout_handle && stdout_handle != INVALID_HANDLE_VALUE)
+            CloseHandle(stdout_handle);
+        if (stderr_handle && stderr_handle != INVALID_HANDLE_VALUE &&
+            stderr_handle != stdout_handle)
+            CloseHandle(stderr_handle);
+#else
+        close(STDOUT_FILENO);
+        close(STDERR_FILENO);
+#endif
+        std::this_thread::sleep_for(std::chrono::seconds(10));
+        return 0;
+    }
+
+    {
+        proc::WorkerCommandParser parser;
+        auto parse = [&](std::string_view text) {
+            std::optional<proc::WorkerCommand> result;
+            for (char byte : text)
+                if (auto command = parser.push(byte)) result = command;
+            return result;
+        };
+        check(parse("PAUSE\r\n") == proc::WorkerCommand::Pause,
+              "control parser accepts exact PAUSE");
+        check(parse("PAUSE extra\n") == std::nullopt,
+              "control parser ignores command prefixes with extra text");
+        check(parse("RESUME\n") == proc::WorkerCommand::Resume,
+              "control parser accepts exact RESUME");
+        check(parse("CANCEL\n") == proc::WorkerCommand::Stop,
+              "control parser maps CANCEL to Stop");
+        check(parse("STOP\n") == proc::WorkerCommand::Stop,
+              "control parser accepts exact STOP");
+        check(parse("12345678\nPAUSE\n") == proc::WorkerCommand::Pause,
+              "control parser resets after an oversized line");
+    }
+
+    {
+        std::atomic<bool> acknowledged_paused{false};
+        bool output_saw_paused = false;
+        std::vector<std::string> lines;
+        proc::ProcessOptions opts;
+        opts.argv = {fs::absolute(argv[0]).u8string(), "--emit-pause-acks"};
+        opts.acknowledged_paused = &acknowledged_paused;
+        opts.on_line = [&](const std::string& line) {
+            lines.push_back(line);
+            output_saw_paused =
+                output_saw_paused ||
+                (line == "visible output" && acknowledged_paused.load());
+        };
+        const proc::ProcessResult result = proc::run_process(opts);
+        check(result.outcome == proc::ProcessOutcome::Success,
+              "worker acknowledgment child exits successfully");
+        check(output_saw_paused,
+              "pause acknowledgment updates status before normal output");
+        check(!acknowledged_paused.load(),
+              "running acknowledgment clears paused status");
+        check(lines == std::vector<std::string>{"visible output"},
+              "reserved worker acknowledgments stay out of normal output");
+    }
+
     // 1. Basic command execution and line streaming
     {
         proc::ProcessOptions opts;
@@ -48,17 +179,60 @@ int main() {
         opts.argv = {"/bin/sh", "-c", "printf 'alpha\nbeta\n'"};
 #endif
         std::vector<std::string> lines;
+        uint64_t child_pid = 0;
+        opts.on_started = [&](uint64_t pid) { child_pid = pid; };
         opts.on_line = [&](const std::string& l) {
             lines.push_back(l);
         };
         proc::ProcessResult res = proc::run_process(opts);
         check(res.outcome == proc::ProcessOutcome::Success, "basic execution outcome is Success");
         check(res.exit_code == 0, "basic execution exit code is 0");
+        check(child_pid != 0, "started callback reports the child process ID");
         check(lines.size() == 2, "captured exactly two lines");
         if (lines.size() >= 2) {
             check(lines[0] == "alpha", "line 1 matches");
             check(lines[1] == "beta", "line 2 matches");
         }
+    }
+
+    {
+        std::atomic<bool> cancel_flag{false};
+        proc::ProcessOptions opts;
+        opts.argv = {fs::absolute(argv[0]).u8string(), "--close-output-hold"};
+        opts.cancel = &cancel_flag;
+        std::thread canceller([&]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+            cancel_flag.store(true);
+        });
+        const auto start = std::chrono::steady_clock::now();
+        const proc::ProcessResult res = proc::run_process(opts);
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start).count();
+        canceller.join();
+        check(res.outcome == proc::ProcessOutcome::Cancelled,
+              "closed output does not disable cancellation");
+        check(elapsed < 4000,
+              "closed-output process terminates promptly on cancellation");
+    }
+
+    {
+        std::atomic<bool> cancel_flag{false};
+        proc::ProcessOptions opts;
+        opts.argv = {fs::absolute(argv[0]).u8string(), "--spawn-survivor"};
+        opts.cancel = &cancel_flag;
+        std::thread canceller([&]() {
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+            cancel_flag.store(true);
+        });
+        const auto start = std::chrono::steady_clock::now();
+        const proc::ProcessResult res = proc::run_process(opts);
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start).count();
+        canceller.join();
+        check(res.outcome == proc::ProcessOutcome::Success,
+              "surviving descendant preserves successful outcome");
+        check(elapsed >= 500,
+              "process ownership waits for descendants after root exit");
     }
 
     // 2. Child-local environment overrides
@@ -256,10 +430,15 @@ int main() {
         opts.argv = {"powershell", "-NoProfile", "-Command",
                      "Write-Output READY; Start-Sleep -Seconds 10"};
         opts.cancel = &cancel_flag;
+        std::atomic<bool> ready{false};
         std::vector<std::string> lines;
-        opts.on_line = [&](const std::string& line) { lines.push_back(line); };
+        opts.on_line = [&](const std::string& line) {
+            lines.push_back(line);
+            ready.store(line == "READY");
+        };
         std::thread canceller([&]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+            for (int i = 0; i < 200 && !ready.load(); ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
             cancel_flag.store(true);
         });
         const proc::ProcessResult res = proc::run_process(opts);

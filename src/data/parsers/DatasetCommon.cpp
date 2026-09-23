@@ -5,6 +5,7 @@
 #include "data/DatasetParser.h"
 #include "data/SourceCamera.h"
 #include "i18n/catalog/Data.h"
+#include "core/FilesystemPath.h"
 #include "sfm/core/Exif.h"
 
 #include <algorithm>
@@ -231,8 +232,8 @@ void assign_val_split(ParsedDataset& ds, float validation_fraction) {
 // ---------------------------------------------------------------------------
 std::string find_aux_file(const std::string& aux_dir_s, const std::string& rel_name,
                           const char* suffix_tag) {
-    fs::path aux_dir(aux_dir_s);
-    if (!fs::is_directory(aux_dir)) return "";
+    fs::path aux_dir = spirula::LogicalFilesystemPath(fs::path(aux_dir_s));
+    if (!fs::is_directory(spirula::NativeFilesystemPath(aux_dir))) return "";
     fs::path rel(rel_name);
     std::string stem_rel = (rel.parent_path() / rel.stem()).string();
     const std::string exts[] = {".png", ".PNG", ".jpg", ".JPG", ".jpeg", ".JPEG"};
@@ -244,7 +245,8 @@ std::string find_aux_file(const std::string& aux_dir_s, const std::string& rel_n
     candidates.push_back(stem_rel + "_" + suffix_tag + ".png");   // image_mask.png
     for (const auto& cand : candidates) {
         fs::path p = aux_dir / cand;
-        if (fs::exists(p)) return p.string();
+        if (fs::exists(spirula::NativeFilesystemPath(p)))
+            return spirula::LogicalFilesystemPath(p).string();
     }
     return "";
 }

@@ -54,6 +54,8 @@ struct DeviceInfo {
     const char* type;     // "discrete"|"integrated"|"virtual"|"cpu"|"other"
                           // (static storage)
     std::string uuid;     // canonical uuid:<hex>; empty when unavailable
+    uint32_t api_version;
+    uint32_t driver_version;
     uint64_t vram_bytes;  // device-local memory
     bool usable;          // meets the backend's feature requirements
 };

@@ -13,6 +13,7 @@
 // web viewer wiring.
 
 #include "app/Tools.h"
+#include "app/Subprocess.h"
 #include "app/TrainerCore.h"
 #include "data/ProjectManifest.h"
 #include "app/webviewer/Viewer.h"
@@ -520,6 +521,29 @@ static int spirula_train_main_impl(int argc, char** argv,
         std::thread worker_listener;
         if (worker_control) {
             worker_listener = std::thread([&] {
+                app::proc::WorkerCommandParser parser;
+                auto consume = [&](const char* bytes, size_t count) {
+                    for (size_t i = 0; i < count; ++i) {
+                        const auto command = parser.push(bytes[i]);
+                        if (!command) continue;
+                        switch (*command) {
+                            case app::proc::WorkerCommand::Pause:
+                                if (!session.stop_requested.load())
+                                    session.paused.store(true);
+                                break;
+                            case app::proc::WorkerCommand::Resume:
+                                if (!session.stop_requested.load())
+                                    session.paused.store(false);
+                                break;
+                            case app::proc::WorkerCommand::Stop:
+                                session.paused.store(false);
+                                session.save_on_stop.store(true);
+                                session.stop_requested.store(true);
+                                return true;
+                        }
+                    }
+                    return false;
+                };
 #ifdef _WIN32
                 HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
                 for (;;) {
@@ -527,18 +551,16 @@ static int spirula_train_main_impl(int argc, char** argv,
                     DWORD available = 0;
                     if (!in || !PeekNamedPipe(in, nullptr, 0, nullptr,
                                                &available, nullptr))
-                        break;
+                        return;
                     if (available == 0) {
                         Sleep(25);
                         continue;
                     }
-                    char buf[16];
+                    char buf[32];
                     DWORD n = 0;
                     if (!ReadFile(in, buf, sizeof buf, &n, nullptr) || n == 0)
-                        break;
-                    session.save_on_stop.store(true);
-                    session.stop_requested.store(true);
-                    return;
+                        return;
+                    if (consume(buf, n)) return;
                 }
 #else
                 pollfd input{STDIN_FILENO, POLLIN | POLLHUP | POLLERR, 0};
@@ -547,18 +569,15 @@ static int spirula_train_main_impl(int argc, char** argv,
                     const int ready = ::poll(&input, 1, 50);
                     if (ready < 0 && errno == EINTR) continue;
                     if (ready <= 0) {
-                        if (ready < 0) break;
+                        if (ready < 0) return;
                         continue;
                     }
-                    char buf[16];
-                    if (::read(STDIN_FILENO, buf, sizeof buf) <= 0) break;
-                    session.save_on_stop.store(true);
-                    session.stop_requested.store(true);
-                    return;
+                    char buf[32];
+                    const ssize_t n = ::read(STDIN_FILENO, buf, sizeof buf);
+                    if (n <= 0) return;
+                    if (consume(buf, static_cast<size_t>(n))) return;
                 }
 #endif
-                session.save_on_stop.store(true);
-                session.stop_requested.store(true);
             });
         }
         struct ListenerGuard {
@@ -602,6 +621,16 @@ static int spirula_train_main_impl(int argc, char** argv,
 
         // ---- Train loop ------------------------------------------------------
         TrainerCallbacks cb;
+        if (worker_control) {
+            cb.on_pause_ack = [] {
+                std::printf("%s\n", app::proc::kWorkerPauseAcknowledgment);
+                std::fflush(stdout);
+            };
+            cb.on_resume_ack = [] {
+                std::printf("%s\n", app::proc::kWorkerRunningAcknowledgment);
+                std::fflush(stdout);
+            };
+        }
         cb.on_step = [&](const TrainerProgress& p) {
             if (p.step % 100 == 0 || p.step == p.total_steps - 1) {
                 // step + 1 is steps completed, as in the GUI. Both numbers

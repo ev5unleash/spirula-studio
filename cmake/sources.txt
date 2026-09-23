@@ -40,6 +40,10 @@ src/data/parsers/*.cpp
 src/app/webviewer/*.cpp
 src/app/TrainerCore.cpp
 src/app/EvalMetrics.cpp
+src/app/DeviceLease.cpp
+src/app/AgentState.cpp
+src/app/AgentConfig.cpp
+src/app/AgentWire.cpp
 src/app/OutputLease.cpp
 src/app/Subprocess.cpp
 src/app/JobScheduler.cpp
@@ -60,6 +64,10 @@ src/data/parsers/*.cpp
 src/app/webviewer/*.cpp
 src/app/TrainerCore.cpp
 src/app/EvalMetrics.cpp
+src/app/DeviceLease.cpp
+src/app/AgentState.cpp
+src/app/AgentConfig.cpp
+src/app/AgentWire.cpp
 src/app/OutputLease.cpp
 src/app/Subprocess.cpp
 src/app/JobScheduler.cpp

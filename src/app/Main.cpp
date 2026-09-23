@@ -33,6 +33,7 @@
 #include <unistd.h>
 #endif
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -84,6 +85,9 @@ const std::vector<Tool>& tools() {
 #endif
 #ifdef SS_TOOL_MESH
         {app::kToolMesh, &cmsg::tool_mesh, spirula_mesh_main},
+#endif
+#ifdef SS_TOOL_AGENT
+        {app::kToolAgent, &cmsg::tool_agent, spirula_agent_main},
 #endif
     };
     return kTools;
@@ -182,9 +186,33 @@ int main(int argc, char** argv) {
     // Every tool, not only the window: the GUI runs reconstruction, masking
     // and meshing as child processes, and a child that dies of a fault leaves
     // its parent an exit status and nothing else.
+    std::string service_crash_dir;
+    if (argc > 4 && argv[1] && argv[2] &&
+        std::strcmp(argv[1], "agent") == 0 &&
+        std::strcmp(argv[2], "service-probe") == 0) {
+        for (int i = 3; i + 1 < argc; ++i) {
+            if (argv[i] && std::strcmp(argv[i], "--evidence") == 0 &&
+                argv[i + 1]) {
+                service_crash_dir = std::filesystem::u8path(argv[i + 1])
+                                        .parent_path().u8string();
+                break;
+            }
+        }
+    }
+    const bool agent_host =
+        argc > 2 && argv[1] && argv[2] &&
+        std::strcmp(argv[1], "agent") == 0 &&
+        (std::strcmp(argv[2], "run") == 0 ||
+         std::strcmp(argv[2], "service") == 0);
     const char* crash_dir = spirula::env("CRASH_DIR");
-    app::install_crash_log(crash_dir && crash_dir[0] ? crash_dir : app::config_dir());
-
+    // Agent hosts arm crash logging only after their explicit state root has
+    // passed validation. In particular, never ask config_dir() for a service
+    // default that may resolve into a logged-in user's profile.
+    if (!agent_host)
+        app::install_crash_log(!service_crash_dir.empty()
+                                   ? service_crash_dir
+                                   : crash_dir && crash_dir[0] ? crash_dir
+                                                               : app::config_dir());
     // An explicit subcommand wins over the argv[0] hint, so a binary that was
     // renamed or symlinked still answers to every tool it holds. No subcommand
     // name collides with an argument any of them takes, so `spirula-sfm auto`

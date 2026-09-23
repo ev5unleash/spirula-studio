@@ -1009,6 +1009,7 @@ void JobScheduler::stop_and_save(const std::string& job_id) {
     if (jit->second->state == JobState::Starting || jit->second->state == JobState::Running) {
         jit->second->state = JobState::Stopping; queue_event_locked(*jit->second); save_locked();
     }
+    it->second->pause_requested.store(false, std::memory_order_release);
     it->second->stop.store(true);
 }
 
@@ -1019,6 +1020,7 @@ void JobScheduler::force_stop(const std::string& job_id) {
     if (jit->second->state == JobState::Starting || jit->second->state == JobState::Running) {
         jit->second->state = JobState::Stopping; queue_event_locked(*jit->second); save_locked();
     }
+    it->second->pause_requested.store(false, std::memory_order_release);
     it->second->cancel.store(true);
 }
 
@@ -1030,6 +1032,72 @@ void JobScheduler::cancel(const std::string& job_id) {
     it->second->pending_resume = false;
     release_claim_leases_locked(job_id);
     save_locked();
+}
+
+bool JobScheduler::request_pause(const std::string& job_id) {
+    std::lock_guard<std::mutex> lk(_mu);
+    if (_shutdown.load(std::memory_order_acquire)) return false;
+    const auto attempt = _active.find(job_id);
+    const auto job = _jobs.find(job_id);
+    if (attempt == _active.end() || job == _jobs.end() ||
+        job->second->current_phase >= job->second->phases.size())
+        return false;
+    const std::string& phase =
+        job->second->phases[job->second->current_phase].phase;
+    if ((phase != "sfm" && phase != "sfm-extract" && phase != "train") ||
+        (job->second->state != JobState::Starting &&
+         job->second->state != JobState::Running) ||
+        attempt->second->stop.load(std::memory_order_acquire) ||
+        attempt->second->cancel.load(std::memory_order_acquire))
+        return false;
+    attempt->second->pause_requested.store(true, std::memory_order_release);
+    return true;
+}
+
+bool JobScheduler::request_resume(const std::string& job_id) {
+    std::lock_guard<std::mutex> lk(_mu);
+    if (_shutdown.load(std::memory_order_acquire)) return false;
+    const auto attempt = _active.find(job_id);
+    const auto job = _jobs.find(job_id);
+    if (attempt == _active.end() || job == _jobs.end() ||
+        job->second->current_phase >= job->second->phases.size())
+        return false;
+    const std::string& phase =
+        job->second->phases[job->second->current_phase].phase;
+    if ((phase != "sfm" && phase != "sfm-extract" && phase != "train") ||
+        (job->second->state != JobState::Starting &&
+         job->second->state != JobState::Running) ||
+        attempt->second->stop.load(std::memory_order_acquire) ||
+        attempt->second->cancel.load(std::memory_order_acquire))
+        return false;
+    attempt->second->pause_requested.store(false, std::memory_order_release);
+    return true;
+}
+
+JobPauseStatus JobScheduler::pause_status(const std::string& job_id) const {
+    std::lock_guard<std::mutex> lk(_mu);
+    const auto attempt = _active.find(job_id);
+    const auto job = _jobs.find(job_id);
+    if (attempt == _active.end() || job == _jobs.end() ||
+        job->second->current_phase >= job->second->phases.size())
+        return JobPauseStatus::Running;
+    const std::string& phase =
+        job->second->phases[job->second->current_phase].phase;
+    if ((phase != "sfm" && phase != "sfm-extract" && phase != "train") ||
+        (job->second->state != JobState::Starting &&
+         job->second->state != JobState::Running) ||
+        attempt->second->stop.load(std::memory_order_acquire) ||
+        attempt->second->cancel.load(std::memory_order_acquire))
+        return JobPauseStatus::Running;
+    if (attempt->second->pause_requested.load(std::memory_order_acquire))
+        return attempt->second->acknowledged_paused.load(
+                   std::memory_order_acquire)
+                   ? JobPauseStatus::Paused
+                   : JobPauseStatus::Pausing;
+    return attempt->second->acknowledged_paused.load(
+               std::memory_order_acquire)
+               ? JobPauseStatus::Paused
+               : JobPauseStatus::Running;
 }
 
 void JobScheduler::set_device(const std::string& job_id, const std::string& device, const std::string& device_name) {
@@ -1052,11 +1120,28 @@ bool JobScheduler::try_reserve_foreground_device(const std::string& device) {
     if (device.empty()) return false;
     std::lock_guard<std::mutex> lk(_mu);
     if (_leases.count(device) || (!_foreground_device.empty() && _foreground_device != device)) return false;
+    if (_foreground_device == device) return true;
+    std::string error;
+    if (!_foreground_lease.try_acquire(device, error)) return false;
     _foreground_device = device; return true;
 }
 
 void JobScheduler::set_foreground_device(const std::string& device) {
-    { std::lock_guard<std::mutex> lk(_mu); if (_foreground_device == device) return; if (!device.empty() && _leases.count(device)) return; _foreground_device = device; }
+    {
+        std::lock_guard<std::mutex> lk(_mu);
+        if (_foreground_device == device) return;
+        if (device.empty()) {
+            _foreground_device.clear();
+            _foreground_lease.release();
+        } else {
+            if (_leases.count(device)) return;
+            DeviceLease lease;
+            std::string error;
+            if (!lease.try_acquire(device, error)) return;
+            _foreground_device = device;
+            _foreground_lease = std::move(lease);
+        }
+    }
     _cv.notify_all();
 }
 
@@ -1610,6 +1695,16 @@ void JobScheduler::dispatch_one() {
                 leases = _claim_leases.find(j->job_id);
             }
             candidate->path_leases = leases->second;
+            std::string device_error;
+            if (!candidate->device_lease.try_acquire(p.planned_device,
+                                                      device_error)) {
+                _queue.erase(_queue.begin() + (ptrdiff_t)idx);
+                p.error = device_error;
+                transition_locked(*j, JobState::Blocked, device_error);
+                release_claim_leases_locked(j->job_id);
+                save_locked();
+                continue;
+            }
             candidate->shutdown_grace_ms =
                 p.phase == "train" ? 300000 : 30000;
             const JobState previous_state = j->state; const std::string previous_attempt = j->attempt_id; const std::string previous_error = j->error;
@@ -1620,7 +1715,7 @@ void JobScheduler::dispatch_one() {
         }
     }
     try { att->thread = std::thread([this, att] { supervisor_main(att); }); }
-    catch (const std::exception& e) { std::lock_guard<std::mutex> lk(_mu); _active.erase(j->job_id); _leases.erase(j->device); if (j->current_phase < j->phases.size()) j->phases[j->current_phase].error = e.what(); transition_locked(*j, JobState::Failed, e.what()); release_claim_leases_locked(j->job_id); save_locked(); }
+    catch (const std::exception& e) { std::lock_guard<std::mutex> lk(_mu); _active.erase(j->job_id); if (j->current_phase < j->phases.size()) j->phases[j->current_phase].error = e.what(); transition_locked(*j, JobState::Failed, e.what()); release_claim_leases_locked(j->job_id); save_locked(); _leases.erase(att->device_lease.device()); att->device_lease.release(); }
 }
 
 void JobScheduler::supervisor_main(std::shared_ptr<Attempt> att) {
@@ -1633,6 +1728,8 @@ void JobScheduler::supervisor_main(std::shared_ptr<Attempt> att) {
         std::lock_guard<std::mutex> lk(_mu);
         auto it = _jobs.find(att->job_id);
         if (it == _jobs.end() || att->phase_index >= it->second->phases.size()) {
+            _leases.erase(att->device_lease.device());
+            att->device_lease.release();
             att->finished.store(true);
             _cv.notify_all();
             return;
@@ -1674,10 +1771,15 @@ void JobScheduler::supervisor_main(std::shared_ptr<Attempt> att) {
         app::worker::validate_request(request);
         write_request_file(request, req_path);
     }
-    catch (const std::exception& e) { std::lock_guard<std::mutex> lk(_mu); if (att->phase_index < j->phases.size()) { j->phases[att->phase_index].outcome = "failed"; j->phases[att->phase_index].error = e.what(); } transition_locked(*j, JobState::Failed, e.what()); _leases.erase(phase.planned_device); release_claim_leases_locked(j->job_id); att->finished.store(true); save_locked(); _cv.notify_all(); return; }
+    catch (const std::exception& e) { std::lock_guard<std::mutex> lk(_mu); if (att->phase_index < j->phases.size()) { j->phases[att->phase_index].outcome = "failed"; j->phases[att->phase_index].error = e.what(); } transition_locked(*j, JobState::Failed, e.what()); release_claim_leases_locked(j->job_id); att->finished.store(true); save_locked(); _leases.erase(att->device_lease.device()); att->device_lease.release(); _cv.notify_all(); return; }
     std::ofstream log_file(log_path, std::ios::binary | std::ios::trunc);
-    proc::ProcessOptions opts; opts.argv = {_exe_path, "worker", "--request", req_path.u8string()}; opts.cwd = j->work_dir; opts.cancel = &att->cancel; opts.stop = &att->stop; opts.stop_token = "STOP\n"; opts.grace_period_ms = phase.phase == "train" ? 300000 : 30000; opts.env_overrides = {{"SS_WORKER_CONTROL", "1"}, {"SS_CRASH_DIR", j->run_dir}, {"SS_STATE_LOCK_HELD", "1"}};
+    proc::ProcessOptions opts; opts.argv = {_exe_path, "worker", "--request", req_path.u8string()}; opts.cwd = j->work_dir; opts.cancel = &att->cancel; opts.stop = &att->stop; opts.pause_requested = &att->pause_requested; opts.acknowledged_paused = &att->acknowledged_paused; opts.stop_token = "STOP\n"; opts.grace_period_ms = phase.phase == "train" ? 300000 : 30000; opts.env_overrides = {{"SS_WORKER_CONTROL", "1"}, {"SS_CRASH_DIR", j->run_dir}, {"SS_STATE_LOCK_HELD", "1"}};
     bool first_lease = true;
+#ifdef _WIN32
+    opts.inherit_handles.push_back(att->device_lease.native_handle());
+#else
+    opts.inherit_fds.push_back(att->device_lease.native_fd());
+#endif
     for (const auto& lease : att->path_leases) {
         if (!lease || !lease->valid()) continue;
 #ifdef _WIN32
@@ -1733,7 +1835,7 @@ void JobScheduler::supervisor_main(std::shared_ptr<Attempt> att) {
     {
         std::lock_guard<std::mutex> lk(_mu); auto it = _jobs.find(att->job_id);
         if (it != _jobs.end()) {
-            Job& job = *it->second; _leases.erase(phase.planned_device); Phase& saved = job.phases[att->phase_index]; saved.actual_device = phase.planned_device; saved.actual_device_name = phase.planned_device_name; saved.exit_code = exit_code;
+            Job& job = *it->second; Phase& saved = job.phases[att->phase_index]; saved.actual_device = phase.planned_device; saved.actual_device_name = phase.planned_device_name; saved.exit_code = exit_code;
             const bool cancelled = process.outcome == proc::ProcessOutcome::Cancelled; const bool stopped = process.outcome == proc::ProcessOutcome::Stopped; const bool spawn = process.outcome == proc::ProcessOutcome::SpawnFailed;
             if (cancelled) { saved.outcome = "interrupted"; saved.error = "force-stopped"; transition_locked(job, JobState::Interrupted, saved.error); job.pending_resume = true; }
             else if (result_ok && (result.outcome == "success" || result.outcome == "partial" || result.outcome == "nonmetric") && process.outcome == proc::ProcessOutcome::Success && (exit_code == 0 || (phase.phase == "sfm" && (exit_code == 3 || exit_code == 4)))) {
@@ -1784,6 +1886,8 @@ void JobScheduler::supervisor_main(std::shared_ptr<Attempt> att) {
             job.last_exit_code = exit_code; if (job.current_phase < job.phases.size()) { job.phase = job.phases[job.current_phase].phase; job.device = job.phases[job.current_phase].planned_device; job.device_name = job.phases[job.current_phase].planned_device_name; job.args = job.phases[job.current_phase].args; job.output_dir = job.phases[job.current_phase].output; }
         }
         att->finished.store(true); save_locked();
+        _leases.erase(att->device_lease.device());
+        att->device_lease.release();
     }
     _cv.notify_all();
 }
@@ -1795,7 +1899,10 @@ void JobScheduler::shutdown() {
     }
     _cv.notify_all(); if (_dispatcher.joinable()) _dispatcher.join();
     std::vector<std::shared_ptr<Attempt>> live; { std::lock_guard<std::mutex> lk(_mu); for (auto& [_, a] : _active) live.push_back(a); }
-    for (auto& a : live) a->stop.store(true);
+    for (auto& a : live) {
+        a->pause_requested.store(false, std::memory_order_release);
+        a->stop.store(true);
+    }
     int grace_ms = 0;
     for (const auto& a : live)
         grace_ms = std::max(grace_ms, a->shutdown_grace_ms);
