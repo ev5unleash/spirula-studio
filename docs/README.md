@@ -20,6 +20,7 @@ the detail.
 | [notes/gui-editing-plan.md](notes/gui-editing-plan.md) | editing in the GUI: the selection seam every tool shares, transforms, mask editing, trajectories, and the order to build them in |
 | [notes/gui-automation.md](notes/gui-automation.md) | driving the GUI from a script: the imgui item hooks, the loopback control surface, `tools/guictl.py` and the MCP server |
 | [notes/sfm-in-process-plan.md](notes/sfm-in-process-plan.md) | running SfM inside the GUI: the library seam, the input manifest, and what manual ties need |
+| [notes/hevc-decode-capability-plan.md](notes/hevc-decode-capability-plan.md) | HEVC level admission, corruption diagnosis, and safe synchronized FFmpeg fallback |
 | [notes/](notes/) | design notes for individual subsystems |
 
 Authoritative documents that live next to their code rather than here:
