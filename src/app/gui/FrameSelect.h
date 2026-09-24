@@ -38,6 +38,24 @@ struct FrameSelectOptions {
     // the candidate it ends at, how many there are, and the change.
     std::function<void(int64_t, int64_t, float)> measured;
 };
+// One video in an adaptive rate group. `candidate_dirs` and `output_dirs`
+// correspond by track. Synchronized candidates use c_<presentation-us>.jpg;
+// every track must contain the same timestamp sequence before selection.
+struct FrameSelectGroup {
+    std::vector<std::string> candidate_dirs;
+    std::vector<std::string> output_dirs;
+    FrameSelectOptions options;
+    bool sync_tracks = false;
+    int kept = 0;
+};
+
+// Rate-matched groups share an adaptive budget; synchronized tracks share
+// selected timestamps. The caller removes partial outputs on failure.
+bool select_sharpest_frame_groups(
+    std::vector<FrameSelectGroup>& groups,
+    const std::function<void(const std::string&)>& log,
+    const std::atomic<bool>& cancel, std::string& error);
+
 
 // Scores every image in cand_dir (sorted by filename) across all hardware
 // threads and MOVES the keepers to out_dir as <prefix>NNNNN.<ext>, numbered by

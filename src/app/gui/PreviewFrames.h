@@ -85,11 +85,11 @@ std::vector<PreviewFrame> spread_preview_frames(
     const PreviewSource& src, const std::vector<PreviewFrame>& offers,
     const std::vector<std::string>& files, int samples);
 
-// `frames` handed over one at a time as they are read. A video is read forward
-// ONCE, which is what makes this worth having over a load per frame.
-void scan_preview_frames(const PreviewSource& src,
+// False means the scan is incomplete; callers must discard partial callbacks.
+bool scan_preview_frames(const PreviewSource& src,
                          const std::vector<PreviewFrame>& frames, int folder,
                          const std::function<void(const uint8_t*, int, int)>& on_frame,
+                         std::string& error,
                          const std::atomic<bool>& cancel);
 
 }  // namespace gui

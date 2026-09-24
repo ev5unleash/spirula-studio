@@ -3001,42 +3001,30 @@ SS_MSG(err_no_frames_extracted,
     TR("Videodan hiç kare çıkmadı."));
 
 SS_MSG(err_ffmpeg_missing,
-    EN("ffmpeg was not found ('{0}'). Install it, set its path under Tool "
-       "locations, or build with -DSS_ENABLE_PATENTED=ON to decode in-process."),
+    EN("ffmpeg was not found ('{0}'). Install it or set its path under Tool "
+       "locations."),
     JA("ffmpeg が見つかりません（'{0}'）。インストールするか、「ツールの場所」で"
-       "パスを設定するか、-DSS_ENABLE_PATENTED=ON でビルドしてプロセス内で"
-       "デコードしてください。"),
-    ZH_HANS("找不到 ffmpeg（'{0}'）。请安装它、在“工具位置”中设置其路径，"
-            "或以 -DSS_ENABLE_PATENTED=ON 构建以在进程内解码。"),
-    ZH_HANT("找不到 ffmpeg（'{0}'）。請安裝它、在「工具位置」中設定其路徑，"
-            "或以 -DSS_ENABLE_PATENTED=ON 建置以在行程內解碼。"),
-    KO("ffmpeg 을 찾지 못했습니다('{0}'). 설치하거나 \"도구 위치\"에서 경로를 "
-       "지정하거나, -DSS_ENABLE_PATENTED=ON 으로 빌드해 프로세스 안에서 "
-       "디코딩하세요."),
-    DE("ffmpeg wurde nicht gefunden ('{0}'). Installieren Sie es, tragen Sie "
-       "seinen Pfad unter Werkzeugpfade ein, oder bauen Sie mit "
-       "-DSS_ENABLE_PATENTED=ON, um im Prozess zu dekodieren."),
-    FR("ffmpeg est introuvable ('{0}'). Installez-le, indiquez son chemin sous "
-       "Emplacements des outils, ou compilez avec -DSS_ENABLE_PATENTED=ON pour "
-       "décoder dans le processus."),
-    ES("No se encontró ffmpeg ('{0}'). Instálalo, indica su ruta en Ubicaciones "
-       "de herramientas, o compila con -DSS_ENABLE_PATENTED=ON para descodificar "
-       "en el propio proceso."),
-    PT("O ffmpeg não foi encontrado ('{0}'). Instale-o, informe o caminho em "
-       "Locais das ferramentas, ou compile com -DSS_ENABLE_PATENTED=ON para "
-       "decodificar no próprio processo."),
-    IT("ffmpeg non è stato trovato ('{0}'). Lo installi, ne indichi il percorso "
-       "in Posizioni degli strumenti, oppure compili con "
-       "-DSS_ENABLE_PATENTED=ON per decodificare nel processo."),
-    NL("ffmpeg is niet gevonden ('{0}'). Installeer het, geef het pad op onder "
-       "Gereedschapslocaties, of bouw met -DSS_ENABLE_PATENTED=ON om in het "
-       "proces te decoderen."),
-    RU("ffmpeg не найден ('{0}'). Установите его, укажите путь в «Расположение "
-       "инструментов» или соберите с -DSS_ENABLE_PATENTED=ON, чтобы "
-       "декодировать внутри процесса."),
-    TR("ffmpeg bulunamadı ('{0}'). Kurun, yolunu Araç konumları altında "
-       "belirtin ya da süreç içinde çözmek için -DSS_ENABLE_PATENTED=ON ile "
-       "derleyin."));
+       "パスを設定してください。"),
+    ZH_HANS("找不到 ffmpeg（'{0}'）。请安装它，或在“工具位置”中设置其路径。"),
+    ZH_HANT("找不到 ffmpeg（'{0}'）。請安裝它，或在「工具位置」中設定其路徑。"),
+    KO("ffmpeg을 찾지 못했습니다('{0}'). 설치하거나 \"도구 위치\"에서 경로를 "
+       "설정하세요."),
+    DE("ffmpeg wurde nicht gefunden ('{0}'). Installieren Sie es oder tragen "
+       "Sie seinen Pfad unter Werkzeugpfade ein."),
+    FR("ffmpeg est introuvable ('{0}'). Installez-le ou indiquez son chemin "
+       "sous Emplacements des outils."),
+    ES("No se encontró ffmpeg ('{0}'). Instálalo o indica su ruta en "
+       "Ubicaciones de herramientas."),
+    PT("O ffmpeg não foi encontrado ('{0}'). Instale-o ou informe o caminho em "
+       "Locais das ferramentas."),
+    IT("ffmpeg non è stato trovato ('{0}'). Lo installi o ne indichi il "
+       "percorso in Posizioni degli strumenti."),
+    NL("ffmpeg is niet gevonden ('{0}'). Installeer het of geef het pad op "
+       "onder Gereedschapslocaties."),
+    RU("ffmpeg не найден ('{0}'). Установите его или укажите путь в "
+       "«Расположение инструментов»."),
+    TR("ffmpeg bulunamadı ('{0}'). Kurun veya Araç konumları altında yolunu "
+       "belirtin."));
 
 SS_MSG(err_ffmpeg_split_failed,
     EN("ffmpeg could not split the tracks (see the log)."),
@@ -3067,6 +3055,186 @@ SS_MSG(err_ffmpeg_extract_failed,
     NL("ffmpeg kon de beelden niet uitpakken (zie het logboek)."),
     RU("ffmpeg не смог извлечь кадры (см. журнал)."),
     TR("ffmpeg kareleri çıkaramadı (günlüğe bakın)."));
+
+SS_MSG(frame_candidates_scored,
+    EN("Scored {0}/{1} candidate frames."),
+    JA("候補フレームを {0}/{1} 枚評価しました。"),
+    ZH_HANS("已评估 {0}/{1} 个候选帧。"),
+    ZH_HANT("已評估 {0}/{1} 個候選影格。"),
+    KO("후보 프레임 {0}/{1}개를 평가했습니다."),
+    DE("{0}/{1} Kandidatenbilder bewertet."),
+    FR("{0}/{1} images candidates évaluées."),
+    ES("Se evaluaron {0}/{1} fotogramas candidatos."),
+    PT("Foram avaliados {0}/{1} quadros candidatos."),
+    IT("Valutati {0}/{1} fotogrammi candidati."),
+    NL("{0}/{1} kandidaatbeelden beoordeeld."),
+    RU("Оценено кадров-кандидатов: {0}/{1}."),
+    TR("{0}/{1} aday kare puanlandı."));
+
+SS_MSG(err_frame_candidate_tracks,
+    EN("FFmpeg candidate and output track lists do not match."),
+    JA("FFmpeg の候補トラック一覧と出力トラック一覧が一致しません。"),
+    ZH_HANS("FFmpeg 候选轨道列表与输出轨道列表不匹配。"),
+    ZH_HANT("FFmpeg 候選軌道清單與輸出軌道清單不相符。"),
+    KO("FFmpeg 후보 트랙 목록과 출력 트랙 목록이 일치하지 않습니다."),
+    DE("Die FFmpeg-Kandidatenspuren stimmen nicht mit den Ausgabespuren überein."),
+    FR("Les pistes candidates de FFmpeg ne correspondent pas aux pistes de sortie."),
+    ES("Las pistas candidatas de FFmpeg no coinciden con las pistas de salida."),
+    PT("As faixas candidatas do FFmpeg não correspondem às faixas de saída."),
+    IT("Le tracce candidate di FFmpeg non corrispondono alle tracce di output."),
+    NL("De FFmpeg-kandidaatsporen komen niet overeen met de uitvoersporen."),
+    RU("Список дорожек-кандидатов FFmpeg не совпадает со списком выходных дорожек."),
+    TR("FFmpeg aday izleri ile çıktı izleri eşleşmiyor."));
+
+SS_MSG(err_frame_candidate_range,
+    EN("Adaptive rate groups must use the same motion range."),
+    JA("適応レートのグループでは同じ動きの範囲を指定する必要があります。"),
+    ZH_HANS("自适应帧率组必须使用相同的运动范围。"),
+    ZH_HANT("自適應影格率群組必須使用相同的動作範圍。"),
+    KO("적응형 프레임 속도 그룹은 동일한 움직임 범위를 사용해야 합니다."),
+    DE("Gruppen mit adaptiver Bildrate müssen denselben Bewegungsbereich verwenden."),
+    FR("Les groupes à cadence adaptative doivent utiliser la même plage de mouvement."),
+    ES("Los grupos de frecuencia adaptativa deben usar el mismo rango de movimiento."),
+    PT("Os grupos de taxa adaptável devem usar o mesmo intervalo de movimento."),
+    IT("I gruppi con frequenza adattiva devono usare lo stesso intervallo di movimento."),
+    NL("Groepen met een adaptieve beeldsnelheid moeten hetzelfde bewegingsbereik gebruiken."),
+    RU("Группы с адаптивной частотой должны использовать одинаковый диапазон движения."),
+    TR("Uyarlamalı hız grupları aynı hareket aralığını kullanmalıdır."));
+
+SS_MSG(err_frame_candidate_timestamp,
+    EN("An FFmpeg candidate has no presentation timestamp."),
+    JA("FFmpeg の候補フレームに表示タイムスタンプがありません。"),
+    ZH_HANS("FFmpeg 候选帧没有显示时间戳。"),
+    ZH_HANT("FFmpeg 候選影格沒有顯示時間戳。"),
+    KO("FFmpeg 후보 프레임에 표시 타임스탬프가 없습니다."),
+    DE("Einem FFmpeg-Kandidaten fehlt der Präsentationszeitstempel."),
+    FR("Une image candidate de FFmpeg n’a pas d’horodatage de présentation."),
+    ES("A un fotograma candidato de FFmpeg le falta la marca de tiempo de presentación."),
+    PT("Um quadro candidato do FFmpeg não tem carimbo de data/hora de apresentação."),
+    IT("A un fotogramma candidato di FFmpeg manca la marca temporale di presentazione."),
+    NL("Bij een FFmpeg-kandidaat ontbreekt de presentatietijdstempel."),
+    RU("У кадра-кандидата FFmpeg отсутствует временная метка показа."),
+    TR("Bir FFmpeg aday karesinde sunum zaman damgası yok."));
+
+SS_MSG(err_frame_candidate_read,
+    EN("Could not read FFmpeg candidate frames."),
+    JA("FFmpeg の候補フレームを読み取れませんでした。"),
+    ZH_HANS("无法读取 FFmpeg 候选帧。"),
+    ZH_HANT("無法讀取 FFmpeg 候選影格。"),
+    KO("FFmpeg 후보 프레임을 읽지 못했습니다."),
+    DE("Die FFmpeg-Kandidatenbilder konnten nicht gelesen werden."),
+    FR("Impossible de lire les images candidates de FFmpeg."),
+    ES("No se pudieron leer los fotogramas candidatos de FFmpeg."),
+    PT("Não foi possível ler os quadros candidatos do FFmpeg."),
+    IT("Impossibile leggere i fotogrammi candidati di FFmpeg."),
+    NL("De FFmpeg-kandidaatbeelden konden niet worden gelezen."),
+    RU("Не удалось прочитать кадры-кандидаты FFmpeg."),
+    TR("FFmpeg aday kareleri okunamadı."));
+
+SS_MSG(err_frame_duplicate_timestamp,
+    EN("A synchronized track has duplicate presentation timestamps."),
+    JA("同期トラックに重複した表示タイムスタンプがあります。"),
+    ZH_HANS("同步轨道包含重复的显示时间戳。"),
+    ZH_HANT("同步軌道包含重複的顯示時間戳。"),
+    KO("동기화된 트랙에 중복된 표시 타임스탬프가 있습니다."),
+    DE("Eine synchronisierte Spur enthält doppelte Präsentationszeitstempel."),
+    FR("Une piste synchronisée contient des horodatages de présentation en double."),
+    ES("Una pista sincronizada tiene marcas de tiempo de presentación duplicadas."),
+    PT("Uma faixa sincronizada tem carimbos de data/hora de apresentação duplicados."),
+    IT("Una traccia sincronizzata contiene marche temporali di presentazione duplicate."),
+    NL("Een gesynchroniseerd spoor bevat dubbele presentatietijdstempels."),
+    RU("В синхронизированной дорожке есть повторяющиеся временные метки показа."),
+    TR("Senkronize bir izde yinelenen sunum zaman damgaları var."));
+
+SS_MSG(err_frame_tracks_timestamp_mismatch,
+    EN("Synchronized tracks do not share presentation timestamps."),
+    JA("同期トラックの表示タイムスタンプが一致しません。"),
+    ZH_HANS("同步轨道的显示时间戳不一致。"),
+    ZH_HANT("同步軌道的顯示時間戳不一致。"),
+    KO("동기화된 트랙의 표시 타임스탬프가 일치하지 않습니다."),
+    DE("Die Präsentationszeitstempel der synchronisierten Spuren stimmen nicht überein."),
+    FR("Les horodatages de présentation des pistes synchronisées ne correspondent pas."),
+    ES("Las marcas de tiempo de presentación de las pistas sincronizadas no coinciden."),
+    PT("Os carimbos de data/hora de apresentação das faixas sincronizadas não coincidem."),
+    IT("Le marche temporali di presentazione delle tracce sincronizzate non corrispondono."),
+    NL("De presentatietijdstempels van de gesynchroniseerde sporen komen niet overeen."),
+    RU("Временные метки показа синхронизированных дорожек не совпадают."),
+    TR("Senkronize izlerin sunum zaman damgaları eşleşmiyor."));
+
+SS_MSG(err_frame_candidate_score,
+    EN("Could not score an FFmpeg candidate frame."),
+    JA("FFmpeg の候補フレームを評価できませんでした。"),
+    ZH_HANS("无法为 FFmpeg 候选帧评分。"),
+    ZH_HANT("無法為 FFmpeg 候選影格評分。"),
+    KO("FFmpeg 후보 프레임의 점수를 계산하지 못했습니다."),
+    DE("Ein FFmpeg-Kandidatenbild konnte nicht bewertet werden."),
+    FR("Impossible d’évaluer une image candidate de FFmpeg."),
+    ES("No se pudo puntuar un fotograma candidato de FFmpeg."),
+    PT("Não foi possível pontuar um quadro candidato do FFmpeg."),
+    IT("Impossibile valutare un fotogramma candidato di FFmpeg."),
+    NL("Een FFmpeg-kandidaatbeeld kon niet worden beoordeeld."),
+    RU("Не удалось оценить кадр-кандидат FFmpeg."),
+    TR("Bir FFmpeg aday karesi puanlanamadı."));
+
+SS_MSG(err_frame_motion_measure,
+    EN("Could not measure motion in FFmpeg candidate frames."),
+    JA("FFmpeg の候補フレームで動きを測定できませんでした。"),
+    ZH_HANS("无法测量 FFmpeg 候选帧中的运动。"),
+    ZH_HANT("無法測量 FFmpeg 候選影格中的動作。"),
+    KO("FFmpeg 후보 프레임에서 움직임을 측정하지 못했습니다."),
+    DE("Die Bewegung in den FFmpeg-Kandidatenbildern konnte nicht gemessen werden."),
+    FR("Impossible de mesurer le mouvement dans les images candidates de FFmpeg."),
+    ES("No se pudo medir el movimiento en los fotogramas candidatos de FFmpeg."),
+    PT("Não foi possível medir o movimento nos quadros candidatos do FFmpeg."),
+    IT("Impossibile misurare il movimento nei fotogrammi candidati di FFmpeg."),
+    NL("De beweging in de FFmpeg-kandidaatbeelden kon niet worden gemeten."),
+    RU("Не удалось измерить движение в кадрах-кандидатах FFmpeg."),
+    TR("FFmpeg aday karelerindeki hareket ölçülemedi."));
+
+SS_MSG(err_frame_motion_too_short,
+    EN("The capture is too short to space frames by motion."),
+    JA("動きに応じてフレーム間隔を決めるには撮影時間が短すぎます。"),
+    ZH_HANS("拍摄时长太短，无法根据运动间隔选择帧。"),
+    ZH_HANT("拍攝時間太短，無法依動作間隔選擇影格。"),
+    KO("움직임에 따라 프레임 간격을 정하기에는 촬영 길이가 너무 짧습니다."),
+    DE("Die Aufnahme ist zu kurz, um die Bildabstände anhand der Bewegung festzulegen."),
+    FR("La capture est trop courte pour espacer les images selon le mouvement."),
+    ES("La captura es demasiado corta para espaciar los fotogramas según el movimiento."),
+    PT("A captura é curta demais para espaçar os quadros de acordo com o movimento."),
+    IT("La ripresa è troppo breve per distanziare i fotogrammi in base al movimento."),
+    NL("De opname is te kort om frames op basis van beweging te spreiden."),
+    RU("Запись слишком короткая, чтобы расставлять кадры с учетом движения."),
+    TR("Hareketi temel alarak kare aralığı belirlemek için çekim çok kısa."));
+
+SS_MSG(err_frame_output_directory,
+    EN("Could not create the selected-frame output directory."),
+    JA("選択フレームの出力フォルダーを作成できませんでした。"),
+    ZH_HANS("无法创建所选帧的输出目录。"),
+    ZH_HANT("無法建立所選影格的輸出資料夾。"),
+    KO("선택한 프레임의 출력 폴더를 만들지 못했습니다."),
+    DE("Der Ausgabeordner für die ausgewählten Bilder konnte nicht erstellt werden."),
+    FR("Impossible de créer le dossier de sortie des images sélectionnées."),
+    ES("No se pudo crear la carpeta de salida de los fotogramas seleccionados."),
+    PT("Não foi possível criar a pasta de saída dos quadros selecionados."),
+    IT("Impossibile creare la cartella di output dei fotogrammi selezionati."),
+    NL("De uitvoermap voor geselecteerde frames kon niet worden gemaakt."),
+    RU("Не удалось создать папку для выбранных кадров."),
+    TR("Seçilen karelerin çıktı klasörü oluşturulamadı."));
+
+SS_MSG(err_frame_candidate_publish,
+    EN("Could not publish an FFmpeg candidate frame."),
+    JA("FFmpeg の候補フレームを出力先に配置できませんでした。"),
+    ZH_HANS("无法将 FFmpeg 候选帧写入输出位置。"),
+    ZH_HANT("無法將 FFmpeg 候選影格寫入輸出位置。"),
+    KO("FFmpeg 후보 프레임을 출력 위치에 저장하지 못했습니다."),
+    DE("Ein FFmpeg-Kandidatenbild konnte nicht am Ausgabeort bereitgestellt werden."),
+    FR("Impossible de placer une image candidate de FFmpeg à l’emplacement de sortie."),
+    ES("No se pudo publicar un fotograma candidato de FFmpeg en la ubicación de salida."),
+    PT("Não foi possível publicar um quadro candidato do FFmpeg no destino."),
+    IT("Impossibile pubblicare un fotogramma candidato di FFmpeg nella destinazione."),
+    NL("Een FFmpeg-kandidaatbeeld kon niet op de uitvoerlocatie worden geplaatst."),
+    RU("Не удалось записать кадр-кандидат FFmpeg в место вывода."),
+    TR("Bir FFmpeg aday karesi çıktı konumuna yazılamadı."));
 
 SS_MSG(err_not_a_folder,
     EN("Not a folder: {0}"),

@@ -77,6 +77,16 @@ struct FrameExtractStats {
     int    write_failures = 0;
 };
 
+// Typed extraction failures that callers can translate without inspecting
+// backend diagnostic text.
+struct FrameExtractFailure {
+    enum class Kind { None, UnsupportedStream, HevcLevelUnsupported, RuntimeFailure };
+    Kind kind = Kind::None;
+    std::string device;        // display name, with identity when available
+    int required_level = 0;   // HEVC level × 10 (60 == 6.0)
+    int supported_level = 0;
+};
+
 struct FrameExtractSinks {
     // One line of human-readable progress. May be called from a worker thread.
     std::function<void(const std::string&)> log;
@@ -127,10 +137,11 @@ sfm::ExifTransform fold_auto_rotate(const std::string& path,
                                     const std::vector<int>& tracks,
                                     FrameLook& look, bool& mixed);
 
-// Runs the whole thing. False with `error` set on failure; a cancellation
-// returns false with error == "cancelled".
+// False on failure, including cancellation; `failure` identifies native admission.
+// HEVC levels exist only for an explicit level mismatch.
 bool extract_frames(const FrameExtractJob& job, const FrameExtractSinks& sinks,
-                    FrameExtractStats& stats, std::string& error);
+                    FrameExtractStats& stats, std::string& error,
+                    FrameExtractFailure* failure = nullptr);
 
 // The view change across this video's first track, which is what an adaptive
 // plan is made of (app/FrameMotion.h). One decode of that track and nothing

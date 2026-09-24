@@ -218,6 +218,253 @@ struct VarianceParams {
 constexpr uint32_t kThumbSize = 512;   // matches extract_frames.py
 constexpr int      kCbRing = 4;
 
+struct DecodeAdmission {
+    VkVideoProfileInfoKHR profile{};
+    VkVideoDecodeH264CapabilitiesKHR h264_caps{};
+    VkVideoDecodeH265CapabilitiesKHR h265_caps{};
+    VkVideoDecodeAV1CapabilitiesKHR av1_caps{};
+    VkVideoDecodeCapabilitiesKHR decode_caps{};
+    VkVideoCapabilitiesKHR caps{};
+    VkExtent2D coded{};
+    VkFormat out_format = VK_FORMAT_UNDEFINED;
+    VkFormat dpb_format = VK_FORMAT_UNDEFINED;
+    VkImageUsageFlags dpb_usage = 0;
+    VkImageUsageFlags out_usage = 0;
+    PlaneInfo planes{};
+    bool coincide = false;
+    int supported_level_x10 = 0;
+};
+
+int hevc_level_x10(StdVideoH265LevelIdc level) {
+    switch (level) {
+        case STD_VIDEO_H265_LEVEL_IDC_1_0: return 10;
+        case STD_VIDEO_H265_LEVEL_IDC_2_0: return 20;
+        case STD_VIDEO_H265_LEVEL_IDC_2_1: return 21;
+        case STD_VIDEO_H265_LEVEL_IDC_3_0: return 30;
+        case STD_VIDEO_H265_LEVEL_IDC_3_1: return 31;
+        case STD_VIDEO_H265_LEVEL_IDC_4_0: return 40;
+        case STD_VIDEO_H265_LEVEL_IDC_4_1: return 41;
+        case STD_VIDEO_H265_LEVEL_IDC_5_0: return 50;
+        case STD_VIDEO_H265_LEVEL_IDC_5_1: return 51;
+        case STD_VIDEO_H265_LEVEL_IDC_5_2: return 52;
+        case STD_VIDEO_H265_LEVEL_IDC_6_0: return 60;
+        case STD_VIDEO_H265_LEVEL_IDC_6_1: return 61;
+        case STD_VIDEO_H265_LEVEL_IDC_6_2: return 62;
+        default: return 0;
+    }
+}
+
+std::string level_name(int level_x10) {
+    return std::to_string(level_x10 / 10) + "." + std::to_string(level_x10 % 10);
+}
+
+bool check_admission(vk::Context& ctx, const TrackInfo& track, CodecDecoder& codec,
+                     StreamFormat& fmt, const std::string& path, DecodeAdmission& out,
+                     PreflightResult& result) {
+    result = PreflightResult{};
+    result.status = PreflightResult::Status::Compatible;
+    result.device_id = ctx.info().uuid;
+    result.device_name = ctx.info().name;
+    const std::string device = result.device_name + " [" + result.device_id + "]";
+    auto unsupported = [&](const std::string& reason) {
+        result.status = PreflightResult::Status::UnsupportedStream;
+        result.reason = reason;
+        return false;
+    };
+    const bool h265 =
+        codec.operation() == VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR;
+    if (h265) {
+        result.required_level = required_hevc_level_x10(codec);
+        if (!result.required_level) {
+            result.status = PreflightResult::Status::InvalidInput;
+            result.reason = "H.265 track has no valid sequence level";
+            return false;
+        }
+    }
+    if (fmt.chroma_format == 0)
+        return unsupported("'" + path +
+                           "' is monochrome; only 4:2:0, 4:2:2 and 4:4:4 are supported");
+
+    if (h265) {
+        const uint32_t count = codec.sequenceFormatCount();
+        for (uint32_t i = 0; i < count; ++i) {
+            const StreamFormat& sequence = codec.sequenceFormat(i);
+            if (sequence.width != fmt.width || sequence.height != fmt.height ||
+                sequence.coded_width != fmt.coded_width ||
+                sequence.coded_height != fmt.coded_height ||
+                sequence.profile_id != fmt.profile_id ||
+                sequence.bit_depth != fmt.bit_depth ||
+                sequence.chroma_format != fmt.chroma_format) {
+                return unsupported("'" + path +
+                                   "' changes H.265 profile or picture format between SPSs; "
+                                   "the native session cannot be reconfigured");
+            }
+        }
+    }
+
+    if (!ctx.hasVideoDecode())
+        return unsupported("Vulkan video decode is unavailable on " + device + ": " +
+                           (ctx.videoUnavailableReason().empty()
+                                ? "no video-decode queue"
+                                : ctx.videoUnavailableReason()));
+    if (!video_api().complete())
+        return unsupported("the Vulkan loader did not resolve video decode entry points on " +
+                           device);
+    if (!ctx.hasVideoCodec(codec.operation()))
+        return unsupported(std::string("'") + path + "' is " +
+                           codec_name(track.codec) + " " + fmt.profile_name +
+                           ", but " + device + " does not advertise that decode operation");
+
+    out.profile = VkVideoProfileInfoKHR{VK_STRUCTURE_TYPE_VIDEO_PROFILE_INFO_KHR};
+    out.profile.pNext = (void*)codec.profileExt();
+    out.profile.videoCodecOperation = codec.operation();
+    switch (fmt.chroma_format) {
+        case 0: out.profile.chromaSubsampling = VK_VIDEO_CHROMA_SUBSAMPLING_MONOCHROME_BIT_KHR; break;
+        case 2: out.profile.chromaSubsampling = VK_VIDEO_CHROMA_SUBSAMPLING_422_BIT_KHR; break;
+        case 3: out.profile.chromaSubsampling = VK_VIDEO_CHROMA_SUBSAMPLING_444_BIT_KHR; break;
+        default: out.profile.chromaSubsampling = VK_VIDEO_CHROMA_SUBSAMPLING_420_BIT_KHR; break;
+    }
+    auto depth_bit = [](int bd) {
+        switch (bd) {
+            case 10: return VK_VIDEO_COMPONENT_BIT_DEPTH_10_BIT_KHR;
+            case 12: return VK_VIDEO_COMPONENT_BIT_DEPTH_12_BIT_KHR;
+            default: return VK_VIDEO_COMPONENT_BIT_DEPTH_8_BIT_KHR;
+        }
+    };
+    out.profile.lumaBitDepth = depth_bit(fmt.bit_depth);
+    out.profile.chromaBitDepth = depth_bit(fmt.bit_depth);
+
+    out.h264_caps.sType = VK_STRUCTURE_TYPE_VIDEO_DECODE_H264_CAPABILITIES_KHR;
+    out.h265_caps.sType = VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_CAPABILITIES_KHR;
+    out.av1_caps.sType = VK_STRUCTURE_TYPE_VIDEO_DECODE_AV1_CAPABILITIES_KHR;
+    out.decode_caps.sType = VK_STRUCTURE_TYPE_VIDEO_DECODE_CAPABILITIES_KHR;
+    switch (codec.operation()) {
+        case VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR:
+            out.decode_caps.pNext = &out.h264_caps;
+            break;
+        case VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR:
+            out.decode_caps.pNext = &out.h265_caps;
+            break;
+        default:
+            out.decode_caps.pNext = &out.av1_caps;
+            break;
+    }
+    out.caps = VkVideoCapabilitiesKHR{VK_STRUCTURE_TYPE_VIDEO_CAPABILITIES_KHR};
+    out.caps.pNext = &out.decode_caps;
+    const VideoApi& api = video_api();
+    const VkResult queried = api.getCapabilities(ctx.physical(), &out.profile, &out.caps);
+    if (queried != VK_SUCCESS)
+        return unsupported(std::string(codec_name(track.codec)) + " " + fmt.profile_name + " " +
+                           std::to_string(fmt.bit_depth) + "-bit is not a decodable profile on " +
+                           device + " (vkGetPhysicalDeviceVideoCapabilitiesKHR: " +
+                           vk::Context::resultName(queried) + ")");
+
+    if (h265) {
+        out.supported_level_x10 = hevc_level_x10(out.h265_caps.maxLevelIdc);
+        const HevcAdmissionResult limits =
+            admit_hevc_sequence(codec, out.supported_level_x10, out.caps.maxDpbSlots,
+                                out.caps.maxActiveReferencePictures);
+        result.required_level = limits.required_level_x10;
+        result.supported_level = out.supported_level_x10;
+        if (limits.status == HevcAdmissionResult::Status::InvalidLevel) {
+            result.status = PreflightResult::Status::InvalidInput;
+            result.reason = "H.265 stream has no valid sequence level";
+            return false;
+        }
+        if (limits.status == HevcAdmissionResult::Status::UnsupportedLevel) {
+            result.status = PreflightResult::Status::UnsupportedStream;
+            result.reason = "HEVC level " + level_name(result.required_level) +
+                            " exceeds " +
+                            (result.supported_level
+                                 ? "the " + device + " maximum of " +
+                                       level_name(result.supported_level)
+                                 : "the unknown maximum supported by " + device);
+            return false;
+        }
+        if (limits.status == HevcAdmissionResult::Status::UnsupportedDpbSlots) {
+            return unsupported("HEVC stream requires " +
+                               std::to_string(limits.required_dpb_slots) +
+                               " DPB slots, but " + device + " supports at most " +
+                               std::to_string(limits.supported_dpb_slots));
+        }
+        if (limits.status == HevcAdmissionResult::Status::UnsupportedActiveReferences) {
+            return unsupported("HEVC stream requires " +
+                               std::to_string(limits.required_active_references) +
+                               " active reference pictures, but " + device +
+                               " supports at most " +
+                               std::to_string(limits.supported_active_references));
+        }
+    } else {
+        if (fmt.max_dpb_slots > out.caps.maxDpbSlots)
+            return unsupported(std::string(codec_name(track.codec)) + " stream requires " +
+                               std::to_string(fmt.max_dpb_slots) + " DPB slots, but " +
+                               device + " supports at most " +
+                               std::to_string(out.caps.maxDpbSlots));
+        if (fmt.max_active_references > out.caps.maxActiveReferencePictures)
+            return unsupported(std::string(codec_name(track.codec)) + " stream requires " +
+                               std::to_string(fmt.max_active_references) +
+                               " active reference pictures, but " + device +
+                               " supports at most " +
+                               std::to_string(out.caps.maxActiveReferencePictures));
+    }
+
+    out.coincide =
+        !(out.decode_caps.flags & VK_VIDEO_DECODE_CAPABILITY_DPB_AND_OUTPUT_DISTINCT_BIT_KHR);
+    if (out.coincide &&
+        !(out.decode_caps.flags & VK_VIDEO_DECODE_CAPABILITY_DPB_AND_OUTPUT_COINCIDE_BIT_KHR))
+        return unsupported(device + " reports no usable video decode output layout");
+    out.coded.width = align_up((uint32_t)fmt.coded_width,
+                               out.caps.pictureAccessGranularity.width);
+    out.coded.height = align_up((uint32_t)fmt.coded_height,
+                                out.caps.pictureAccessGranularity.height);
+    if (out.coded.width > out.caps.maxCodedExtent.width ||
+        out.coded.height > out.caps.maxCodedExtent.height)
+        return unsupported("video is " + std::to_string(out.coded.width) + "x" +
+                           std::to_string(out.coded.height) + " but " + device +
+                           " decodes at most " +
+                           std::to_string(out.caps.maxCodedExtent.width) + "x" +
+                           std::to_string(out.caps.maxCodedExtent.height));
+
+    VkVideoProfileListInfoKHR profiles{VK_STRUCTURE_TYPE_VIDEO_PROFILE_LIST_INFO_KHR};
+    profiles.profileCount = 1;
+    profiles.pProfiles = &out.profile;
+    auto pick_format = [&](VkImageUsageFlags usage, VkFormat& format) {
+        VkPhysicalDeviceVideoFormatInfoKHR fi{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VIDEO_FORMAT_INFO_KHR};
+        fi.pNext = &profiles;
+        fi.imageUsage = usage;
+        uint32_t count = 0;
+        if (api.getFormatProperties(ctx.physical(), &fi, &count, nullptr) != VK_SUCCESS ||
+            count == 0)
+            return false;
+        std::vector<VkVideoFormatPropertiesKHR> props(
+            count, {VK_STRUCTURE_TYPE_VIDEO_FORMAT_PROPERTIES_KHR});
+        if (api.getFormatProperties(ctx.physical(), &fi, &count, props.data()) != VK_SUCCESS)
+            return false;
+        for (const auto& prop : props)
+            if (describe_format(prop.format).valid) {
+                format = prop.format;
+                return true;
+            }
+        format = props[0].format;
+        return describe_format(format).valid;
+    };
+    out.dpb_usage = VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR;
+    out.out_usage = VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR |
+                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    if (out.coincide) {
+        out.dpb_usage |= VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR |
+                         VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        out.out_usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    }
+    if (!pick_format(out.dpb_usage, out.dpb_format))
+        return unsupported("no usable DPB picture format on " + device);
+    if (!pick_format(out.out_usage, out.out_format))
+        return unsupported("no decode output format this build can read on " + device);
+    if (out.coincide) out.out_format = out.dpb_format;
+    out.planes = describe_format(out.out_format);
+    return true;
+}
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -242,6 +489,9 @@ struct VideoPipeline::Impl {
     std::unique_ptr<CodecDecoder> codec;
     TrackInfo    track_info;
     StreamFormat fmt{};
+    std::string device_id;
+    std::string device_name;
+    int hevc_max_level_x10 = 0;
 
     VkDevice      dev = VK_NULL_HANDLE;
     VkQueue       vqueue = VK_NULL_HANDLE;
@@ -269,7 +519,7 @@ struct VideoPipeline::Impl {
 
     VkImage        dpb_image = VK_NULL_HANDLE;
     VkDeviceMemory dpb_mem = VK_NULL_HANDLE;
-    std::vector<VkImageView> dpb_views;
+    VkImageView dpb_view = VK_NULL_HANDLE;
     bool dpb_ready = false;
 
     struct BsBuf {
@@ -304,9 +554,9 @@ struct VideoPipeline::Impl {
     bool   more_in_packet = false;
 
     ~Impl();
-    bool createSession(std::string& error);
+    bool createSession(std::string& error, const DecodeAdmission& admission);
     bool createImages(int lookahead, std::string& error);
-    bool decodeNext(std::string& error);
+    bool decodeNext(std::string& error, PreflightResult* admission);
     bool recordDecode(int pool_idx, const PictureInfo& pi, std::string& error);
     void waitVideo(uint64_t value);
     int  acquirePicture();
@@ -369,8 +619,7 @@ VideoPipeline::Impl::~Impl() {
         if (p.image) vkDestroyImage(dev, p.image, nullptr);
         if (p.mem) vkFreeMemory(dev, p.mem, nullptr);
     }
-    for (VkImageView v : dpb_views)
-        if (v) vkDestroyImageView(dev, v, nullptr);
+    if (dpb_view) vkDestroyImageView(dev, dpb_view, nullptr);
     if (dpb_image) vkDestroyImage(dev, dpb_image, nullptr);
     if (dpb_mem) vkFreeMemory(dev, dpb_mem, nullptr);
     for (auto& b : bs) {
@@ -387,50 +636,117 @@ VideoPipeline::Impl::~Impl() {
         if (p) vk::device_free(p);
 }
 
+PreflightResult VideoPipeline::preflight(const std::string& path, int track,
+                                        const vk::ContextOptions& selected_device) {
+    NN_ENSURE_EMBEDDED_MODULES(video);
+    PreflightResult result;
+    vk::Context* ctx = nullptr;
+    try {
+        ctx = &vk::Context::get(selected_device);
+    } catch (const std::exception& e) {
+        result.status = PreflightResult::Status::InvalidDevice;
+        result.reason = std::string("Vulkan device selection failed: ") + e.what();
+        return result;
+    }
+    result.device_id = ctx->info().uuid;
+    result.device_name = ctx->info().name;
+
+    std::string error;
+    std::unique_ptr<Demuxer> demux = open_demuxer(path, error);
+    if (!demux) {
+        result.status = PreflightResult::Status::InvalidInput;
+        result.reason = error;
+        return result;
+    }
+    if (track < 0) track = 0;
+    if (track >= (int)demux->tracks().size()) {
+        result.status = PreflightResult::Status::InvalidInput;
+        result.reason = "'" + path + "' has " + std::to_string(demux->tracks().size()) +
+                        " video track(s); track " + std::to_string(track) + " was requested";
+        return result;
+    }
+    if (!demux->selectTrack(track, error)) {
+        result.status = PreflightResult::Status::InvalidInput;
+        result.reason = error;
+        return result;
+    }
+    const TrackInfo& info = demux->tracks()[(size_t)track];
+    std::unique_ptr<CodecDecoder> codec = make_codec_decoder(info.codec);
+    if (!codec) {
+        result.status = PreflightResult::Status::UnsupportedStream;
+        result.reason = "'" + path + "' uses codec '" + codec_name(info.codec) +
+                        "', which this build does not support";
+        return result;
+    }
+    if (!codec->init(info, error)) {
+        result.status = PreflightResult::Status::InvalidInput;
+        result.reason = error;
+        return result;
+    }
+    StreamFormat fmt = codec->format();
+    DecodeAdmission admission;
+    check_admission(*ctx, info, *codec, fmt, path, admission, result);
+    return result;
+}
+
 bool VideoPipeline::open(const std::string& path, int track, int lookahead,
-                         std::string& error) {
+                         std::string& error, PreflightResult* admission_result) {
     NN_ENSURE_EMBEDDED_MODULES(video);
     Impl& s = *impl_;
-    const std::string why = availability();
-    if (!why.empty()) {
-        error = why + ". Decoding needs a Vulkan device with VK_KHR_video_decode_queue.";
+    PreflightResult result;
+    auto fail = [&](PreflightResult::Status status, const std::string& reason) {
+        result.status = status;
+        result.reason = reason;
+        if (admission_result) *admission_result = result;
+        error = reason;
         return false;
+    };
+    error.clear();
+    vk::Context* ctx = nullptr;
+    try {
+        ctx = &vk::Context::get();
+    } catch (const std::exception& e) {
+        return fail(PreflightResult::Status::InvalidDevice,
+                    std::string("Vulkan device selection failed: ") + e.what());
     }
+    result.device_id = ctx->info().uuid;
+    result.device_name = ctx->info().name;
 
     s.demux = open_demuxer(path, error);
-    if (!s.demux) return false;
+    if (!s.demux) return fail(PreflightResult::Status::InvalidInput, error);
     if (track < 0) track = 0;
-    if (track >= (int)s.demux->tracks().size()) {
-        error = "'" + path + "' has " + std::to_string(s.demux->tracks().size()) +
-                " video track(s); track " + std::to_string(track) + " was requested";
-        return false;
-    }
-    if (!s.demux->selectTrack(track, error)) return false;
+    if (track >= (int)s.demux->tracks().size())
+        return fail(PreflightResult::Status::InvalidInput,
+                    "'" + path + "' has " + std::to_string(s.demux->tracks().size()) +
+                        " video track(s); track " + std::to_string(track) + " was requested");
+    if (!s.demux->selectTrack(track, error))
+        return fail(PreflightResult::Status::InvalidInput, error);
     s.track_info = s.demux->tracks()[(size_t)track];
 
     s.codec = make_codec_decoder(s.track_info.codec);
-    if (!s.codec) {
-        error = "'" + path + "' uses codec '" + codec_name(s.track_info.codec) +
-                "', which this build does not support";
-        return false;
-    }
-    if (!s.codec->init(s.track_info, error)) return false;
+    if (!s.codec)
+        return fail(PreflightResult::Status::UnsupportedStream,
+                    "'" + path + "' uses codec '" + codec_name(s.track_info.codec) +
+                        "', which this build does not support");
+    if (!s.codec->init(s.track_info, error))
+        return fail(PreflightResult::Status::InvalidInput, error);
     s.fmt = s.codec->format();
-    if (s.fmt.chroma_format == 0) {
-        error = "'" + path + "' is monochrome; only 4:2:0, 4:2:2 and 4:4:4 are supported";
+
+    DecodeAdmission admission;
+    if (!check_admission(*ctx, s.track_info, *s.codec, s.fmt, path, admission, result)) {
+        if (admission_result) *admission_result = result;
+        error = result.reason;
         return false;
     }
+    s.device_id = result.device_id;
+    s.device_name = result.device_name;
+    s.hevc_max_level_x10 = admission.supported_level_x10;
+    if (!s.createSession(error, admission))
+        return fail(PreflightResult::Status::RuntimeFailure, error);
+    if (!s.createImages(lookahead, error))
+        return fail(PreflightResult::Status::RuntimeFailure, error);
 
-    vk::Context& ctx = vk::Context::get();
-    if (!ctx.hasVideoCodec(s.codec->operation())) {
-        error = std::string("'") + path + "' is " + codec_name(s.track_info.codec) + " " +
-                s.fmt.profile_name + ", but " + ctx.info().name +
-                " does not advertise that decode operation";
-        return false;
-    }
-    if (!s.createSession(error)) return false;
-    if (!s.createImages(lookahead, error)) return false;
-
+    if (admission_result) *admission_result = result;
     NN_LOG_INFO("[video] %s: track %d, %s %s %dx%d %d-bit, %s, %.2f fps, %lld frames\n",
                   path.c_str(), track, codec_name(s.track_info.codec), s.fmt.profile_name,
                   s.fmt.width, s.fmt.height, s.fmt.bit_depth, format_name(s.out_format),
@@ -438,122 +754,28 @@ bool VideoPipeline::open(const std::string& path, int track, int lookahead,
     return true;
 }
 
-bool VideoPipeline::Impl::createSession(std::string& error) {
+bool VideoPipeline::Impl::createSession(std::string& error,
+                                        const DecodeAdmission& admission) {
     vk::Context& ctx = vk::Context::get();
     const VideoApi& api = video_api();
     dev = ctx.device();
     vqueue = ctx.videoQueue();
     vfamily = ctx.videoQueueFamily();
     cfamily = ctx.queueFamily();
-
-    VkVideoProfileInfoKHR profile{VK_STRUCTURE_TYPE_VIDEO_PROFILE_INFO_KHR};
-    profile.pNext = (void*)codec->profileExt();
-    profile.videoCodecOperation = codec->operation();
-    switch (fmt.chroma_format) {
-        case 0: profile.chromaSubsampling = VK_VIDEO_CHROMA_SUBSAMPLING_MONOCHROME_BIT_KHR; break;
-        case 2: profile.chromaSubsampling = VK_VIDEO_CHROMA_SUBSAMPLING_422_BIT_KHR; break;
-        case 3: profile.chromaSubsampling = VK_VIDEO_CHROMA_SUBSAMPLING_444_BIT_KHR; break;
-        default: profile.chromaSubsampling = VK_VIDEO_CHROMA_SUBSAMPLING_420_BIT_KHR; break;
-    }
-    auto depth_bit = [](int bd) {
-        switch (bd) {
-            case 10: return VK_VIDEO_COMPONENT_BIT_DEPTH_10_BIT_KHR;
-            case 12: return VK_VIDEO_COMPONENT_BIT_DEPTH_12_BIT_KHR;
-            default: return VK_VIDEO_COMPONENT_BIT_DEPTH_8_BIT_KHR;
-        }
-    };
-    profile.lumaBitDepth = depth_bit(fmt.bit_depth);
-    profile.chromaBitDepth = depth_bit(fmt.bit_depth);
-
-    VkVideoDecodeH264CapabilitiesKHR h264caps{
-        VK_STRUCTURE_TYPE_VIDEO_DECODE_H264_CAPABILITIES_KHR};
-    VkVideoDecodeH265CapabilitiesKHR h265caps{
-        VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_CAPABILITIES_KHR};
-    VkVideoDecodeAV1CapabilitiesKHR av1caps{
-        VK_STRUCTURE_TYPE_VIDEO_DECODE_AV1_CAPABILITIES_KHR};
-    VkVideoDecodeCapabilitiesKHR dcaps{VK_STRUCTURE_TYPE_VIDEO_DECODE_CAPABILITIES_KHR};
-    switch (codec->operation()) {
-        case VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR: dcaps.pNext = &h264caps; break;
-        case VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR: dcaps.pNext = &h265caps; break;
-        default: dcaps.pNext = &av1caps; break;
-    }
-    caps = VkVideoCapabilitiesKHR{VK_STRUCTURE_TYPE_VIDEO_CAPABILITIES_KHR};
-    caps.pNext = &dcaps;
-    VkResult r = api.getCapabilities(ctx.physical(), &profile, &caps);
-    if (r != VK_SUCCESS) {
-        error = std::string(codec_name(track_info.codec)) + " " + fmt.profile_name + " " +
-                std::to_string(fmt.bit_depth) + "-bit " +
-                (fmt.chroma_format == 2 ? "4:2:2" : fmt.chroma_format == 3 ? "4:4:4" : "4:2:0") +
-                " is not a decodable profile on " + ctx.info().name +
-                " (vkGetPhysicalDeviceVideoCapabilitiesKHR: " + vk::Context::resultName(r) + ")";
-        return false;
-    }
-    // Two layouts exist. DISTINCT lets the driver write a standalone output
-    // image alongside the reference it sets up; COINCIDE (what NVIDIA reports
-    // for H.264/H.265) decodes straight into the DPB slot, so the picture has
-    // to be copied out before that slot is recycled. Both are implemented; the
-    // difference is one vkCmdCopyImage per frame, ~30 us at 1080p.
-    coincide = !(dcaps.flags & VK_VIDEO_DECODE_CAPABILITY_DPB_AND_OUTPUT_DISTINCT_BIT_KHR);
-    if (coincide && !(dcaps.flags & VK_VIDEO_DECODE_CAPABILITY_DPB_AND_OUTPUT_COINCIDE_BIT_KHR)) {
-        error = std::string(ctx.info().name) +
-                " reports neither distinct nor coincident decode output images";
-        return false;
-    }
-
-    coded.width = align_up((uint32_t)fmt.coded_width, caps.pictureAccessGranularity.width);
-    coded.height = align_up((uint32_t)fmt.coded_height, caps.pictureAccessGranularity.height);
-    if (coded.width > caps.maxCodedExtent.width || coded.height > caps.maxCodedExtent.height) {
-        error = "video is " + std::to_string(coded.width) + "x" + std::to_string(coded.height) +
-                " but the device decodes at most " +
-                std::to_string(caps.maxCodedExtent.width) + "x" +
-                std::to_string(caps.maxCodedExtent.height);
-        return false;
-    }
-    fmt.max_dpb_slots = std::min(fmt.max_dpb_slots, caps.maxDpbSlots);
-    fmt.max_active_references = std::min(fmt.max_active_references, caps.maxActiveReferencePictures);
-
-    // ---- picture formats ----
+    const VkVideoProfileInfoKHR& profile = admission.profile;
     VkVideoProfileListInfoKHR plist{VK_STRUCTURE_TYPE_VIDEO_PROFILE_LIST_INFO_KHR};
     plist.profileCount = 1;
     plist.pProfiles = &profile;
-    auto pick_format = [&](VkImageUsageFlags usage, VkFormat& out) {
-        VkPhysicalDeviceVideoFormatInfoKHR fi{
-            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VIDEO_FORMAT_INFO_KHR};
-        fi.pNext = &plist;
-        fi.imageUsage = usage;
-        uint32_t n = 0;
-        if (api.getFormatProperties(ctx.physical(), &fi, &n, nullptr) != VK_SUCCESS || n == 0)
-            return false;
-        std::vector<VkVideoFormatPropertiesKHR> props(
-            n, {VK_STRUCTURE_TYPE_VIDEO_FORMAT_PROPERTIES_KHR});
-        if (api.getFormatProperties(ctx.physical(), &fi, &n, props.data()) != VK_SUCCESS)
-            return false;
-        for (const auto& pr : props)
-            if (describe_format(pr.format).valid) {
-                out = pr.format;
-                return true;
-            }
-        out = props[0].format;
-        return describe_format(out).valid;
-    };
-    dpb_usage = VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR;
-    out_usage = VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    if (coincide) {
-        dpb_usage |= VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-        out_usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-    }
-    if (!pick_format(dpb_usage, dpb_format)) {
-        error = "no usable DPB picture format";
-        return false;
-    }
-    if (!pick_format(out_usage, out_format)) {
-        error = "no decode output format this build can read (expected a 2- or 3-plane "
-                "YCbCr format)";
-        return false;
-    }
-    // vkCmdCopyImage between multi-planar images requires identical formats.
-    if (coincide) out_format = dpb_format;
-    planes = describe_format(out_format);
+    caps = admission.caps;
+    caps.pNext = nullptr;
+    coded = admission.coded;
+    out_format = admission.out_format;
+    dpb_format = admission.dpb_format;
+    dpb_usage = admission.dpb_usage;
+    out_usage = admission.out_usage;
+    planes = admission.planes;
+    coincide = admission.coincide;
+    VkResult r = VK_SUCCESS;
 
     // ---- session ----
     VkVideoSessionCreateInfoKHR sci{VK_STRUCTURE_TYPE_VIDEO_SESSION_CREATE_INFO_KHR};
@@ -730,12 +952,15 @@ bool VideoPipeline::Impl::createImages(int lookahead, std::string& error) {
         error = "cannot allocate the video reference picture buffer";
         return false;
     }
-    dpb_views.resize(fmt.max_dpb_slots);
-    for (uint32_t i = 0; i < fmt.max_dpb_slots; ++i)
-        if (!create_view(dpb_image, dpb_format, i, dpb_views[i])) {
-            error = "cannot create a DPB image view";
-            return false;
-        }
+    VkImageViewCreateInfo dpb_vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    dpb_vci.image = dpb_image;
+    dpb_vci.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    dpb_vci.format = dpb_format;
+    dpb_vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, fmt.max_dpb_slots};
+    if (vkCreateImageView(dev, &dpb_vci, nullptr, &dpb_view) != VK_SUCCESS) {
+        error = "cannot create a DPB image view";
+        return false;
+    }
     dpb_pin.assign(fmt.max_dpb_slots, -1);
 
     // Output pictures: enough for the reorder queue, the caller's window, the
@@ -943,11 +1168,11 @@ bool VideoPipeline::Impl::recordDecode(int pool_idx, const PictureInfo& pi,
                          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr,
                          (uint32_t)barriers.size(), barriers.data());
 
-    auto picture_resource = [&](VkImageView view) {
+    auto picture_resource = [&](VkImageView view, uint32_t layer = 0) {
         VkVideoPictureResourceInfoKHR pr{VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR};
         pr.codedOffset = {0, 0};
         pr.codedExtent = coded;
-        pr.baseArrayLayer = 0;
+        pr.baseArrayLayer = layer;
         pr.imageViewBinding = view;
         return pr;
     };
@@ -960,9 +1185,10 @@ bool VideoPipeline::Impl::recordDecode(int pool_idx, const PictureInfo& pi,
     std::vector<VkVideoReferenceSlotInfoKHR>   begin_slots;
     begin_res.reserve(pi.refs.size() + 1);
     begin_slots.reserve(pi.refs.size() + 1);
-    for (const auto& r : pi.refs) begin_res.push_back(picture_resource(dpb_views[(size_t)r.slot]));
+    for (const auto& r : pi.refs)
+        begin_res.push_back(picture_resource(dpb_view, (uint32_t)r.slot));
     if (pi.setup_slot >= 0)
-        begin_res.push_back(picture_resource(dpb_views[(size_t)pi.setup_slot]));
+        begin_res.push_back(picture_resource(dpb_view, (uint32_t)pi.setup_slot));
     for (size_t i = 0; i < pi.refs.size(); ++i) {
         VkVideoReferenceSlotInfoKHR sl{VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR};
         sl.slotIndex = pi.refs[i].slot;
@@ -1119,7 +1345,7 @@ bool VideoPipeline::Impl::recordDecode(int pool_idx, const PictureInfo& pi,
     return true;
 }
 
-bool VideoPipeline::Impl::decodeNext(std::string& error) {
+bool VideoPipeline::Impl::decodeNext(std::string& error, PreflightResult* admission) {
     if (!more_in_packet) {
         Packet pkt;
         if (!demux->next(packet, error)) {
@@ -1136,6 +1362,41 @@ bool VideoPipeline::Impl::decodeNext(std::string& error) {
     if (!codec->decodeFrame(data, bytes, track_info.nal_length_size, bitstream, slice_offsets,
                             pi, error))
         return false;
+    if (codec->operation() == VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR) {
+        const HevcAdmissionResult check = admit_hevc_picture(pi, hevc_max_level_x10);
+        if (check.status != HevcAdmissionResult::Status::Compatible) {
+            PreflightResult result;
+            result.device_id = device_id;
+            result.device_name = device_name;
+            result.required_level = check.required_level_x10;
+            result.supported_level = hevc_max_level_x10;
+            switch (check.status) {
+                case HevcAdmissionResult::Status::InvalidLevel:
+                    result.status = PreflightResult::Status::InvalidInput;
+                    result.reason = "H.265 picture has no valid active sequence level";
+                    break;
+                case HevcAdmissionResult::Status::UnsupportedLevel:
+                    result.status = PreflightResult::Status::UnsupportedStream;
+                    result.reason = "active HEVC level " +
+                                    level_name(result.required_level) + " exceeds " +
+                                    (result.supported_level
+                                         ? device_name + " maximum " +
+                                               level_name(result.supported_level)
+                                         : "the unknown maximum supported by " + device_name);
+                    break;
+                case HevcAdmissionResult::Status::ParametersChanged:
+                    result.status = PreflightResult::Status::UnsupportedStream;
+                    result.reason =
+                        "H.265 sequence parameters changed after the Vulkan session was "
+                        "created; the native decoder stopped before submitting this picture";
+                    break;
+                default: break;
+            }
+            error = result.reason;
+            if (admission) *admission = std::move(result);
+            return false;
+        }
+    }
     more_in_packet = pi.more_in_packet;
 
     Packet& pkt = packet;
@@ -1203,9 +1464,16 @@ bool VideoPipeline::Impl::decodeNext(std::string& error) {
 // Frame delivery
 // ---------------------------------------------------------------------------
 
-bool VideoPipeline::next(FrameHandle& out, std::string& error) {
+bool VideoPipeline::next(FrameHandle& out, std::string& error,
+                         PreflightResult* admission) {
     Impl& s = *impl_;
     error.clear();
+    if (admission) {
+        *admission = PreflightResult{};
+        admission->status = PreflightResult::Status::Compatible;
+        admission->device_id = s.device_id;
+        admission->device_name = s.device_name;
+    }
     while (true) {
         const bool can_pop =
             !s.ready.empty() && (s.eos || s.ready.size() > (size_t)s.fmt.max_reorder);
@@ -1221,7 +1489,7 @@ bool VideoPipeline::next(FrameHandle& out, std::string& error) {
             return true;
         }
         if (s.eos) return false;
-        if (!s.decodeNext(error)) return false;
+        if (!s.decodeNext(error, admission)) return false;
     }
 }
 

@@ -11,7 +11,9 @@
 #include "core/ExrImage.h"
 #ifdef SS_HAVE_VIDEO
 #include "app/FrameExtract.h"
+#include "nn/vk/Context.h"
 #include "video/Video.h"
+#include "video/VideoPipeline.h"
 #endif
 #ifdef SS_BUILD_SAM
 #include "sam/Sam.h"   // sam::freeze_device
@@ -290,45 +292,128 @@ std::vector<PreviewFrame> spread_preview_frames(
     return out;
 }
 
-void scan_preview_frames(const PreviewSource& src,
+bool scan_preview_frames(const PreviewSource& src,
                          const std::vector<PreviewFrame>& frames, int folder,
                          const std::function<void(const uint8_t*, int, int)>& on_frame,
+                         std::string& error,
                          const std::atomic<bool>& cancel) {
-    if (src.is_video && !src.device_error.empty()) return;
+    error.clear();
+    if (cancel.load()) {
+        error = "cancelled";
+        return false;
+    }
+    if (src.is_video && !src.device_error.empty()) {
+        error = src.device_error;
+        return false;
+    }
     // Border fitting reads stored pixels; color overrides apply to models and display.
     PreviewSource stored = src;
     stored.image_gamut.clear();
     stored.image_is_linear.reset();
+    bool builtin_unsupported = false;
 #ifdef SS_BUILD_SAM
     if (src.is_video && src.builtin_decode) {
         std::string select_error;
-        if (!sam::freeze_device(src.device, select_error)) return;
+        if (!sam::freeze_device(src.device, select_error)) {
+            error = select_error.empty() ? dmsg::preview_frame_unreadable.get()
+                                         : select_error;
+            return false;
+        }
     }
 #endif
 #ifdef SS_HAVE_VIDEO
     if (src.is_video && src.builtin_decode && !frames.empty()) {
-        std::vector<int64_t> indices;
-        for (const PreviewFrame& f : frames) indices.push_back(f.index);
-        std::string err;
-        bool any = false;
-        app::extract_frames_at(src.input, src.look, indices, folder,
-                               [&](nn::Image& img, int64_t) {
-                                   any = true;
-                                   on_frame(img.data.data(), img.width,
-                                            img.height);
-                               },
-                               &cancel, err, src.device);
-        if (any || cancel.load()) return;
+        nn::vk::ContextOptions selected;
+        selected.device_selector = nn::vk::Context::current_selector();
+        if (selected.device_selector.empty())
+            selected.device_selector = nn::vk::Context::configured_selector();
+        if (selected.device_selector.empty()) {
+            error = "the selected Vulkan device was not frozen";
+            return false;
+        }
+        selected.selector_set = true;
+        selected.want_video = true;
+
+        std::vector<int> tracks;
+        if (src.look.pano()) {
+            tracks.push_back(0);
+            if (pano360_needs_track1(src.look.eac)) tracks.push_back(1);
+        } else if (src.look.packed_lenses >= 2) {
+            tracks.push_back(0);
+        } else {
+            tracks.push_back(std::min(std::max(folder, 0),
+                                      std::max(src.tracks, 1) - 1));
+        }
+        for (int track : tracks) {
+            if (cancel.load()) {
+                error = "cancelled";
+                return false;
+            }
+            const video::PreflightResult result =
+                video::VideoPipeline::preflight(src.input, track, selected);
+            if (result.status == video::PreflightResult::Status::Compatible)
+                continue;
+            if (result.status == video::PreflightResult::Status::UnsupportedStream) {
+                builtin_unsupported = true;
+                continue;
+            }
+            error = result.reason.empty() ? "video decoder preflight failed"
+                                         : result.reason;
+            return false;
+        }
+        if (builtin_unsupported) {
+            stored.builtin_decode = false;
+        } else {
+            std::vector<int64_t> indices;
+            for (const PreviewFrame& f : frames) indices.push_back(f.index);
+            std::string err;
+            bool any = false;
+            const bool decoded = app::extract_frames_at(
+                src.input, src.look, indices, folder,
+                [&](nn::Image& img, int64_t) {
+                    any = true;
+                    on_frame(img.data.data(), img.width, img.height);
+                },
+                &cancel, err, src.device);
+            if (!decoded) {
+                if (cancel.load()) {
+                    error = "cancelled";
+                    return false;
+                }
+                error = err.empty() ? dmsg::preview_frame_unreadable.get() : err;
+                return false;
+            }
+            if (any) return true;
+            if (cancel.load()) {
+                error = "cancelled";
+                return false;
+            }
+        }
     }
 #endif
     for (const PreviewFrame& f : frames) {
-        if (cancel.load()) return;
+        if (cancel.load()) {
+            error = "cancelled";
+            return false;
+        }
         int w = 0, h = 0;
         std::vector<uint8_t> rgb;
         std::string err;
-        if (load_preview_frame(stored, f, folder, w, h, rgb, err, cancel))
+        if (load_preview_frame(stored, f, folder, w, h, rgb, err, cancel)) {
             on_frame(rgb.data(), w, h);
+        } else if (cancel.load()) {
+            error = "cancelled";
+            return false;
+        } else if (builtin_unsupported) {
+            error = err.empty() ? dmsg::preview_frame_unreadable.get() : err;
+            return false;
+        }
     }
+    if (cancel.load()) {
+        error = "cancelled";
+        return false;
+    }
+    return true;
 }
 
 }  // namespace gui

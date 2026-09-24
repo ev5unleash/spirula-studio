@@ -47,6 +47,10 @@ int main() {
                                    gui::frames_stamp(job)).empty(),
            "an unchanged job matches its own stamp");
 
+    moves("decoder route", [](gui::PrepJob& j) {
+        j.force_external_decode = true;
+    });
+
     moves("unwrap mode", [](gui::PrepJob& j) {
         j.pano.mode = app::Pano360Mode::Equirect;
     });

@@ -11,7 +11,7 @@
 #include "i18n/catalog/Data.h"
 #include "i18n/catalog/Log.h"
 #include "nn/core/Log.h"
-#include "nn/Device.h"
+#include "nn/vk/Context.h"
 #include "nn/io/Image.h"
 #include "sam/Sam.h"
 #include "video/Demuxer.h"
@@ -40,6 +40,49 @@ namespace {
 void log_line(const FrameExtractSinks& sinks, const std::string& s) {
     if (sinks.log) sinks.log(s);
     else NN_LOG_ERROR("%s\n", s.c_str());
+}
+
+void capture_admission(FrameExtractFailure* failure,
+                       const video::PreflightResult& admission) {
+    if (!failure) return;
+    if (admission.status == video::PreflightResult::Status::RuntimeFailure) {
+        failure->kind = FrameExtractFailure::Kind::RuntimeFailure;
+        return;
+    }
+    if (admission.status != video::PreflightResult::Status::UnsupportedStream) return;
+
+    failure->kind = FrameExtractFailure::Kind::UnsupportedStream;
+    if (admission.required_level <= 0 || admission.supported_level <= 0 ||
+        admission.required_level <= admission.supported_level)
+        return;
+
+    failure->kind = FrameExtractFailure::Kind::HevcLevelUnsupported;
+    failure->device = admission.device_name;
+    if (!admission.device_id.empty() &&
+        admission.device_id != admission.device_name) {
+        if (!failure->device.empty()) failure->device += " (" + admission.device_id + ")";
+        else failure->device = admission.device_id;
+    }
+    failure->required_level = admission.required_level;
+    failure->supported_level = admission.supported_level;
+}
+
+bool open_video(video::VideoPipeline& pipe, const std::string& path, int track,
+                int lookahead, std::string& error,
+                video::PreflightResult& admission,
+                FrameExtractFailure* failure) {
+    if (pipe.open(path, track, lookahead, error, failure ? &admission : nullptr))
+        return true;
+    capture_admission(failure, admission);
+    return false;
+}
+
+bool next_video(video::VideoPipeline& pipe, video::FrameHandle& frame,
+                std::string& error, video::PreflightResult& admission,
+                FrameExtractFailure* failure) {
+    if (pipe.next(frame, error, failure ? &admission : nullptr)) return true;
+    capture_admission(failure, admission);
+    return false;
 }
 
 // The encoder thread pool this depends on is app/WriterPool.h: masking and
@@ -80,10 +123,12 @@ struct SelectClock {
 // a video's worth of pictures until the plan is known.
 bool measure_motion(const FrameExtractJob& o, const FrameExtractSinks& sinks,
                     int track, int tracks, MotionPlanInput& out,
-                    FrameExtractStats& t, std::string& error) {
+                    FrameExtractStats& t, std::string& error,
+                    FrameExtractFailure* failure = nullptr) {
     const double t_start = nn::now_ms();
     video::VideoPipeline pipe;
-    if (!pipe.open(o.input, track, 1, error)) return false;
+    video::PreflightResult admission;
+    if (!open_video(pipe, o.input, track, 1, error, admission, failure)) return false;
     const video::TrackInfo& info = pipe.track();
 
     MotionOptions mo;
@@ -153,7 +198,7 @@ bool measure_motion(const FrameExtractJob& o, const FrameExtractSinks& sinks,
             return false;
         }
         video::FrameHandle h;
-        if (!pipe.next(h, error)) {
+        if (!next_video(pipe, h, error, admission, failure)) {
             if (!error.empty()) {
                 stop();
                 return false;
@@ -241,10 +286,14 @@ bool extract_track(const FrameExtractJob& o, const FrameExtractSinks& sinks,
                    int track, const fs::path& image_dir,
                    const fs::path& mask_dir, sam::Masker* masker,
                    WriterPool& pool, const std::vector<int64_t>& plan,
-                   FrameExtractStats& t, std::string& error) {
+                   FrameExtractStats& t, std::string& error,
+                   FrameExtractFailure* failure) {
     video::VideoPipeline pipe;
+    video::PreflightResult admission;
     // The blur window holds `keep` decoded pictures at once.
-    if (!pipe.open(o.input, track, std::max(o.keep, 1), error)) return false;
+    if (!open_video(pipe, o.input, track, std::max(o.keep, 1), error,
+                    admission, failure))
+        return false;
 
     fs::create_directories(image_dir);
     if (masker) fs::create_directories(mask_dir);
@@ -348,7 +397,7 @@ bool extract_track(const FrameExtractJob& o, const FrameExtractSinks& sinks,
         }
         video::FrameHandle h;
         const double t0 = nn::now_ms();
-        if (!pipe.next(h, error)) {
+        if (!next_video(pipe, h, error, admission, failure)) {
             t.decode += nn::now_ms() - t0;
             if (!error.empty()) return false;
             break;  // end of stream
@@ -392,12 +441,16 @@ using LockstepSink = std::function<bool(std::vector<nn::Image>& imgs, int64_t in
 bool extract_lockstep(const FrameExtractJob& o, const FrameExtractSinks& sinks,
                       const std::vector<int>& tracks, const video::ConvertOpts& conv,
                       const std::vector<int64_t>& plan, FrameExtractStats& t,
-                      std::string& error, const LockstepSink& on_frame) {
+                      std::string& error, FrameExtractFailure* failure,
+                      const LockstepSink& on_frame) {
     const size_t n = tracks.size();
     std::vector<std::unique_ptr<video::VideoPipeline>> pipe;
+    video::PreflightResult admission;
     for (size_t k = 0; k < n; k++) {
         pipe.push_back(std::make_unique<video::VideoPipeline>());
-        if (!pipe[k]->open(o.input, tracks[k], std::max(o.keep, 1), error)) return false;
+        if (!open_video(*pipe.back(), o.input, tracks[k],
+                        std::max(o.keep, 1), error, admission, failure))
+            return false;
     }
 
     struct Buffered {
@@ -471,7 +524,8 @@ bool extract_lockstep(const FrameExtractJob& o, const FrameExtractSinks& sinks,
         b.h.resize(n);
         const double t0 = nn::now_ms();
         bool got = true;
-        for (size_t k = 0; k < n && got; k++) got = pipe[k]->next(b.h[k], error);
+        for (size_t k = 0; k < n && got; k++)
+            got = next_video(*pipe[k], b.h[k], error, admission, failure);
         t.decode += nn::now_ms() - t0;
         if (!got) {
             // One track ending first leaves the others' pictures held; release
@@ -510,7 +564,7 @@ bool extract_lockstep(const FrameExtractJob& o, const FrameExtractSinks& sinks,
 bool extract_pair(const FrameExtractJob& o, const FrameExtractSinks& sinks,
                   const fs::path& image_dir, WriterPool& pool,
                   const std::vector<int64_t>& plan, FrameExtractStats& t,
-                  std::string& error) {
+                  std::string& error, FrameExtractFailure* failure) {
     const std::vector<int> want = pano360_needs_track1(o.eac)
                                       ? std::vector<int>{0, 1}
                                       : std::vector<int>{0};
@@ -570,7 +624,7 @@ bool extract_pair(const FrameExtractJob& o, const FrameExtractSinks& sinks,
         return true;
     };
     return extract_lockstep(o, sinks, want, video::ConvertOpts{}, plan, t, error,
-                            on_frame);
+                            failure, on_frame);
 }
 
 // Every track of a multi-lens file at the same instants, one folder per
@@ -578,7 +632,7 @@ bool extract_pair(const FrameExtractJob& o, const FrameExtractSinks& sinks,
 bool extract_synced(const FrameExtractJob& o, const FrameExtractSinks& sinks,
                     const std::vector<int>& tracks, const fs::path& base, WriterPool& pool,
                     const std::vector<int64_t>& plan, FrameExtractStats& t,
-                    std::string& error) {
+                    std::string& error, FrameExtractFailure* failure) {
     std::vector<fs::path> dirs;
     for (size_t k = 0; k < tracks.size(); k++) {
         dirs.push_back(base / ("cam" + std::to_string(k)));
@@ -606,7 +660,7 @@ bool extract_synced(const FrameExtractJob& o, const FrameExtractSinks& sinks,
         }
         return true;
     };
-    return extract_lockstep(o, sinks, tracks, conv, plan, t, error, on_frame);
+    return extract_lockstep(o, sinks, tracks, conv, plan, t, error, failure, on_frame);
 }
 
 }  // namespace
@@ -660,7 +714,9 @@ sfm::ExifTransform fold_auto_rotate(const std::string& path,
 }
 
 bool extract_frames(const FrameExtractJob& job_in, const FrameExtractSinks& sinks,
-                    FrameExtractStats& stats, std::string& error) {
+                    FrameExtractStats& stats, std::string& error,
+                    FrameExtractFailure* failure) {
+    if (failure) *failure = {};
     FrameExtractJob job = job_in;
     if (job.skip < 1) job.skip = 1;
     if (job.keep < 0) job.keep = (int)(0.5 * job.skip + 0.5);
@@ -678,7 +734,7 @@ bool extract_frames(const FrameExtractJob& job_in, const FrameExtractSinks& sink
     // Past this point the canonical UUID is what crosses into the decoder and
     // the masker; an ordinal only ever meant something in the resolution that
     // consumed it.
-    job.device = nn::configured_device_selector();
+    job.device = nn::vk::Context::configured_selector();
     job.mask.device = job.device;
 
     error = video_decode_availability();
@@ -708,7 +764,10 @@ bool extract_frames(const FrameExtractJob& job_in, const FrameExtractSinks& sink
     }
 
     std::vector<int> tracks;
-    if (job.track >= 0) {
+    if (pano) {
+        tracks.push_back(0);
+        if (pano360_needs_track1(job.eac)) tracks.push_back(1);
+    } else if (job.track >= 0) {
         tracks.push_back(job.track);
     } else {
         const int n = video_track_count(job.input, error);
@@ -719,6 +778,32 @@ bool extract_frames(const FrameExtractJob& job_in, const FrameExtractSinks& sink
         for (int i = 0; i < n; ++i) tracks.push_back(i);
     }
     stats.tracks = (int)tracks.size();
+
+    nn::vk::ContextOptions selected;
+    selected.device_selector = nn::vk::Context::current_selector();
+    if (selected.device_selector.empty())
+        selected.device_selector = nn::vk::Context::configured_selector();
+    if (selected.device_selector.empty()) {
+        error = "the selected Vulkan device was not frozen";
+        return false;
+    }
+    selected.selector_set = true;
+    selected.want_video = true;
+    for (int track : tracks) {
+        if (sinks.cancel && sinks.cancel->load()) {
+            error = "cancelled";
+            return false;
+        }
+        const video::PreflightResult admission =
+            video::VideoPipeline::preflight(job.input, track, selected);
+        if (admission.status == video::PreflightResult::Status::Compatible)
+            continue;
+        capture_admission(failure, admission);
+        error = admission.reason.empty() ? "video decoder preflight failed"
+                                         : admission.reason;
+        return false;
+    }
+
 
     {
         namespace lmsg = spirula::i18n::msg::log;
@@ -759,7 +844,7 @@ bool extract_frames(const FrameExtractJob& job_in, const FrameExtractSinks& sink
     if (job.adaptive && plan.empty()) {
         MotionPlanInput mi;
         if (!measure_motion(job, sinks, tracks[0], (int)tracks.size(), mi, stats,
-                            error))
+                            error, failure))
             return false;
         std::vector<std::vector<int64_t>> got =
             plan_by_motion({mi}, job.adaptive_range);
@@ -772,9 +857,10 @@ bool extract_frames(const FrameExtractJob& job_in, const FrameExtractSinks& sink
     }
     if (pano) {
         stats.tracks = 2;
-        ok = extract_pair(job, sinks, base, pool, plan, stats, error);
+        ok = extract_pair(job, sinks, base, pool, plan, stats, error, failure);
     } else if (synced) {
-        ok = extract_synced(job, sinks, tracks, base, pool, plan, stats, error);
+        ok = extract_synced(job, sinks, tracks, base, pool, plan, stats, error,
+                            failure);
     }
     for (size_t ti = 0; ti < tracks.size() && ok && !pano && !synced; ++ti) {
         // A multi-track file (an Insta360 .insv carries two fisheye streams)
@@ -787,7 +873,7 @@ bool extract_frames(const FrameExtractJob& job_in, const FrameExtractSinks& sink
             log_line(sinks, "track " + std::to_string(tracks[ti]) + " -> " +
                                 image_dir.string());
         ok = extract_track(job, sinks, tracks[ti], image_dir, mask_dir, masker.get(),
-                           pool, plan, stats, error);
+                           pool, plan, stats, error, failure);
     }
 
     const double t_drain = nn::now_ms();

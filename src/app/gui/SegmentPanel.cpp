@@ -243,7 +243,9 @@ void SegmentPanel::start_detect() {
     // One camera folder, not the flattened tree. A PortalCam capture is four
     // of them, two not even fisheye: their union leaves no pixel dark in every
     // frame and no ellipse to fit, so a fit the run makes per folder fails here.
-    _border_camera = shown_camera();
+    const std::string camera = shown_camera();
+    const bool camera_changed = camera != _border_camera;
+    _border_camera = camera;
     std::vector<std::string> files;
     for (const std::string& f : _all_files)
         if (camera_of(f) == _border_camera) files.push_back(f);
@@ -256,7 +258,7 @@ void SegmentPanel::start_detect() {
     const PreviewSource src = _src;
     const int folder = _folder_idx;
 
-    _worker = std::thread([this, frames, src, folder, o] {
+    _worker = std::thread([this, frames, src, folder, o, camera_changed] {
         struct Guard {
             std::atomic<bool>& flag;
             ~Guard() { flag = false; }
@@ -266,15 +268,27 @@ void SegmentPanel::start_detect() {
         // the run fits on: a turned or unwrapped frame has its border
         // somewhere else than the file it came out of.
         app::BorderAccumulator acc;
-        scan_preview_frames(src, frames, folder,
-                            [&](const uint8_t* rgb, int w, int h) {
-                                acc.add(rgb, w, h, 3);
-                            },
-                            _cancel);
-        if (_cancel.load()) return;
+        std::string error;
+        if (!scan_preview_frames(
+                src, frames, folder,
+                [&](const uint8_t* rgb, int w, int h) {
+                    acc.add(rgb, w, h, 3);
+                },
+                error, _cancel)) {
+            if (_cancel.load()) return;
+            std::lock_guard<std::mutex> lk(_mu);
+            _error = error;
+            _status.clear();
+            if (camera_changed) {
+                _border_pending = app::BorderDetect{};
+                _border_ready = true;
+            }
+            return;
+        }
         const app::BorderDetect found = acc.frames() >= 2 ? acc.finish(o)
                                                           : app::BorderDetect{};
         std::lock_guard<std::mutex> lk(_mu);
+        _error.clear();
         _border_pending = found;
         _border_ready = true;
     });

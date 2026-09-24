@@ -1,18 +1,5 @@
 #pragma once
-// Decode a video file to RGB frames, entirely on the GPU.
-//
-//   container  ->  CodecDecoder  ->  vkCmdDecodeVideoKHR  ->  YCbCr image
-//                                                              |
-//                                        sharpness metric  <---+---> RGB frame
-//
-// Two properties shape the API. First, decoding and *using* a frame are
-// separated: a caller that keeps only the sharpest frame of every window should
-// not pay to convert and download the others, so pixels are touched only when
-// toImage() or queueSharpness() ask for it. Second, frames come back in
-// presentation order, which means holding a reorder queue -- so a frame is a
-// handle into a pool, explicitly released, rather than a value.
-//
-// Public entry points never throw; failures return false with a message.
+// GPU video decoding. Frames stay in device memory until a caller requests pixels.
 
 #include "nn/io/Image.h"
 #include "video/CodecDecoder.h"
@@ -21,6 +8,12 @@
 #include <memory>
 #include <string>
 #include <vector>
+
+namespace nn {
+namespace vk {
+struct ContextOptions;
+}  // namespace vk
+}  // namespace nn
 
 namespace video {
 
@@ -36,6 +29,18 @@ struct ConvertOpts {
     int   rotate = 0;     // 0, 90, 180 or 270, clockwise
 };
 
+struct PreflightResult {
+    enum class Status {
+        Compatible, UnsupportedStream, InvalidDevice, InvalidInput, RuntimeFailure
+    };
+    Status status = Status::InvalidInput;
+    std::string reason;
+    std::string device_id;
+    std::string device_name;
+    int required_level = 0;   // HEVC level × 10, e.g. 60 == 6.0; 0 when inapplicable
+    int supported_level = 0;
+};
+
 class VideoPipeline {
 public:
     VideoPipeline();
@@ -46,17 +51,19 @@ public:
     // Why Vulkan video decoding is unavailable here, or "" when it works.
     static std::string availability();
 
-    // `lookahead` is how many decoded frames the caller may hold at once (the
-    // motion-blur window); the picture pool is sized from it.
-    bool open(const std::string& path, int track, int lookahead, std::string& error);
+    // Preflight the selected track/device without creating video session resources.
+    static PreflightResult preflight(const std::string& path, int track,
+                                     const nn::vk::ContextOptions& selected_device);
+    // `lookahead` sizes the picture pool. `admission` receives typed failures.
+    bool open(const std::string& path, int track, int lookahead, std::string& error,
+              PreflightResult* admission = nullptr);
 
     const std::vector<TrackInfo>& tracks() const;
     const TrackInfo&              track() const;
     const StreamFormat&           format() const;
 
-    // Next frame in presentation order. Returns false at end of stream, with
-    // `error` empty; a decode failure sets it.
-    bool next(FrameHandle& out, std::string& error);
+    // `admission` receives typed late failures; an empty error still means end of stream.
+    bool next(FrameHandle& out, std::string& error, PreflightResult* admission = nullptr);
     void release(FrameHandle& h);
 
     // To the sync sample at or before `index`, reporting the frame the next

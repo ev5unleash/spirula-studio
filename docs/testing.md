@@ -3,6 +3,27 @@
 The native parity tests are the suite. The Python one this file used to
 describe is gone -- see §3 for what it covered and what now does not.
 
+## Video decode admission and extraction
+
+The native HEVC parser/admission regression is `build_vulkan/hevc_admission_test`
+(`SS_ENABLE_PATENTED=ON` only). It exercises level boundaries, multiple SPS
+orderings and in-band parameter changes without needing a GPU. The
+`dataset_prep_test`, `frames_stamp_test` and `preset_roundtrip_test` cover
+synchronized candidate choice and extraction settings.
+
+On a supported non-NVIDIA Vulkan device, extract in-capability HEVC Main and
+Main10 controls through the native CLI and compare **every raw decoded Y/UV
+plane** against FFmpeg software decoding. Include tiled and untiled
+inter-predicted controls through an IDR boundary; a successful image write or
+Vulkan validation-layer pass does not establish pixel correctness. Verify
+native H.264 and AV1 extraction after changes to the shared DPB binding.
+Above-capability HEVC must still be rejected before output. The GUI must
+preflight both tracks of a dual-camera capture and select FFmpeg before
+planning when either track exceeds device limits, publishing aligned instants
+with clean images. Missing FFmpeg and invalid device selection remain hard
+failures; native-only `sam extract` never switches to FFmpeg. Build with the
+local-only patent opt-in, then restore `-DSS_ENABLE_PATENTED=OFF`.
+
 ## 1. Native cross-backend parity tests (the important ones)
 
 `src/backend/tests/*.cpp` — currently 20 tools covering projection (fwd, bwd,

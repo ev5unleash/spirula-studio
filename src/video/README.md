@@ -30,6 +30,25 @@ ffmpeg to install.
 | codecs | H.264 (Baseline/Main/High), H.265 (Main/Main10/RExt), AV1 (Main/High/Professional) — whatever the *device* also advertises. |
 | not supported | fragmented MP4 (`moof`), laced Matroska blocks, field-coded (interlaced) H.264/H.265, slice groups (FMO). Each is reported by name. |
 
+Native HEVC admission checks every configured SPS against the selected device's
+HEVC level and DPB limits before opening a Vulkan video session. An active
+PPS-selected SPS is checked again before submitting a picture. Repeated identical
+parameter sets are harmless; a changed in-band set stops decoding before that
+picture rather than using stale session parameters. A stream above the
+device's HEVC level limit is reported with required and supported levels and
+the selected device; changing the declared level without changing the
+bitstream is not a workaround. Dataset preparation can select software
+ffmpeg before planning; `spirula sam extract` remains native-only and fails
+instead.
+
+On AMD Vulkan, per-slot 2D views of a layered DPB image produced incorrect
+inter-frame pixels even for supported 8-bit and Main10 streams. All slots now
+bind one 2D-array view and select their layer in
+`VkVideoPictureResourceInfoKHR::baseArrayLayer`. The corrected native path
+matched software-decoded Y/UV exactly on five 48-frame controls. Re-extract
+datasets previously produced by native H.265 decoding into a fresh workspace.
+An above-level capture still uses the GUI's FFmpeg fallback.
+
 ## What a `CodecDecoder` is for
 
 A hardware decoder does entropy decoding, motion compensation and filtering. It

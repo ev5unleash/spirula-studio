@@ -48,14 +48,16 @@ struct Rps {
 struct Sps {
     StdVideoH265SequenceParameterSet    std{};
     StdVideoH265ProfileTierLevel        ptl{};
-    StdVideoH265DecPicBufMgr            dpbm{};
-    StdVideoH265ScalingLists            scaling{};
+    StdVideoH265DecPicBufMgr             dpbm{};
+    StdVideoH265ScalingLists             scaling{};
     StdVideoH265SequenceParameterSetVui vui{};
-    StdVideoH265LongTermRefPicsSps      lt{};
+    StdVideoH265LongTermRefPicsSps       lt{};
     std::vector<StdVideoH265ShortTermRefPicSet> std_rps;
     std::vector<Rps> rps;              // derived form, for our own DPB work
+    std::vector<uint8_t> nal;
     uint32_t max_poc_lsb = 256;
     int      width = 0, height = 0;
+    int      level_x10 = 0;
     uint32_t max_dpb = 6, max_reorder = 0;
     bool     valid = false;
 };
@@ -63,6 +65,7 @@ struct Sps {
 struct Pps {
     StdVideoH265PictureParameterSet std{};
     StdVideoH265ScalingLists        scaling{};
+    std::vector<uint8_t> nal;
     bool valid = false;
 };
 
@@ -70,8 +73,11 @@ struct Vps {
     StdVideoH265VideoParameterSet std{};
     StdVideoH265ProfileTierLevel  ptl{};
     StdVideoH265DecPicBufMgr      dpbm{};
+    std::vector<uint8_t> nal;
+    int level_x10 = 0;
     bool valid = false;
 };
+
 
 struct DpbFrame {
     bool used = false;
@@ -80,23 +86,29 @@ struct DpbFrame {
     StdVideoDecodeH265ReferenceInfo std_ref{};
 };
 
-StdVideoH265LevelIdc level_from_idc(uint32_t v) {
-    // general_level_idc is 30 x the level number.
-    switch (v) {
-        case 30: return STD_VIDEO_H265_LEVEL_IDC_1_0;
-        case 60: return STD_VIDEO_H265_LEVEL_IDC_2_0;
-        case 63: return STD_VIDEO_H265_LEVEL_IDC_2_1;
-        case 90: return STD_VIDEO_H265_LEVEL_IDC_3_0;
-        case 93: return STD_VIDEO_H265_LEVEL_IDC_3_1;
-        case 120: return STD_VIDEO_H265_LEVEL_IDC_4_0;
-        case 123: return STD_VIDEO_H265_LEVEL_IDC_4_1;
-        case 150: return STD_VIDEO_H265_LEVEL_IDC_5_0;
-        case 153: return STD_VIDEO_H265_LEVEL_IDC_5_1;
-        case 156: return STD_VIDEO_H265_LEVEL_IDC_5_2;
-        case 180: return STD_VIDEO_H265_LEVEL_IDC_6_0;
-        case 183: return STD_VIDEO_H265_LEVEL_IDC_6_1;
-        default: return STD_VIDEO_H265_LEVEL_IDC_6_2;
+bool level_from_idc(uint32_t idc, StdVideoH265LevelIdc& out, int& level_x10) {
+    switch (idc) {
+        case 30: out = STD_VIDEO_H265_LEVEL_IDC_1_0; break;
+        case 60: out = STD_VIDEO_H265_LEVEL_IDC_2_0; break;
+        case 63: out = STD_VIDEO_H265_LEVEL_IDC_2_1; break;
+        case 90: out = STD_VIDEO_H265_LEVEL_IDC_3_0; break;
+        case 93: out = STD_VIDEO_H265_LEVEL_IDC_3_1; break;
+        case 120: out = STD_VIDEO_H265_LEVEL_IDC_4_0; break;
+        case 123: out = STD_VIDEO_H265_LEVEL_IDC_4_1; break;
+        case 150: out = STD_VIDEO_H265_LEVEL_IDC_5_0; break;
+        case 153: out = STD_VIDEO_H265_LEVEL_IDC_5_1; break;
+        case 156: out = STD_VIDEO_H265_LEVEL_IDC_5_2; break;
+        case 180: out = STD_VIDEO_H265_LEVEL_IDC_6_0; break;
+        case 183: out = STD_VIDEO_H265_LEVEL_IDC_6_1; break;
+        case 186: out = STD_VIDEO_H265_LEVEL_IDC_6_2; break;
+        default: return false;
     }
+    level_x10 = (int)(idc / 3);
+    return true;
+}
+
+bool identical_nal(const std::vector<uint8_t>& previous, const uint8_t* nal, size_t size) {
+    return previous.size() == size && std::memcmp(previous.data(), nal, size) == 0;
 }
 
 uint32_t ceil_log2(uint32_t v) {
@@ -105,8 +117,8 @@ uint32_t ceil_log2(uint32_t v) {
     return n;
 }
 
-void parse_ptl(BitReader& br, bool profile_present, int max_sub_layers_minus1,
-               StdVideoH265ProfileTierLevel& out) {
+bool parse_ptl(BitReader& br, bool profile_present, int max_sub_layers_minus1,
+               StdVideoH265ProfileTierLevel& out, int& level_x10) {
     if (profile_present) {
         br.u(2);                                   // general_profile_space
         out.flags.general_tier_flag = br.bit();
@@ -119,10 +131,12 @@ void parse_ptl(BitReader& br, bool profile_present, int max_sub_layers_minus1,
         for (int i = 0; i < 43; ++i) br.bit();     // reserved / range-extension flags
         br.bit();                                  // inbld / reserved
     }
-    out.general_level_idc = level_from_idc(br.u(8));
+    StdVideoH265LevelIdc general_level{};
+    if (!level_from_idc(br.u(8), general_level, level_x10)) return false;
+    out.general_level_idc = general_level;
 
-    std::vector<uint8_t> sub_profile(max_sub_layers_minus1);
-    std::vector<uint8_t> sub_level(max_sub_layers_minus1);
+    std::array<uint8_t, 7> sub_profile{};
+    std::array<uint8_t, 7> sub_level{};
     for (int i = 0; i < max_sub_layers_minus1; ++i) {
         sub_profile[i] = (uint8_t)br.bit();
         sub_level[i] = (uint8_t)br.bit();
@@ -139,8 +153,13 @@ void parse_ptl(BitReader& br, bool profile_present, int max_sub_layers_minus1,
             for (int j = 0; j < 43; ++j) br.bit();
             br.bit();
         }
-        if (sub_level[i]) br.u(8);
+        if (sub_level[i]) {
+            StdVideoH265LevelIdc ignored{};
+            int ignored_level_x10 = 0;
+            if (!level_from_idc(br.u(8), ignored, ignored_level_x10)) return false;
+        }
     }
+    return !br.overrun();
 }
 
 void parse_sub_layer_hrd(BitReader& br, uint32_t cpb_cnt, bool sub_pic_present) {
@@ -362,6 +381,18 @@ public:
     }
     const void* profileExt() const override { return &profile_; }
     const StreamFormat& format() const override { return format_; }
+    uint32_t sequenceFormatCount() const override {
+        return (uint32_t)std::count_if(sps_.begin(), sps_.end(),
+                                       [](const auto& s) { return s && s->valid; });
+    }
+    const StreamFormat& sequenceFormat(uint32_t index) const override {
+        for (size_t i = 0; i < sps_.size(); ++i) {
+            if (sps_[i] && sps_[i]->valid) {
+                if (index-- == 0) return sps_formats_[i];
+            }
+        }
+        return format_;
+    }
 
     bool init(const TrackInfo& track, std::string& error) override;
     VkVideoSessionParametersKHR createParameters(VkDevice device, VkVideoSessionKHR session,
@@ -383,6 +414,7 @@ private:
     std::array<std::unique_ptr<Vps>, 16>  vps_;
     std::array<std::unique_ptr<Sps>, 16>  sps_;
     std::array<std::unique_ptr<Pps>, 64>  pps_;
+    std::array<StreamFormat, 16> sps_formats_{};
     std::array<DpbFrame, kMaxDpb>         dpb_{};
 
     VkVideoDecodeH265ProfileInfoKHR profile_{
@@ -427,7 +459,10 @@ bool H265Decoder::parseVps(const uint8_t* nal, size_t size, std::string& error) 
     v.vps_max_sub_layers_minus1 = (uint8_t)max_sub;
     v.flags.vps_temporal_id_nesting_flag = br.bit();
     br.u(16);  // reserved 0xffff
-    parse_ptl(br, true, max_sub, vps->ptl);
+    if (!parse_ptl(br, true, max_sub, vps->ptl, vps->level_x10)) {
+        error = "invalid or truncated H.265 VPS level encoding";
+        return false;
+    }
     const bool sub_layer_ordering = br.flag();
     v.flags.vps_sub_layer_ordering_info_present_flag = sub_layer_ordering ? 1 : 0;
     parse_dpb_mgr(br, sub_layer_ordering, max_sub, vps->dpbm);
@@ -438,6 +473,8 @@ bool H265Decoder::parseVps(const uint8_t* nal, size_t size, std::string& error) 
     v.pProfileTierLevel = &vps->ptl;
     v.pDecPicBufMgr = &vps->dpbm;
     vps->valid = true;
+    if (vps_[id] && identical_nal(vps_[id]->nal, nal, size)) return true;
+    vps->nal.assign(nal, nal + size);
     vps_[id] = std::move(vps);
     params_dirty_ = true;
     return true;
@@ -452,7 +489,10 @@ bool H265Decoder::parseSps(const uint8_t* nal, size_t size, std::string& error) 
     const int max_sub = (int)br.u(3);
     s.sps_max_sub_layers_minus1 = (uint8_t)max_sub;
     s.flags.sps_temporal_id_nesting_flag = br.bit();
-    parse_ptl(br, true, max_sub, sps->ptl);
+    if (!parse_ptl(br, true, max_sub, sps->ptl, sps->level_x10)) {
+        error = "invalid or truncated H.265 SPS level encoding";
+        return false;
+    }
 
     const uint32_t id = br.ue();
     if (id >= 16) {
@@ -616,9 +656,12 @@ bool H265Decoder::parseSps(const uint8_t* nal, size_t size, std::string& error) 
     sps->max_dpb = (uint32_t)sps->dpbm.max_dec_pic_buffering_minus1[max_sub] + 1u;
     sps->max_reorder = sps->dpbm.max_num_reorder_pics[max_sub];
     sps->valid = true;
+    if (sps_[id] && identical_nal(sps_[id]->nal, nal, size)) return true;
+    sps->nal.assign(nal, nal + size);
 
     sps_[id] = std::move(sps);
     updateFormat(*sps_[id]);
+    sps_formats_[id] = format_;
     have_sps_ = true;
     params_dirty_ = true;
     return true;
@@ -718,6 +761,8 @@ bool H265Decoder::parsePps(const uint8_t* nal, size_t size, std::string& error) 
         error = "truncated H.265 PPS";
         return false;
     }
+    if (pps_[id] && identical_nal(pps_[id]->nal, nal, size)) return true;
+    pps->nal.assign(nal, nal + size);
     pps->valid = true;
     pps_[id] = std::move(pps);
     params_dirty_ = true;
@@ -730,6 +775,8 @@ void H265Decoder::updateFormat(const Sps& sps) {
     format_.coded_width = (int)sps.std.pic_width_in_luma_samples;
     format_.coded_height = (int)sps.std.pic_height_in_luma_samples;
     format_.bit_depth = 8 + sps.std.bit_depth_luma_minus8;
+    format_.hevc_level_x10 = sps.level_x10;
+    format_.profile_id = (int)sps.ptl.general_profile_idc;
     format_.chroma_format = (int)sps.std.chroma_format_idc;
     format_.max_dpb_slots = std::min<uint32_t>(sps.max_dpb + 1, kMaxDpb);
     format_.max_active_references = std::min<uint32_t>(sps.max_dpb, 16);
@@ -785,6 +832,17 @@ bool H265Decoder::init(const TrackInfo& track, std::string& error) {
         error = "H.265 track carries no SPS in its hvcC record; the video session "
                 "cannot be sized without one";
         return false;
+    }
+    for (const auto& sps : sps_) {
+        if (!sps) continue;
+        format_.max_dpb_slots = std::max(format_.max_dpb_slots,
+                                        sps_formats_[sps->std.sps_seq_parameter_set_id].max_dpb_slots);
+        format_.max_active_references =
+            std::max(format_.max_active_references,
+                     sps_formats_[sps->std.sps_seq_parameter_set_id].max_active_references);
+        format_.max_reorder =
+            std::max(format_.max_reorder,
+                     sps_formats_[sps->std.sps_seq_parameter_set_id].max_reorder);
     }
     return true;
 }
@@ -1153,6 +1211,7 @@ bool H265Decoder::decodeFrame(const uint8_t* data, size_t size, int nal_length_s
     out.setup_slot = slot;
     out.setup_std_ref = &setup_ref_;
     out.poc = poc_;
+    out.sequence_format = sps_formats_[sps.std.sps_seq_parameter_set_id];
     out.output = pic_output && !drop_rasl;
     out.params_changed = params_dirty_;
     out.sequence_restart = irap;
@@ -1160,6 +1219,7 @@ bool H265Decoder::decodeFrame(const uint8_t* data, size_t size, int nal_length_s
 }
 
 void H265Decoder::commitFrame() {
+    params_dirty_ = false;
     if (pending_slot_ < 0) return;
     DpbFrame& f = dpb_[(size_t)pending_slot_];
     f = DpbFrame{};

@@ -30,12 +30,14 @@ struct StreamFormat {
     int width = 0, height = 0;              // display size, after cropping
     int coded_width = 0, coded_height = 0;  // what the session must accommodate
     int bit_depth = 8;
+    int hevc_level_x10 = 0;                // normalized HEVC level; 60 == level 6.0, 0 otherwise
     int chroma_format = 1;                  // 0 mono, 1 4:2:0, 2 4:2:2, 3 4:4:4
     uint32_t max_dpb_slots = 0;             // including the picture being decoded
     uint32_t max_active_references = 0;
     uint32_t max_reorder = 0;               // pictures the display queue may hold
     bool full_range = false;                // VUI video_full_range_flag
     int  matrix_coefficients = 2;           // H.273; 2 == unspecified
+    int profile_id = -1;                    // codec profile IDC when it selects a session profile
     const char* profile_name = "";
 };
 
@@ -52,7 +54,8 @@ struct PictureInfo {
     const void* setup_std_ref = nullptr;
     std::vector<Ref> refs;                // active references, for pReferenceSlots
 
-    int64_t poc = 0;                      // display order within the sequence
+    StreamFormat sequence_format{};         // active HEVC SPS selected by this picture
+    int64_t poc = 0;                        // display order within the sequence
     bool    output = true;                // false for an AV1 no-show frame
     int32_t show_existing_slot = -1;      // AV1 show_existing_frame -> re-output
     bool    params_changed = false;       // in-band parameter sets updated
@@ -74,6 +77,13 @@ public:
     // pNext for VkVideoProfileInfoKHR (VkVideoDecodeH264ProfileInfoKHR, ...).
     virtual const void* profileExt() const = 0;
     virtual const StreamFormat& format() const = 0;
+    // Configured sequence formats (HEVC can carry several SPSs). Other codecs
+    // expose their single stream format through the default implementation.
+    virtual uint32_t sequenceFormatCount() const { return 1; }
+    virtual const StreamFormat& sequenceFormat(uint32_t index) const {
+        (void)index;
+        return format();
+    }
 
     // Parses the container's codec configuration record. Must be enough to
     // create the video session; parameter sets found in-band later are added
@@ -99,6 +109,77 @@ public:
 
     virtual void flush() = 0;
 };
+
+constexpr bool hevc_level_supported(int required_x10, int maximum_x10) {
+    return required_x10 > 0 && maximum_x10 > 0 && required_x10 <= maximum_x10;
+}
+
+inline int required_hevc_level_x10(const CodecDecoder& decoder) {
+    int required = 0;
+    const uint32_t count = decoder.sequenceFormatCount();
+    if (!count) return 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        const int level = decoder.sequenceFormat(i).hevc_level_x10;
+        if (level <= 0) return 0;
+        if (level > required) required = level;
+    }
+    return required;
+}
+
+struct HevcAdmissionResult {
+    enum class Status {
+        Compatible, InvalidLevel, UnsupportedLevel, UnsupportedDpbSlots,
+        UnsupportedActiveReferences, ParametersChanged
+    };
+    Status status = Status::Compatible;
+    int required_level_x10 = 0;
+    uint32_t required_dpb_slots = 0;
+    uint32_t supported_dpb_slots = 0;
+    uint32_t required_active_references = 0;
+    uint32_t supported_active_references = 0;
+};
+
+inline HevcAdmissionResult admit_hevc_sequence(const CodecDecoder& decoder,
+                                                int supported_level_x10,
+                                                uint32_t supported_dpb_slots,
+                                                uint32_t supported_active_references) {
+    HevcAdmissionResult result;
+    result.required_level_x10 = required_hevc_level_x10(decoder);
+    result.supported_dpb_slots = supported_dpb_slots;
+    result.supported_active_references = supported_active_references;
+    result.required_dpb_slots = decoder.format().max_dpb_slots;
+    result.required_active_references = decoder.format().max_active_references;
+    if (!result.required_level_x10) {
+        result.status = HevcAdmissionResult::Status::InvalidLevel;
+    } else if (!hevc_level_supported(result.required_level_x10, supported_level_x10)) {
+        result.status = HevcAdmissionResult::Status::UnsupportedLevel;
+    } else if (result.required_dpb_slots > supported_dpb_slots) {
+        result.status = HevcAdmissionResult::Status::UnsupportedDpbSlots;
+    } else if (result.required_active_references > supported_active_references) {
+        result.status = HevcAdmissionResult::Status::UnsupportedActiveReferences;
+    }
+    return result;
+}
+
+inline HevcAdmissionResult admit_hevc_sequence(const CodecDecoder& decoder,
+                                                int supported_level_x10) {
+    return admit_hevc_sequence(decoder, supported_level_x10, ~uint32_t(0), ~uint32_t(0));
+}
+
+inline HevcAdmissionResult admit_hevc_picture(const PictureInfo& picture,
+                                               int supported_level_x10) {
+    HevcAdmissionResult result;
+    result.required_level_x10 = picture.sequence_format.hevc_level_x10;
+    if (!result.required_level_x10) {
+        result.status = HevcAdmissionResult::Status::InvalidLevel;
+    } else if (!hevc_level_supported(result.required_level_x10, supported_level_x10)) {
+        result.status = HevcAdmissionResult::Status::UnsupportedLevel;
+    } else if (picture.params_changed) {
+        result.status = HevcAdmissionResult::Status::ParametersChanged;
+    }
+    return result;
+}
+
 
 std::unique_ptr<CodecDecoder> make_codec_decoder(Codec codec);
 

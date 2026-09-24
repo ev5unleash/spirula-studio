@@ -264,8 +264,8 @@ struct PrepJob {
     bool  adaptive_fps = false;
     float adaptive_range = 4.0f;
     int   sharp_window = 3;          // keep the sharpest of N (1 = off)
-    // Every track of a multi-lens file keeps the same instants (one sharpness
-    // window over all of them), so every frame is a rig frame. Built-in decoder only.
+    // Every track of a multi-lens file keeps the same instants (a common
+    // sharpness window selected across tracks), so each frame is a rig frame.
     bool  sync_tracks = true;
     int   max_frames = 100000;
     // Turn every extracted frame by the rotation the capture asks for, so a
@@ -439,6 +439,11 @@ inline ReconStamp frames_stamp(const PrepJob& job) {
                "--360-size",    num(job.pano.size),
                "--360-orient",  num(job.pano.yaw) + "," + num(job.pano.pitch) +
                                     "," + num(job.pano.roll)};
+    if (job.force_external_decode &&
+        (job.adaptive_fps || job.sync_tracks)) {
+        st.args.push_back("--external-selection");
+        st.args.push_back(job.sync_tracks ? "pts-motion-v1" : "rate-group-v1");
+    }
     for (const PrepInput& in : job.inputs) {
         st.args.push_back("--input");
         st.args.push_back(in.path);
@@ -719,6 +724,10 @@ private:
     bool extract_video_ffmpeg(const PrepJob& job, const PrepInput& in,
                               const std::string& images, PrepResult& out,
                               std::string& error);
+    bool extract_ffmpeg_selection_group(
+        const PrepJob& job, const std::vector<size_t>& rows,
+        const std::vector<std::string>& image_dirs, PrepResult& out,
+        std::string& error);
     // A 360 capture through ffmpeg: one decode writing the EAC canvas, frame
     // selection over those, then our own resampler into the views. ffmpeg is
     // never asked to warp -- see app/Pano360.h.

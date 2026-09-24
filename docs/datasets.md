@@ -697,9 +697,10 @@ degrees of elevation, 120 apart in azimuth -- rather than axis-aligned:
 ## Frames out of a video
 
 One frame every `skip` source frames, the sharpest of a window of `keep`
-around each. Both decode paths choose the same frames (`app/FrameExtract.h`),
-and the GUI's rate is **per input**: a capture shot as several clips is rarely
-shot at one pace, so `PrepInput::fps` overrides the job's for that video.
+around each (`app/FrameExtract.h`). The native route selects source frames;
+the ffmpeg route selects from resampled candidates and can pick different
+instants. The GUI's rate is **per input**: `PrepInput::fps` overrides the
+job's rate for that video.
 
 The rate is a column of the input list rather than a field in the settings, so
 it sits beside the video it describes. The first video's box holds the
@@ -714,10 +715,12 @@ clips at "2 fps" the one that walks briskly gets the denser frames and the one
 shot from a bench gets fewer. Each still keeps its own rate bounds. Rows
 measured by different models are NOT one budget -- see below.
 
-A workspace records what its frames were extracted with (`.spirula-frames`,
-`gui/ReconStamp.h`). A re-run whose answer differs -- a different rate, a
-different unwrap, another clip in the list -- goes back to the video instead of
-keeping them, and drops the features and matches that describe the old ones.
+A workspace records its extraction settings and effective decoder route
+(`.spirula-frames`, `gui/ReconStamp.h`). A re-run whose answer differs -- a
+different rate, another clip, or a switch from native to ffmpeg -- returns to
+the video and discards frames, masks, features and matches tied to the old
+selection. If an earlier native run produced corrupt images, use a fresh
+workspace or re-extract rather than resuming its frames.
 
 ### Adaptive spacing
 
@@ -807,14 +810,16 @@ up to +100% on a 1080p clip, with the tracking itself overlapped with the
 decode. Nothing is buffered: a video's worth of pictures does not fit, and a
 plan cannot be made until the whole cost curve is known.
 
-Without the built-in decoder the same plan is made from the candidate frames
-ffmpeg already extracts, at `fps x max(window, range)` instead of
-`fps x window` so there are enough of them for the fastest rate it may ask for
-(`gui/FrameSelect.h`). That path plans one video at a time -- the candidates of
-a whole group are not on disk at once -- and it numbers the frames it keeps by
-the candidate they were, not by how many it has kept. The stem is what times a
-frame against the video's IMU and GPS (`sfm/map/SensorGauge.h`), and an
-adaptive plan leaves nothing evenly spaced for a frame rate to recover it from.
+Without the built-in decoder the motion plan uses candidate frames ffmpeg
+extracts at `fps x max(window, range)` instead of `fps x window`, so enough
+candidates exist for the fastest requested rate (`gui/FrameSelect.h`). Inputs
+at the same requested rate share the motion budget; incompatible views do not
+share one motion model. A dual-track capture requires identical presentation
+timestamps on both candidate tracks, then chooses one common instant in each
+window; a missing mate fails the preparation instead of shifting cameras.
+Matching uses candidate presentation timestamps; selected filenames retain
+candidate ordinals for the existing sensor-time convention. These resampled
+candidate frames need not match those selected by the native route.
 
 The pass reports as it goes, in two places. It enters the Frames step itself --
 nothing else has, since a whole rate group is measured before any of it is

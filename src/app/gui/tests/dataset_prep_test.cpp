@@ -5,10 +5,12 @@
 
 #include "app/FrameMask.h"
 #include "app/gui/DatasetPrep.h"
+#include "app/gui/FrameSelect.h"
 #include "app/gui/mask/MaskLayer.h"
 #include "core/SourcePath.h"
 #include "external/stb_image_write.h"
 #include "i18n/catalog/MaskEdit.h"
+#include "i18n/catalog/Log.h"
 
 #include <algorithm>
 #include <atomic>
@@ -163,11 +165,151 @@ void test_camera_scan_skips_mask_edits() {
           "is_mask_edits_folder: by name");
 }
 
+void test_pts_synchronized_selector() {
+    const fs::path root = scratch("pts_sync");
+    gui::FrameSelectGroup group;
+    group.candidate_dirs = {(root / "cand0").string(),
+                            (root / "cand1").string()};
+    group.output_dirs = {(root / "out0").string(),
+                         (root / "out1").string()};
+    group.options.group = 2;
+    group.sync_tracks = true;
+    for (int track = 0; track < 2; track++)
+        for (int frame = 0; frame < 4; frame++)
+            write_jpg(root / ("cand" + std::to_string(track)) /
+                          ("c_" + std::to_string(100 + frame * 100) + ".jpg"),
+                      64, 48, track * 4 + frame);
+    std::vector<gui::FrameSelectGroup> groups{group};
+    std::atomic<bool> cancel{false};
+    std::string error;
+    check(gui::select_sharpest_frame_groups(groups, {}, cancel, error),
+          "synchronized candidates select: " + error);
+    auto names = [&](const char* dir) {
+        std::vector<std::string> found;
+        std::error_code ec;
+        for (fs::directory_iterator it(root / dir, ec), end;
+             !ec && it != end; it.increment(ec))
+            if (it->is_regular_file(ec))
+                found.push_back(it->path().filename().string());
+        return found;
+    };
+    std::vector<std::string> left = names("out0");
+    std::vector<std::string> right = names("out1");
+    std::sort(left.begin(), left.end());
+    std::sort(right.begin(), right.end());
+    check(left.size() == 2 && left == right,
+          "both tracks publish the same two selected instants");
+
+    const fs::path mismatch = scratch("pts_mismatch");
+    gui::FrameSelectGroup bad;
+    bad.candidate_dirs = {(mismatch / "cand0").string(),
+                          (mismatch / "cand1").string()};
+    bad.output_dirs = {(mismatch / "out0").string(),
+                       (mismatch / "out1").string()};
+    bad.sync_tracks = true;
+    write_jpg(mismatch / "cand0" / "c_100.jpg", 64, 48, 1);
+    write_jpg(mismatch / "cand0" / "c_200.jpg", 64, 48, 2);
+    write_jpg(mismatch / "cand1" / "c_100.jpg", 64, 48, 3);
+    write_jpg(mismatch / "cand1" / "c_300.jpg", 64, 48, 4);
+    std::vector<gui::FrameSelectGroup> invalid{bad};
+    check(!gui::select_sharpest_frame_groups(invalid, {}, cancel, error) &&
+              !fs::exists(mismatch / "out0") &&
+              !fs::exists(mismatch / "out1"),
+          "unequal presentation timestamps are rejected before publication");
+}
+
+void test_adaptive_selector_tracks_frames_and_publishes_plan() {
+    const fs::path root = scratch("adaptive_selector");
+    gui::FrameSelectGroup group;
+    group.candidate_dirs = {(root / "candidates").string()};
+    group.output_dirs = {(root / "selected").string()};
+    group.options.adaptive = true;
+    group.options.group = 2;
+    group.options.range = 4.0f;
+    group.options.window = 1;
+    group.options.max_frames = 3;
+    group.options.view = app::MotionView::Fisheye;
+    group.options.out_fov = 2.2f;
+    size_t measured = 0;
+    int64_t planned_frames = 0;
+    std::vector<int64_t> plan;
+    group.options.measured =
+        [&](int64_t, int64_t, float) { measured++; };
+    group.options.planned = [&](const std::vector<int64_t>& selected,
+                                int64_t count) {
+        plan = selected;
+        planned_frames = count;
+    };
+    for (int frame = 0; frame < 8; frame++)
+        write_jpg(root / "candidates" /
+                      ("c_" + std::to_string(100 + frame * 100) + ".jpg"),
+                  128, 96, frame);
+
+    std::vector<gui::FrameSelectGroup> groups{group};
+    std::atomic<bool> cancel{false};
+    std::string error;
+    check(gui::select_sharpest_frame_groups(groups, {}, cancel, error),
+          "adaptive candidates select: " + error);
+    check(measured == 7,
+          "adaptive selection measures every adjacent frame transition");
+    check(planned_frames == 8 && !plan.empty() && plan.size() <= 3 &&
+              groups[0].kept == (int)plan.size(),
+          "adaptive selection returns a bounded, nonempty motion plan");
+
+    size_t published = 0;
+    std::error_code ec;
+    for (fs::directory_iterator it(root / "selected", ec), end;
+         !ec && it != end; it.increment(ec))
+        if (it->is_regular_file(ec)) published++;
+    check(!ec && published > 0 && published == (size_t)groups[0].kept,
+          "adaptive plan publishes exactly its selected frames");
+}
+
+void test_cancelled_selector_does_not_publish() {
+    const fs::path root = scratch("cancelled_selector");
+    gui::FrameSelectGroup group;
+    group.candidate_dirs = {(root / "candidates").string()};
+    group.output_dirs = {(root / "selected").string()};
+    std::vector<gui::FrameSelectGroup> groups{group};
+    std::atomic<bool> cancel{true};
+    std::string error;
+    check(!gui::select_sharpest_frame_groups(groups, {}, cancel, error) &&
+              error == spirula::i18n::msg::log::err_cancelled.get() &&
+              !fs::exists(root / "selected"),
+          "pre-cancelled selection reports cancellation without publishing");
+}
+
+void test_missing_ffmpeg_fails_before_output() {
+    const fs::path root = scratch("missing_ffmpeg");
+    gui::PrepJob job;
+    job.workspace = (root / "dataset").string();
+    job.force_external_decode = true;
+    job.ffmpeg_exe = (root / "missing-ffmpeg.exe").string();
+    gui::PrepInput input;
+    input.path = (root / "capture.mp4").string();
+    input.is_video = true;
+    job.inputs = {input};
+
+    gui::RunProgress progress;
+    std::string error;
+    const bool ok = run_prep(job, progress, error);
+    check(!ok && error.find(job.ffmpeg_exe) != std::string::npos,
+          "missing FFmpeg failure includes the configured executable path");
+    check(!fs::exists(root / "dataset") &&
+              !fs::exists(root / "dataset" / "images") &&
+              !fs::exists(root / "dataset" / gui::kFramesStampFile),
+          "missing FFmpeg fails before creating workspace output");
+}
+
 }  // namespace
 
 int main() {
     test_rerun_reapplies_corrections();
     test_camera_scan_skips_mask_edits();
+    test_pts_synchronized_selector();
+    test_adaptive_selector_tracks_frames_and_publishes_plan();
+    test_cancelled_selector_does_not_publish();
+    test_missing_ffmpeg_fails_before_output();
     std::printf("%s: %d failure(s)\n", SS_FILE, g_failures);
     return g_failures;
 }

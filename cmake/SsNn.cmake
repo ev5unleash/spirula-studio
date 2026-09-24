@@ -232,11 +232,17 @@ if(SS_ENABLE_PATENTED)
 
     file(GLOB_RECURSE SS_VIDEO_SOURCES CONFIGURE_DEPENDS
          ${SS_SRC}/video/*.cpp)
+    list(FILTER SS_VIDEO_SOURCES EXCLUDE REGEX "/tests/")
     add_library(ss_video STATIC ${SS_VIDEO_SOURCES} ${SS_VIDEO_EMBED})
     target_link_libraries(ss_video PUBLIC ss_nn)
     target_compile_options(ss_video PRIVATE
         $<$<COMPILE_LANGUAGE:CXX>:${SPLAT_CXX_FLAGS}>)
     set_property(TARGET ss_video PROPERTY CXX_STANDARD 17)
+    add_executable(hevc_admission_test ${SS_SRC}/video/tests/hevc_admission_test.cpp)
+    target_link_libraries(hevc_admission_test PRIVATE ss_video)
+    target_compile_options(hevc_admission_test PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:${SPLAT_CXX_FLAGS}>)
+    set_property(TARGET hevc_admission_test PROPERTY CXX_STANDARD 17)
 endif()
 
 # ---------------------------------------------------------------------------

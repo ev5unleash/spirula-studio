@@ -50,6 +50,11 @@ void set_env(const char* key, const char* value) {
 #endif
 }
 
+std::string hevc_level(int level_x10) {
+    return std::to_string(level_x10 / 10) + "." +
+           std::to_string(level_x10 % 10);
+}
+
 // ---------------------------------------------------------------------------
 // Options
 // ---------------------------------------------------------------------------
@@ -313,16 +318,33 @@ int sam_cli_extract(int argc, char** argv) {
     sinks.log = [](const std::string& l) { std::fprintf(stderr, "%s\n", l.c_str()); };
 
     app::FrameExtractStats stats;
+    app::FrameExtractFailure failure;
     std::string error;
     int rc = 0;
-    if (!app::extract_frames(job, sinks, stats, error)) {
-        std::fprintf(stderr, "%s\n",
-                     spirula::i18n::format(spirula::i18n::msg::cli::error_line,
-                                           {error}).c_str());
+    if (!app::extract_frames(job, sinks, stats, error, &failure)) {
+        const auto report_error = [](const std::string& detail) {
+            std::fprintf(stderr, "%s\n",
+                         spirula::i18n::format(spirula::i18n::msg::cli::error_line,
+                                               {detail}).c_str());
+        };
+        if (failure.kind == app::FrameExtractFailure::Kind::HevcLevelUnsupported) {
+            report_error(spirula::i18n::format(
+                spirula::i18n::msg::cli::sam_extract_hevc_level_unsupported,
+                {hevc_level(failure.required_level), failure.device,
+                 hevc_level(failure.supported_level)}));
+        } else if (failure.kind ==
+                   app::FrameExtractFailure::Kind::UnsupportedStream) {
+            report_error(spirula::i18n::format(
+                spirula::i18n::msg::cli::sam_extract_unsupported_stream,
+                {error}));
+        } else if (failure.kind == app::FrameExtractFailure::Kind::RuntimeFailure) {
+            report_error(spirula::i18n::format(
+                spirula::i18n::msg::cli::sam_extract_runtime_failure, {error}));
+        } else {
+            report_error(error);
+        }
         rc = 1;
     }
-    std::printf("%s", app::format_extract_stats(stats, base.string(),
-                                                !o.model.empty()).c_str());
     if (stats.write_failures) {
         std::fprintf(stderr, "%s %s\n",
                      spirula::i18n::msg::data::word_warning.get(),
@@ -330,6 +352,13 @@ int sam_cli_extract(int argc, char** argv) {
                          spirula::i18n::msg::data::write_failures,
                          {stats.write_failures}).c_str());
         rc = 1;
+    }
+    if (rc == 0) {
+        std::printf("%s", app::format_extract_stats(stats, base.string(),
+                                                    !o.model.empty()).c_str());
+    } else if (stats.written > 0) {
+        std::fprintf(stderr, "%s\n",
+                     spirula::i18n::msg::cli::sam_extract_incomplete.get());
     }
     return rc;
 }

@@ -31,7 +31,10 @@
 #endif
 #ifdef SS_HAVE_VIDEO
 #include "app/FrameExtract.h"
+#include "nn/vk/Context.h"
+#include "video/VideoPipeline.h"
 #include "video/Video.h"
+#include "sam/Sam.h"
 #endif
 
 #ifndef _WIN32
@@ -107,11 +110,9 @@ int candidate_group(const PrepJob& job, const PrepInput& in) {
                             : window;
 }
 
-// How ffmpeg is told to write every decoded frame exactly once: the image2
-// muxer is constant-rate by default, and pads or drops a variable-rate file to
-// fit. -vsync rather than -fps_mode, which ffmpeg before 5.1 rejects.
+// The image2 muxer may pad or drop frames unless passthrough is requested.
 void append_every_frame_args(std::vector<std::string>& argv, int max_frames) {
-    argv.insert(argv.end(), {"-vsync", "passthrough"});
+    argv.insert(argv.end(), {"-fps_mode", "passthrough"});
     if (max_frames > 0) argv.insert(argv.end(), {"-frames:v", std::to_string(max_frames)});
 }
 
@@ -1053,18 +1054,6 @@ const Backends& backends() {
     return probed;
 }
 
-// The decoder's own capability answer for THIS device; empty means yes. It
-// creates the inference context, so it is only asked after a job's device
-// request is frozen, at that job's first extraction.
-static const std::string& native_decode_reason() {
-#ifdef SS_HAVE_VIDEO
-    static const std::string reason = app::video_decode_availability();
-    return reason;
-#else
-    return backends().video_reason;
-#endif
-}
-
 int DatasetPrep::count_images(const std::string& dir, const std::string& skip) {
     return (int)walk_images(dir, skip).size();
 }
@@ -1145,7 +1134,7 @@ int64_t DatasetPrep::estimate_frames(const PrepJob& job, const PrepInput& in,
             ? (int)app::pano360_views(in.pano360, job.pano).size()
             : std::max(in.packed_lenses, 0);
 #ifdef SS_HAVE_VIDEO
-    if (!job.force_external_decode && native_decode_reason().empty()) {
+    if (!job.force_external_decode) {
         std::string err;
         video::VideoProbe probe;
         if (video::probe_video(in.path, probe, err) && probe.tracks > 0)
@@ -1181,26 +1170,89 @@ bool DatasetPrep::run(const PrepJob& job_in, PrepResult& out, std::string& error
 #endif
     const fs::path ws = job.workspace;
     std::error_code ec;
-    fs::create_directories(ws, ec);
     if (job.inputs.empty()) {
         error = lmsg::err_nothing_to_prepare.get();
         return false;
     }
 
-    // Before the built-in decoder can pick one. Only a job that will reach the
-    // decoder pays: asking whether THIS device decodes is what the freeze makes
-    // safe, and a photo-only job that masks freezes inside Masker::init.
+    const bool has_video = std::any_of(
+        job.inputs.begin(), job.inputs.end(),
+        [](const PrepInput& in) { return in.is_video; });
+    if (has_video && !job.force_external_decode) {
 #ifdef SS_HAVE_VIDEO
-    bool wants_native_decode = false;
-    if (!job.force_external_decode)
-        for (const PrepInput& in : job.inputs)
-            if (in.is_video) {
-                wants_native_decode = true;
-                break;
+        if (backends().builtin_video) {
+            if (!sam::freeze_device(job.device, error)) return false;
+            if (_cancel.load()) {
+                error = lmsg::err_cancelled.get();
+                return false;
             }
-    if (wants_native_decode && !sam::freeze_device(job.device, error))
-        return false;
+
+            nn::vk::ContextOptions selected;
+            selected.device_selector = nn::vk::Context::current_selector();
+            if (selected.device_selector.empty())
+                selected.device_selector = nn::vk::Context::configured_selector();
+            if (selected.device_selector.empty()) {
+                error = "the selected Vulkan device was not frozen";
+                return false;
+            }
+            selected.selector_set = true;
+            selected.want_video = true;
+
+            std::optional<video::PreflightResult> unsupported;
+            for (PrepInput& in : job.inputs) {
+                if (!in.is_video) continue;
+                if (_cancel.load()) {
+                    error = lmsg::err_cancelled.get();
+                    return false;
+                }
+                const int tracks = app::video_track_count(in.path, error);
+                if (tracks <= 0) {
+                    if (error.empty()) error = "no video track in " + in.path;
+                    return false;
+                }
+                in.video_tracks = tracks;
+                for (int track = 0; track < tracks; track++) {
+                    if (_cancel.load()) {
+                        error = lmsg::err_cancelled.get();
+                        return false;
+                    }
+                    const video::PreflightResult result =
+                        video::VideoPipeline::preflight(
+                            in.path, track, selected);
+                    switch (result.status) {
+                    case video::PreflightResult::Status::Compatible:
+                        break;
+                    case video::PreflightResult::Status::UnsupportedStream:
+                        if (!unsupported) unsupported = result;
+                        break;
+                    case video::PreflightResult::Status::InvalidDevice:
+                    case video::PreflightResult::Status::InvalidInput:
+                    case video::PreflightResult::Status::RuntimeFailure:
+                        error = result.reason.empty()
+                                    ? "video decoder preflight failed"
+                                    : result.reason;
+                        return false;
+                    }
+                }
+            }
+            if (unsupported) {
+                job.force_external_decode = true;
+                log(fmt(lmsg::decode_fallback_ffmpeg, {unsupported->reason}),
+                    /*detail=*/false);
+            }
+        } else {
+            job.force_external_decode = true;
+        }
+#else
+        job.force_external_decode = true;
 #endif
+    }
+    if (has_video && job.force_external_decode &&
+        !command_exists(job.ffmpeg_exe)) {
+        error = fmt(lmsg::err_ffmpeg_missing, {job.ffmpeg_exe});
+        return false;
+    }
+    fs::create_directories(ws, ec);
 
     // Frames already there were extracted with settings the workspace records;
     // a run asking for others has to go back to the video (ReconStamp.h).
@@ -1323,18 +1375,95 @@ bool DatasetPrep::run(const PrepJob& job_in, PrepResult& out, std::string& error
             }
             _prog->scan_reset(std::move(rows));
         }
+        std::vector<bool> external_group_prepared(job.inputs.size(), false);
+        std::vector<bool> modified_video(job.inputs.size(), false);
+        auto discard_video_outputs = [&] {
+            for (size_t i = 0; i < job.inputs.size(); i++) {
+                if (!modified_video[i]) continue;
+                clear_generated(per[i].images, ws);
+                clear_generated(per[i].masks, ws);
+            }
+            remove_tree(ws / "frames_tmp_group");
+            out.captures.clear();
+        };
+        auto has_complete_video_output = [&](size_t i) {
+            const PrepInput& in = job.inputs[i];
+            if (in.pano360.valid() && job.pano.mode != app::Pano360Mode::Off) {
+                const std::vector<app::Pano360View> views =
+                    app::pano360_views(in.pano360, job.pano);
+                if (views.empty()) return false;
+                for (const app::Pano360View& view : views) {
+                    const fs::path dir = view.dir.empty()
+                                             ? fs::path(per[i].images)
+                                             : fs::path(per[i].images) / view.dir;
+                    if (count_images(dir.string()) == 0) return false;
+                }
+                return true;
+            }
+            const int tracks =
+                is_dual_fisheye_path(in.path)
+                    ? (in.video_tracks > 0 ? in.video_tracks : 2)
+                    : 1;
+            if (tracks > 1) {
+                for (int track = 0; track < tracks; track++)
+                    if (count_images((fs::path(per[i].images) /
+                                      ("cam" + std::to_string(track))).string()) == 0)
+                        return false;
+                return true;
+            }
+            return count_images(per[i].images) > 0;
+        };
+        if (job.force_external_decode &&
+            (job.adaptive_fps || job.sync_tracks)) {
+            std::vector<bool> visited(job.inputs.size(), false);
+            for (size_t i = 0; i < job.inputs.size(); i++) {
+                if (visited[i] || !job.inputs[i].is_video) continue;
+                const size_t rate_group = fps_group(job.inputs, i);
+                std::vector<size_t> rows;
+                std::vector<std::string> image_dirs;
+                bool needs_extraction = false;
+                for (size_t j = i; j < job.inputs.size(); j++) {
+                    if (!job.inputs[j].is_video ||
+                        fps_group(job.inputs, j) != rate_group)
+                        continue;
+                    visited[j] = true;
+                    rows.push_back(j);
+                    image_dirs.push_back(per[j].images);
+                    if (!job.resume || frames_stale(job) ||
+                        !has_complete_video_output(j))
+                        needs_extraction = true;
+                }
+                if (!needs_extraction) continue;
+                for (size_t row : rows) {
+                    modified_video[row] = true;
+                    clear_generated(per[row].images, ws);
+                    clear_generated(per[row].masks, ws);
+                }
+                if (!extract_ffmpeg_selection_group(job, rows, image_dirs,
+                                                    out, error)) {
+                    discard_video_outputs();
+                    return false;
+                }
+                for (size_t row : rows) external_group_prepared[row] = true;
+            }
+        }
         for (size_t i = 0; i < job.inputs.size(); i++) {
             const PrepInput& in = job.inputs[i];
             Prepared& p = per[i];
             if (in.is_video) {
                 const bool keeping =
                     job.resume && !frames_stale(job) && count_images(p.images) > 0;
-                if (!keeping && !job.force_external_decode &&
-                    native_decode_reason().empty() && !plan_group(job, i, error))
-                    return false;
-                if (!extract_video(job, in, p.images, p.masks, out, p.have_masks,
-                                   error))
-                    return false;
+                if (!external_group_prepared[i]) {
+                    if (!keeping && !job.force_external_decode &&
+                        !plan_group(job, i, error))
+                        return false;
+                    if (!keeping) modified_video[i] = true;
+                    if (!extract_video(job, in, p.images, p.masks, out,
+                                       p.have_masks, error)) {
+                        discard_video_outputs();
+                        return false;
+                    }
+                }
             } else if (!gather_photos(job, in, p.images, p.masks, p.have_masks,
                                       error)) {
                 return false;
@@ -1355,10 +1484,6 @@ bool DatasetPrep::run(const PrepJob& job_in, PrepResult& out, std::string& error
             out.per_folder_cameras = true;
     }
 
-    // Written once the images are there, so an interrupted extraction is not
-    // recorded as having produced what it was asked for.
-    write_recon_stamp(ws.string(), frames_now, kFramesStampFile);
-
     out.n_images = count_images(out.image_dir, skip_dir);
     log(fmt(lmsg::found_images, {(long long)out.n_images, out.image_dir}),
         /*detail=*/false);
@@ -1366,6 +1491,7 @@ bool DatasetPrep::run(const PrepJob& job_in, PrepResult& out, std::string& error
         error = fmt(lmsg::err_too_few_images, {(long long)out.n_images});
         return false;
     }
+    write_recon_stamp(ws.string(), frames_now, kFramesStampFile);
 
     // The frames exist now, so what masking is asked to do can still be the
     // answer the user gave while watching them go by.
@@ -1468,13 +1594,12 @@ bool DatasetPrep::run(const PrepJob& job_in, PrepResult& out, std::string& error
 // Video -> frames
 // ---------------------------------------------------------------------------
 
-// Whether one stem's frames were taken at one instant: a 360 packing's views
-// are cut from one decoded canvas; separate tracks only under `sync_tracks`,
-// which only the built-in decoder does.
-static bool lockstep_extraction(const PrepJob& job, const PrepInput& in, bool builtin) {
+// Whether the frames under one stem came from one capture instant.
+static bool lockstep_extraction(const PrepJob& job, const PrepInput& in,
+                                bool builtin) {
     if (in.pano360.valid()) return job.pano.mode != app::Pano360Mode::Off;
     if (in.packed_lenses >= 2) return true;
-    return builtin && job.sync_tracks;
+    return job.sync_tracks && (builtin || job.force_external_decode);
 }
 
 bool DatasetPrep::extract_video(const PrepJob& job, const PrepInput& in,
@@ -1483,7 +1608,10 @@ bool DatasetPrep::extract_video(const PrepJob& job, const PrepInput& in,
                                 bool& masked, std::string& error) {
     // Resume: frames are moved into place in one batch after selection, so a
     // non-empty folder means a previous extraction of THIS input finished.
-    if (frames_stale(job)) clear_generated(images, job.workspace);
+    if (frames_stale(job)) {
+        clear_generated(images, job.workspace);
+        clear_generated(masks, job.workspace);
+    }
     if (job.resume && !frames_stale(job)) {
         const int have = count_images(images);
         if (have > 0) {
@@ -1497,8 +1625,7 @@ bool DatasetPrep::extract_video(const PrepJob& job, const PrepInput& in,
             // downstream by the gyro-against-poses check, not misused.
             out.captures.push_back(
                 {in.subdir, in.path, 0.0,
-                 lockstep_extraction(job, in, !job.force_external_decode &&
-                                                  native_decode_reason().empty())});
+                 lockstep_extraction(job, in, !job.force_external_decode)});
             if (!split_packed_frames(in, images, out, error)) return false;
             // Masks a previous run left. Not when this one is re-doing them:
             // `masked` is what makes run() skip the masking pass entirely.
@@ -1513,17 +1640,11 @@ bool DatasetPrep::extract_video(const PrepJob& job, const PrepInput& in,
         }
     }
 
-    const bool want_builtin =
-        !job.force_external_decode && native_decode_reason().empty();
-    if (want_builtin) {
-        if (extract_video_builtin(job, in, images, out, error)) {
-            out.captures.push_back({in.subdir, in.path, 0.0, lockstep_extraction(job, in, true)});
-            return split_packed_frames(in, images, out, error);
-        }
-        if (_cancel.load()) return false;
-        // A container or profile the driver cannot decode is exactly what the
-        // fallback is for, and the user should not have to know which is which.
-        log(fmt(lmsg::decode_fallback_ffmpeg, {error}), /*detail=*/false);
+    if (!job.force_external_decode) {
+        if (!extract_video_builtin(job, in, images, out, error)) return false;
+        out.captures.push_back(
+            {in.subdir, in.path, 0.0, lockstep_extraction(job, in, true)});
+        return split_packed_frames(in, images, out, error);
     }
     const bool ok = in.pano360.valid() && job.pano.mode != app::Pano360Mode::Off
                         ? extract_360_ffmpeg(job, in, images, out, error)
@@ -1533,7 +1654,10 @@ bool DatasetPrep::extract_video(const PrepJob& job, const PrepInput& in,
     // frame is not resampled, so its stems are source indices as above.
     if (ok)
         out.captures.push_back({in.subdir, in.path,
-                                (double)input_fps(job, in) * candidate_group(job, in),
+                                every_frame(job, in)
+                                    ? 0.0
+                                    : (double)input_fps(job, in) *
+                                          candidate_group(job, in),
                                 lockstep_extraction(job, in, false)});
     return ok && split_packed_frames(in, images, out, error);
 }
@@ -1729,7 +1853,6 @@ bool DatasetPrep::extract_video_builtin(const PrepJob& job, const PrepInput& in,
 bool DatasetPrep::extract_video_ffmpeg(const PrepJob& job, const PrepInput& in,
                                        const std::string& images,
                                        PrepResult& out, std::string& error) {
-    if (job.sync_tracks) log(lmsg::sync_needs_builtin.get(), /*detail=*/false);
     const fs::path ws = job.workspace;
     if (!command_exists(job.ffmpeg_exe)) {
         error = fmt(lmsg::err_ffmpeg_missing, {job.ffmpeg_exe});
@@ -2017,6 +2140,266 @@ bool DatasetPrep::extract_360_ffmpeg(const PrepJob& job, const PrepInput& in,
     if (!ok) return false;
     log(fmt(lmsg::kept_frames, {(long long)n * (long long)views.size(), images}),
         /*detail=*/false);
+    return true;
+}
+
+bool DatasetPrep::extract_ffmpeg_selection_group(
+        const PrepJob& job, const std::vector<size_t>& rows,
+        const std::vector<std::string>& image_dirs, PrepResult& out,
+        std::string& error) {
+    struct Staged {
+        size_t row = 0;
+        fs::path root;
+        bool pano = false;
+        int streams = 1;
+        std::vector<app::Pano360View> views;
+    };
+    std::vector<Staged> staged;
+    std::vector<FrameSelectGroup> groups;
+    std::vector<ScanProgress> scans;
+    staged.reserve(rows.size());
+    groups.reserve(rows.size());
+    scans.reserve(rows.size());
+    auto discard_staged = [&] {
+        for (const Staged& stage : staged) remove_tree(stage.root);
+    };
+    if (rows.size() != image_dirs.size()) {
+        error = lmsg::err_ffmpeg_extract_failed.get();
+        return false;
+    }
+
+    for (size_t k = 0; k < rows.size(); k++) {
+        if (_cancel.load()) {
+            error = lmsg::err_cancelled.get();
+            discard_staged();
+            return false;
+        }
+        const size_t row = rows[k];
+        const PrepInput& in = job.inputs[row];
+        Staged stage;
+        stage.row = row;
+        stage.root = fs::path(job.workspace) / "frames_tmp_group" /
+                     std::to_string(row);
+        stage.pano = in.pano360.valid() &&
+                     job.pano.mode != app::Pano360Mode::Off;
+
+        FrameSelectGroup group;
+        FrameSelectOptions& options = group.options;
+        const bool every = every_frame(job, in);
+        const int rate_group = every ? 1 : candidate_group(job, in);
+        const int window = every ? 1 : std::max(job.sharp_window, 1);
+        options.group = rate_group;
+        options.max_frames = job.max_frames;
+        options.adaptive = job.adaptive_fps && !every;
+        options.range = job.adaptive_range;
+        options.window = window;
+
+        fs::path candidate_root = stage.root / "candidates";
+        std::error_code ec;
+        remove_tree(stage.root);
+        fs::create_directories(candidate_root, ec);
+        if (ec) {
+            error = lmsg::err_ffmpeg_extract_failed.get();
+            discard_staged();
+            remove_tree(stage.root);
+            return false;
+        }
+
+        std::string filter = "settb=expr=1/1000000";
+        if (!every) {
+            char fps[64];
+            std::snprintf(fps, sizeof fps, "fps=%g,",
+                          (double)input_fps(job, in) * rate_group);
+            filter = std::string(fps) + filter;
+        }
+        if (stage.pano) {
+            stage.views = app::pano360_views(in.pano360, job.pano);
+            if (stage.views.empty()) {
+                error = lmsg::err_ffmpeg_extract_failed.get();
+                discard_staged();
+                remove_tree(stage.root);
+                return false;
+            }
+            if (stage.views.size() > 1) out.per_folder_cameras = true;
+            options.view = app::MotionView::Packed360;
+            options.eac = in.pano360;
+            options.out_fov = app::motion_out_fov(stage.views);
+            const fs::path candidates = candidate_root;
+            const fs::path selected = stage.root / "selected";
+            group.candidate_dirs.push_back(candidates.string());
+            group.output_dirs.push_back(selected.string());
+            const std::string graph = app::pano360_graph(in.pano360, filter);
+            std::vector<std::string> argv{
+                job.ffmpeg_exe, "-nostdin", "-y", "-noautorotate", "-copyts",
+                "-i", in.path, "-filter_complex", graph, "-map",
+                std::string("[") + app::pano360_canvas_pad() + "]"};
+            if (every) append_every_frame_args(argv, job.max_frames);
+            else argv.insert(argv.end(), {"-fps_mode", "passthrough"});
+            argv.insert(argv.end(), {"-enc_time_base", "1:1000000",
+                                     "-frame_pts", "1", "-qscale:v", "2",
+                                     (candidates / "c_%d.jpg").string()});
+            if (exec(argv) != 0) {
+                error = _cancel.load() ? lmsg::err_cancelled.get()
+                                       : lmsg::err_ffmpeg_extract_failed.get();
+                discard_staged();
+                remove_tree(stage.root);
+                return false;
+            }
+        } else {
+            VideoFacts facts;
+            ffmpeg_probe_video(job.ffmpeg_exe, in.path, facts, _cancel);
+            stage.streams =
+                is_dual_fisheye_path(in.path) && facts.tracks.size() > 1
+                    ? (int)facts.tracks.size()
+                    : 1;
+            const bool fisheye =
+                stage.streams > 1 && !facts.tracks.empty() &&
+                facts.tracks[0].first == facts.tracks[0].second;
+            if (stage.streams > 1) out.per_folder_cameras = true;
+            if (fisheye) {
+                options.view = app::MotionView::Fisheye;
+                options.out_fov = 3.4034f;
+            }
+            group.sync_tracks = job.sync_tracks && stage.streams > 1;
+            for (int track = 0; track < stage.streams; track++) {
+                const fs::path candidates =
+                    candidate_root / ("cam" + std::to_string(track));
+                const fs::path selected =
+                    stage.root / "selected" / ("cam" + std::to_string(track));
+                fs::create_directories(candidates, ec);
+                if (ec) {
+                    error = lmsg::err_ffmpeg_extract_failed.get();
+                    discard_staged();
+                    remove_tree(stage.root);
+                    return false;
+                }
+                group.candidate_dirs.push_back(candidates.string());
+                group.output_dirs.push_back(selected.string());
+
+                std::vector<std::string> argv{
+                    job.ffmpeg_exe, "-nostdin", "-y"};
+                if (!job.auto_rotate) argv.push_back("-noautorotate");
+                argv.insert(argv.end(), {"-copyts", "-i", in.path, "-map",
+                                         "0:v:" + std::to_string(track),
+                                         "-vf", filter});
+                if (!every) argv.insert(argv.end(), {"-fps_mode", "passthrough"});
+                if (every) append_every_frame_args(argv, job.max_frames);
+                argv.insert(argv.end(), {"-enc_time_base", "1:1000000",
+                                         "-frame_pts", "1", "-qscale:v", "2",
+                                         (candidates / "c_%d.jpg").string()});
+                if (exec(argv) != 0) {
+                    error = _cancel.load() ? lmsg::err_cancelled.get()
+                                           : lmsg::err_ffmpeg_extract_failed.get();
+                    discard_staged();
+                    remove_tree(stage.root);
+                    return false;
+                }
+
+            }
+        }
+        if (!stage.pano && stage.streams == 1)
+            group.sync_tracks = false;
+
+        const size_t progress_row = row;
+        scans.emplace_back(_prog, 0);
+        ScanProgress& scan = scans.back();
+        scan.begin(leaf_name(in.path));
+        _prog->scan_open(progress_row);
+        options.scanning = [&scan](int64_t done, int64_t total) {
+            scan.update(done, total);
+        };
+        options.measured = [this, progress_row](int64_t at, int64_t of, float c) {
+            _prog->scan_step(progress_row, at, of, c);
+        };
+        options.planned =
+            [this, progress_row](const std::vector<int64_t>& plan, int64_t frames) {
+                _prog->scan_kept(progress_row, spacing_bars(plan, frames),
+                                 (int64_t)plan.size());
+            };
+        groups.push_back(std::move(group));
+        staged.push_back(std::move(stage));
+    }
+
+    if (!select_sharpest_frame_groups(
+            groups, [this](const std::string& line) { log(line); },
+            _cancel, error)) {
+        for (const Staged& stage : staged) remove_tree(stage.root);
+        if (_cancel.load()) error = lmsg::err_cancelled.get();
+        return false;
+    }
+
+    for (size_t k = 0; k < staged.size(); k++) {
+        const Staged& stage = staged[k];
+        const PrepInput& in = job.inputs[stage.row];
+        const bool every = every_frame(job, in);
+        const int rate_group = every ? 1 : candidate_group(job, in);
+        const int kept = groups[k].kept;
+        if (stage.pano) {
+            enter(Stage::Frames, lmsg::stage_warp_360.get());
+            RateLimitedProgress progress(
+                _prog, Stage::Frames, lmsg::noun_frames_written, _frames_tally);
+            if (!warp_canvases(stage.root / "selected",
+                               fs::path(image_dirs[k]), in.pano360,
+                               stage.views, _cancel,
+                               [&](int64_t done) {
+                                   progress.update(done *
+                                       (int64_t)stage.views.size());
+                               },
+                               error)) {
+                for (const Staged& old : staged) remove_tree(old.root);
+                return false;
+            }
+            log(fmt(lmsg::kept_frames,
+                    {(long long)kept * (long long)stage.views.size(),
+                     image_dirs[k]}), /*detail=*/false);
+        } else {
+            for (size_t track = 0; track < groups[k].output_dirs.size(); track++) {
+                const fs::path selected = groups[k].output_dirs[track];
+                const fs::path final_dir =
+                    stage.streams > 1
+                        ? fs::path(image_dirs[k]) /
+                              ("cam" + std::to_string(track))
+                        : fs::path(image_dirs[k]);
+                std::error_code ec;
+                fs::create_directories(final_dir, ec);
+                if (ec) {
+                    error = lmsg::err_ffmpeg_extract_failed.get();
+                    for (const Staged& old : staged) remove_tree(old.root);
+                    return false;
+                }
+                for (fs::directory_iterator it(selected, ec), end;
+                     !ec && it != end; it.increment(ec)) {
+                    if (!it->is_regular_file(ec)) continue;
+                    const fs::path dest = final_dir / it->path().filename();
+                    fs::rename(it->path(), dest, ec);
+                    if (ec) {
+                        ec.clear();
+                        fs::copy_file(it->path(), dest,
+                                      fs::copy_options::overwrite_existing, ec);
+                        if (!ec) fs::remove(it->path(), ec);
+                    }
+                    if (ec) {
+                        error = lmsg::err_ffmpeg_extract_failed.get();
+                        for (const Staged& old : staged) remove_tree(old.root);
+                        return false;
+                    }
+                }
+                if (ec) {
+                    error = lmsg::err_ffmpeg_extract_failed.get();
+                    for (const Staged& old : staged) remove_tree(old.root);
+                    return false;
+                }
+                log(fmt(lmsg::kept_frames, {(long long)kept, final_dir.string()}),
+                    /*detail=*/false);
+            }
+        }
+        out.captures.push_back(
+            {in.subdir, in.path, every ? 0.0
+                                       : (double)input_fps(job, in) * rate_group,
+             lockstep_extraction(job, in, !job.force_external_decode)});
+        remove_tree(stage.root);
+    }
+    remove_tree(fs::path(job.workspace) / "frames_tmp_group");
     return true;
 }
 
@@ -2620,7 +3003,6 @@ bool DatasetPrep::generate_masks_builtin(const PrepJob& job, const PrepInput& in
     // photo folder's clicks were recorded against its own sorted order.
     std::vector<int64_t> ids;
     const bool by_stem = in.is_video && !job.force_external_decode &&
-                         native_decode_reason().empty() &&
                          frame_ids_from_stems(files, ids);
     if (!by_stem) {
         ids.resize(files.size());

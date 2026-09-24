@@ -1,6 +1,6 @@
 # HEVC decode admission and safe extraction
 
-Status: execution plan only; implementation and upstream-baseline runtime validation have not started.
+Status: implemented and validated on local AMD Vulkan; see "Execution results" below.
 
 ## Baseline and goal
 
@@ -35,12 +35,17 @@ At frame 623, mean adjacent-column grayscale jumps in native PNG were
 software-decoded luma. Different color conversion paths mean these are localization
 metrics, not an exact native-vs-reference pixel comparison.
 
-**Confirmed source defect:** the current upstream pipeline queries HEVC capabilities
-but never compares the parsed stream level against `maxLevelIdc`.
-**Not established:** whether that mismatch causes this particular corruption, or
-whether another parser, driver, reference-picture, synchronization or conversion
-bug is involved. A level guard is required independently; it is not proof of a
-particular AMD driver defect. Native raw-plane comparison remains outstanding.
+**Confirmed source defect:** the upstream pipeline queried HEVC capabilities but
+did not compare parsed SPS levels against `maxLevelIdc`. The new admission check
+rejects this level 6.0 capture on the selected device's maximum of 5.1.
+Full-resolution raw-plane downloads at the old decoder's output showed tile-edge
+corruption already in decoded Y and UV before RGB conversion: frame 0 matched
+software Y exactly, while frame 623's Y had mean absolute error 18.445/1023
+(track 0) and 16.253/1023 (track 1). Frame 624 is an IDR and its tile seams
+recover. The stream exceeds the advertised capability, but these observations
+do not establish whether the level mismatch, another bitstream/state defect or
+the driver produced the corruption. No GPU/driver blame or stream relabeling is
+implied.
 
 The [Vulkan HEVC capability specification](https://docs.vulkan.org/refpages/latest/refpages/source/VkVideoDecodeH265CapabilitiesKHR.html)
 defines `maxLevelIdc` as the maximum supported HEVC level. Width/height support alone
@@ -165,20 +170,21 @@ complete. Extend existing preparation/stamp tests for these observable transitio
 ## Validation matrix and commands
 
 Execute in the new worktree, never the original dirty source/build tree.
-These are planned commands, not completed checks:
+The commands below were exercised in the dedicated worktree with the patent
+opt-in; their fixture and outputs remained outside the repository:
 
 ```bat
 build_develop.bat -DSS_BACKEND=vulkan -DSS_BUILD_SAM=ON -DSS_ENABLE_PATENTED=ON
 build_vulkan\spirula.exe sam extract "%HEVC_FIXTURE%" --track 1 --skip 623 --keep 0 --max-frames 2 --360 off --quality 101 --threads 1 --device "%AMD_DEVICE%" --out "%HEVC_OUTPUT%"
 ```
 
-The extraction command is the baseline reproduction; after admission is implemented,
-the unsupported stream must be rejected instead. Use a fresh output location each run.
+The extraction command reproduced the baseline before admission; afterward it
+rejected the unsupported stream. Each run used a fresh output location.
 
 | Lane | Required evidence |
 |---|---|
 | CPU/parser | Level boundaries, malformed level, multiple SPS, in-band activation/replacement and harmless repeated headers |
-| Supported AMD native | In-capability tiled/non-tiled Main10 controls decode correctly; no accidental blanket disable of HEVC |
+| Supported AMD native | H.265 Main and Main10 decode Y/UV bit-identically to software across tiled/untiled inter-predicted controls; H.264/AV1 remain unaffected |
 | Unsupported AMD native | Declared level 6.0 versus device 5.1 fails before first GPU decode; CLI returns nonzero |
 | Numerical diagnostic | Raw Y/UV versus software reference and RGB output, with explicit tolerances justified by representation |
 | GUI fallback | Two-track adaptive + sync job uses software route before motion planning; matching presentation instants and clean pixels |
@@ -208,6 +214,101 @@ Do not concurrently edit `VideoPipeline.cpp` for diagnostics and admission.
 
 Completion requires all matrix lanes relevant to the implementation, including the
 actual synchronized GUI workflow. Record unverified hardware/visual lanes explicitly.
-A level guard alone is a safety fix, not a completed extraction solution or proof of
-an AMD defect. No implementation, build, GPU test or GUI acceptance has been performed
-on this branch at the time this plan was written.
+A level guard alone is a safety fix, not proof of a particular decoder defect.
+The synchronized GUI workflow was exercised as described below.
+
+## Execution results
+
+- Windows MSVC 19.44.35229.0, pinned Slang 2026.12.0.1, AMD Radeon AI PRO
+  R9700 (UUID `00000000010000000000000000000000`, driver 2.0.395 / 26.Q3).
+  The patented decoder was enabled only in the local validation build.
+- `hevc_admission_test`, `dataset_prep_test`, `frames_stamp_test`, and
+  `preset_roundtrip_test` pass. They cover level/DPB boundaries, multiple
+  SPS/PPS choices and in-band changes, adaptive candidate planning, matched
+  presentation times, cancellation, missing ffmpeg, and route-stamp changes.
+  `ctest -L headless --no-tests=error` found no registered tests in this
+  Windows build; the focused standalone executables above were run directly.
+- Native `spirula sam extract` rejects both 3840² Main10 level 6.0 tracks
+  before writing frames, reporting required level 6.0 and supported level
+  5.1; an in-capability Main10 synthetic control decodes 25 frames and
+  writes the requested two images. An invalid UUID remains a hard error.
+- The real GUI's synchronized/adaptive preparation of the dual-track capture
+  selected software decoding before planning. It published 46 matching
+  filename stems per camera from 216 candidates per track; the effective
+  ffmpeg route and selection settings were recorded in `.spirula-frames`.
+  The complete GUI dataset creation succeeded with 92/92 images registered.
+  At a late selected frame the mean adjacent-pixel grayscale jumps at
+  x=960/1920/2880 were 7.90/13.23/5.00 (camera 0) and 3.09/3.93/5.99
+  (camera 1), versus 46.97/39.26/45.41 and 30.26/52.23/46.26 at the
+  native baseline's damaged frame 623. The frames differ in instant and
+  codec, so this is a tile-seam sanity check, not pixel identity.
+- Cancelling the GUI while software extraction was active left only a log:
+  no images or frame stamp were published. Retrying that same workspace
+  produced 46 aligned images per camera and completed reconstruction with
+  all 92 images registered.
+- The ordinary `SS_ENABLE_PATENTED=OFF` Vulkan build completed. Its native-only
+  `spirula sam extract` reports the unavailable decoder and exits nonzero;
+  the real GUI used ffmpeg to publish 46 aligned images per camera with the
+  same selected frame stems as the enabled build and completed reconstruction
+  with all 92 images registered.
+- A local validation fixture (not committed) was encoded with Kvazaar 2.3.2
+  compiled for 10-bit: 48 frames at 1024x576/24 fps, Main 10 level 4.1,
+  2x2 PPS tiles, low-delay inter pictures and IDRs at frames 0, 16 and 32.
+  A matching one-tile control used the same source. Packet timestamps were
+  assigned at 24 fps during MP4 remux; FFmpeg software decoding of each
+  Annex B stream and its MP4 produced byte-identical 48-frame YUV outputs.
+- On the R9700, native extraction wrote 48 PNGs for each stream. Temporary
+  pre-conversion P010 readback compared every Y, U and V sample against
+  FFmpeg software P010. For the tiled stream only 17/48 frames matched exactly;
+  frame 18 differed at 107 samples, including luma errors of 840/1023 near
+  x=512. The one-tile control matched 5/48 frames, with a maximum luma error
+  of 267/1023. IDRs at frames 0, 16 and 32 matched in both streams. This
+  establishes an in-capability native decode discrepancy before RGB conversion;
+  the one-tile failures prevent attributing it exclusively to tiling. On this
+  AMD device, in-capability tiled-Main10 **failed pixel-correctness acceptance
+  before the DPB view fix**. No fixture was committed.
+
+## In-capability follow-up: AMD native HEVC safety
+
+The level check does not prevent corruption in supported streams. On the same
+R9700, 48-frame, 1024x576/24 fps level-4.1 controls were decoded to raw
+pre-conversion planes: Kvazaar 8-bit and Main10, each with 2x2 tiles and one
+tile, plus an independently encoded x265 Main10 P-only stream. FFmpeg software
+and D3D11VA were byte-identical on all frames of every control. Native Vulkan
+matched software on only 42/48 tiled 8-bit frames, 7/48 one-tile 8-bit frames,
+17/48 tiled Main10 frames, 5/48 one-tile Main10 frames, and 34/48 x265 frames.
+The one-tile 8-bit and Main10 controls first diverged on frame 1 while their
+IDRs matched.
+
+The official Khronos Vulkan-Video-Samples v0.5.0 `vk-video-dec-test` decoded
+all 48 frames of **all five** controls on the same AMD GPU with raw planar YUV
+byte-identical to FFmpeg software. This isolated the failure to Spirula's
+native HEVC application path, not to HEVC level, tiles, encoder or color
+conversion. `vkCmdControlVideoCodingKHR(RESET)` after
+`vkCmdBeginVideoCodingKHR` is required to occur inside the video coding scope;
+it was not the defect.
+
+Spirula created a separate 2D image view for each layer of one DPB array and
+bound those views with `baseArrayLayer=0`. Switching only the DPB binding to
+one full 2D-array view, with each resource selecting its slot through
+`baseArrayLayer`, changed the first failing one-tile 8-bit inter-frame from
+nine mismatched luma samples to zero. All 48 raw NV12/P010 frames then
+matched software byte-for-byte on all five controls, including their IDR
+boundaries. This identifies the defective DPB view/layer binding on the AMD
+device. Both representations can describe an image layer under Vulkan; the
+experiment does not distinguish an implementation-specific driver handling
+problem from a missing application-side constraint on those views. Keeping a
+single shared array view matches the working Khronos path.
+
+After removing the AMD guard and diagnostic instrumentation, native CLI
+extraction produced 48 images for each control. An H.264 Baseline control and
+an AV1 Main control each wrote eight frames through the shared DPB path.
+Vulkan validation reported no issues on a three-frame HEVC extraction.
+The original level-6.0 dual-track capture still reports the AMD device's 5.1
+limit before writing output; the GUI must continue using FFmpeg for that
+capture. `hevc_admission_test`, `dataset_prep_test`, `frames_stamp_test` and
+`preset_roundtrip_test` passed. In the real GUI, the fixed in-capability
+8-bit control decoded 48 frames natively, measured 12 and published four
+images at 2 fps without calling FFmpeg. Its synthetic scene remained
+unreconstructable (0/4 registered); the visible GUI reported the SfM failure.
+This verifies native GUI extraction, not successful scene reconstruction.

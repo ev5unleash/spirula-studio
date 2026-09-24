@@ -918,6 +918,117 @@ SS_MSG(sam_extract_needs_decoder,
     TR("`extract`, süreç içi video çözücüyü ister; o da yalnızca "
        "-DSS_ENABLE_PATENTED=ON ile derlenir (bkz. cmake/SsOptions.cmake). "
        "Kareleri ffmpeg ile çıkarıp `{0} track` ile maskeleyin."));
+SS_MSG(sam_extract_hevc_level_unsupported,
+    EN("Native extraction cannot decode this stream: it requires HEVC level "
+       "{0}, but the selected device {1} supports only up to {2}. Use the "
+       "GUI's dataset preparation for its software-decoding fallback, or "
+       "extract frames with FFmpeg."),
+    JA("選択したデバイスではこのストリームをネイティブ抽出できません。"
+       "必要な HEVC レベルは {0} ですが、選択したデバイス {1} の対応上限は "
+       "{2} です。ソフトウェアデコードに切り替えられる GUI のデータセット準備を"
+       "使うか、FFmpeg でフレームを抽出してください。"),
+    ZH_HANS("所选设备无法原生解码此流：它要求 HEVC 等级 {0}，而所选设备 {1} "
+            "最高支持等级 {2}。请改用可回退到软件解码的 GUI 数据集准备，或使用 "
+            "FFmpeg 提取帧。"),
+    ZH_HANT("所選裝置無法原生解碼此串流：它需要 HEVC 層級 {0}，而所選裝置 {1} "
+            "最高支援層級 {2}。請改用可退回軟體解碼的 GUI 資料集準備，或使用 "
+            "FFmpeg 擷取影格。"),
+    KO("선택한 장치에서는 이 스트림을 네이티브로 추출할 수 없습니다. 필요한 HEVC "
+       "레벨은 {0}이지만 선택한 장치 {1}은(는) 최대 {2}까지만 지원합니다. 소프트웨어 "
+       "디코딩으로 전환할 수 있는 GUI 데이터 준비를 사용하거나 FFmpeg로 프레임을 "
+       "추출하세요."),
+    DE("Die native Extraktion kann diesen Stream nicht dekodieren: Er benötigt "
+       "HEVC-Level {0}, aber das ausgewählte Gerät {1} unterstützt höchstens {2}. "
+       "Verwenden Sie die Datensatzvorbereitung der GUI mit Software-Dekodierung "
+       "als Ausweichmöglichkeit oder extrahieren Sie die Einzelbilder mit FFmpeg."),
+    FR("L'extraction native ne peut pas décoder ce flux : il exige le niveau "
+       "HEVC {0}, mais le périphérique sélectionné {1} ne prend en charge que "
+       "jusqu'au niveau {2}. Utilisez la préparation de jeu de données de "
+       "l'interface graphique, qui peut basculer vers le décodage logiciel, ou "
+       "extrayez les images avec FFmpeg."),
+    ES("La extracción nativa no puede descodificar este flujo: requiere el "
+       "nivel HEVC {0}, pero el dispositivo seleccionado {1} solo admite hasta "
+       "el {2}. Usa la preparación de conjuntos de datos de la interfaz gráfica, "
+       "que puede recurrir a la descodificación por software, o extrae los "
+       "fotogramas con FFmpeg."),
+    PT("A extração nativa não consegue decodificar este fluxo: ele requer o "
+       "nível HEVC {0}, mas o dispositivo selecionado {1} só suporta até {2}. "
+       "Use a preparação de conjuntos de dados da interface gráfica, que pode "
+       "recorrer à decodificação por software, ou extraia os quadros com FFmpeg."),
+    IT("L'estrazione nativa non può decodificare questo flusso: richiede il "
+       "livello HEVC {0}, ma il dispositivo selezionato {1} supporta solo fino "
+       "al livello {2}. Usi la preparazione del dataset nell'interfaccia "
+       "grafica, che può passare alla decodifica software, oppure estragga i "
+       "fotogrammi con FFmpeg."),
+    NL("De native extractie kan deze stream niet decoderen: de stream vereist "
+       "HEVC-niveau {0}, maar het geselecteerde apparaat {1} ondersteunt "
+       "maximaal {2}. Gebruik de gegevenssetvoorbereiding in de GUI, die kan "
+       "terugvallen op softwaredecodering, of haal de beelden eruit met FFmpeg."),
+    RU("Нативное извлечение не может декодировать этот поток: требуется "
+       "уровень HEVC {0}, а выбранное устройство {1} поддерживает только до "
+       "{2}. Используйте подготовку набора данных в графическом интерфейсе с "
+       "переходом на программное декодирование или извлеките кадры через FFmpeg."),
+    TR("Yerel çıkarma bu akışı çözemiyor: HEVC düzeyi {0} gerekiyor, ancak "
+       "seçilen {1} aygıtı en fazla {2} düzeyini destekliyor. Yazılım çözmeye "
+       "geçebilen GUI veri kümesi hazırlığını kullanın ya da kareleri FFmpeg "
+       "ile çıkarın."));
+
+SS_MSG(sam_extract_unsupported_stream,
+    EN("Native video decoding does not support this stream: {0}"),
+    JA("ネイティブ動画デコードはこのストリームに対応していません: {0}"),
+    ZH_HANS("原生视频解码不支持此流：{0}"),
+    ZH_HANT("原生視訊解碼不支援此串流：{0}"),
+    KO("네이티브 비디오 디코딩은 이 스트림을 지원하지 않습니다: {0}"),
+    DE("Die native Videodekodierung unterstützt diesen Stream nicht: {0}"),
+    FR("Le décodage vidéo natif ne prend pas en charge ce flux : {0}"),
+    ES("La decodificación de vídeo nativa no admite este flujo: {0}"),
+    PT("A descodificação de vídeo nativa não suporta este fluxo: {0}"),
+    IT("La decodifica video nativa non supporta questo flusso: {0}"),
+    NL("De native videodecodering ondersteunt deze stream niet: {0}"),
+    RU("Нативное декодирование видео не поддерживает этот поток: {0}"),
+    TR("Yerel video kod çözme bu akışı desteklemiyor: {0}"));
+
+
+SS_MSG(sam_extract_runtime_failure,
+    EN("Native video extraction failed: {0}"),
+    JA("ネイティブ動画の抽出に失敗しました: {0}"),
+    ZH_HANS("原生视频提取失败：{0}"),
+    ZH_HANT("原生視訊擷取失敗：{0}"),
+    KO("네이티브 비디오 추출 실패: {0}"),
+    DE("Die native Videoextraktion ist fehlgeschlagen: {0}"),
+    FR("Échec de l'extraction vidéo native : {0}"),
+    ES("Falló la extracción de vídeo nativa: {0}"),
+    PT("Falha na extração de vídeo nativa: {0}"),
+    IT("Estrazione video nativa non riuscita: {0}"),
+    NL("Native video-extractie mislukt: {0}"),
+    RU("Сбой нативного извлечения видео: {0}"),
+    TR("Yerel video çıkarma başarısız: {0}"));
+
+SS_MSG(sam_extract_incomplete,
+    EN("Extraction did not complete. Frames may already have been written; "
+       "treat the output as incomplete."),
+    JA("抽出は完了していません。フレームが既に書き出されている場合があります。"
+       "出力は未完成として扱ってください。"),
+    ZH_HANS("提取未完成。可能已有帧写出；请将输出视为不完整。"),
+    ZH_HANT("擷取尚未完成。可能已有影格寫出；請將輸出視為不完整。"),
+    KO("추출이 완료되지 않았습니다. 이미 저장된 프레임이 있을 수 있으므로 출력물을 "
+       "미완성으로 취급하세요."),
+    DE("Die Extraktion wurde nicht abgeschlossen. Möglicherweise wurden bereits "
+       "Einzelbilder geschrieben; behandeln Sie die Ausgabe als unvollständig."),
+    FR("L'extraction n'est pas terminée. Des images ont peut-être déjà été "
+       "écrites ; considérez la sortie comme incomplète."),
+    ES("La extracción no se completó. Es posible que ya se hayan escrito "
+       "fotogramas; considera la salida incompleta."),
+    PT("A extração não foi concluída. Alguns quadros podem já ter sido gravados; "
+       "considere a saída incompleta."),
+    IT("L'estrazione non è stata completata. Potrebbero essere già stati scritti "
+       "alcuni fotogrammi; consideri l'output incompleto."),
+    NL("De extractie is niet voltooid. Er kunnen al beelden zijn geschreven; "
+       "beschouw de uitvoer als onvolledig."),
+    RU("Извлечение не завершено. Кадры могли быть записаны; считайте результат "
+       "неполным."),
+    TR("Çıkarma tamamlanmadı. Kareler önceden yazılmış olabilir; çıktıyı "
+       "tamamlanmamış kabul edin."));
 
 SS_MSG(sam_video_decode,
     EN("Vulkan video decode: available"),
