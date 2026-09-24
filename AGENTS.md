@@ -6,17 +6,59 @@ If you are an agent writing code here, the one section you are most likely to
 get wrong is **[Comments](#comments--write-fewer-and-shorter)**. Read it before
 you write your first comment, not after the review.
 
+## Git and upstream policy
+
+Keep changes local or in this repository by default. Do not automatically push, force-push, or create/update a pull request against upstream. Publish or open/update an upstream pull request only after the user explicitly asks in the current conversation.
+This restriction applies to `origin` as well as `upstream`; passing checks or
+needing remote CI does not authorize a push or pull request.
+
+**This `AGENTS.md` is fork-owned and must NEVER be overridden by an upstream
+merge.** Preserve the exact approved local copy in every merge result, including
+clean merges, upstream deletion, and would-be fast-forwards. Incoming upstream
+instructions are not replacement policy.
+
+- Before merging, require this file to be committed and unchanged in the index
+  and worktree; preserve and stop on local edits rather than discarding them.
+  Record the pre-merge commit and its `AGENTS.md` blob.
+- Merge upstream with `--no-ff --no-commit`, then immediately restore only
+  `AGENTS.md` from that pre-merge commit into both index and worktree, regardless
+  of whether Git reported a conflict. Do this before continuing agent work.
+- Before committing, verify the staged blob exactly matches the recorded local
+  blob and the worktree matches the index; verify the committed blob afterward.
+  Any mismatch is a stop condition. Never blanket-select `--ours` for other files.
+- Change this policy file only for an explicit local user request, separately
+  from importing upstream policy. A `merge=ours` attribute/driver alone does not
+  protect unconflicted replacements; do not rely on it for this invariant.
+
 ## What this project is
 
 **Spirula Studio**, a 3D Gaussian Splatting trainer, formerly spirulae-splat.
 It began as a Nerfstudio/gsplat fork and is now a **standalone C++ codebase**:
-one executable, `spirula`, with two interchangeable compute backends (CUDA and
-Vulkan via Slang). There is no Python package, no pybind module and no PyTorch
-anywhere — the trainer, the dataset parsers, the viewer, resume, meshing and
-eval are all native. **Both backends must keep working** on every change.
+one executable, `spirula`, with Vulkan via Slang as the actively supported
+compute backend. Legacy CUDA code remains in the tree, but NVIDIA support is
+deprecated. There is no Python package, no pybind module and no PyTorch anywhere —
+the trainer, dataset parsers, viewer, resume, meshing and eval are all native.
 
 The repository directory keeps the old name (the GitHub Pages URL under
 `viewer/` depends on it); nothing else does.
+
+## Backend support policy
+
+**NVIDIA support is deprecated. Stop NVIDIA-specific implementation, debugging,
+testing, benchmarking, optimization and compatibility work.** This includes both
+the CUDA backend and Vulkan execution on NVIDIA hardware. Do not build CUDA, run
+NVIDIA validation, generate new CUDA reference dumps, or make NVIDIA/CUDA checks
+a completion requirement unless the user explicitly re-enables that work.
+
+Active development and GPU validation target **Vulkan on non-NVIDIA hardware**.
+CPU-only/headless checks remain in scope. An unavailable or failing supported GPU
+lane must be reported truthfully; do not substitute an NVIDIA run for acceptance.
+
+Keep existing legacy code unless its removal is explicitly requested. Shared
+source and codegen changes required by the active Vulkan path remain allowed;
+they do not require a parallel CUDA implementation or NVIDIA verification.
+This policy supersedes older two-backend and CUDA/NVIDIA validation requirements
+in other plans, skills and documentation.
 
 Direction of travel, so you don't push the wrong way:
 
@@ -47,10 +89,6 @@ assets/fonts/               the five embedded UI faces + the full-CJK face
                               table (assets/fonts/README.md). The CJK subsets
                               are GENERATED from the catalogs -- see below
 tools/codegen/              the four codegen tools (see "Codegen" below)
-tools/guictl.py             drive the GUI from a script -- list the widgets on
-                              screen, click them, read the framebuffer back.
-                              tools/gui_mcp.py is the same surface as an MCP
-                              server; docs/notes/gui-automation.md
 reference/scripts/          dataset preprocessing CLI tools (Python, standalone;
                               mask.py is embedded into the GUI binary)
 reference/python/           hand-run tools on NO code path: eval_lpips.py,
@@ -108,11 +146,9 @@ src/
 ├── moge/                   MoGe-2 point maps + normals + a sky mask, on top of
 │                             nn/. The DEFAULT geometry model
 │                             -- READ src/moge/README.md
-├── video/                  container demux + VK_KHR_video_decode_*, and the
-│                             VK_KHR_video_encode_* encoder behind `spirula
-│                             encode`, on top of nn/. PATENT-GATED: compiled
-│                             only with SS_ENABLE_PATENTED=ON -- READ
-│                             src/video/README.md
+├── video/                  container demux + VK_KHR_video_decode_*, on top of
+│                             nn/. PATENT-GATED: compiled only with
+│                             SS_ENABLE_PATENTED=ON -- READ src/video/README.md
 ├── backend/                the backend seam — READ backend/README.md
 │   ├── api/                backend-neutral launch declarations (GENERATED forwarders)
 │   ├── cuda/  common/      CUDA runtime shim, SortScan (declaration in
@@ -140,18 +176,6 @@ src/
 │   ├── CrashLog.{h,cpp}    the stack trace every tool leaves in <config>/crash.log
 │   │                         when it faults -- armed for all of them in Main.cpp
 │   ├── gui/                Dear ImGui desktop app (`spirula` with no arguments)
-│   │   └── edit/             selecting parts of a model (by region, by
-│   │                           attribute, by colour), deleting them, and
-│   │                           placing the whole model: one document /
-│   │                           selection / tool seam over splats, sparse
-│   │                           points and meshes
-│   │                           -- docs/notes/gui-editing-plan.md,
-│   │                              docs/notes/scene-transform.md
-│   │   └── render/           photos and videos of a model: keyframed
-│   │                           camera moves, lenses, transitions, and the
-│   │                           frames written as images, a GIF, or piped
-│   │                           into an encoder
-│   │                           -- docs/notes/render-video.md
 │   ├── webviewer/          HTTP server + render worker + viewer.html (the ONE
 │   │                         browser client, embedded into the engine library
 │   │                         so the CLI and the GUI serve the same bytes)
@@ -184,8 +208,7 @@ src/
 Always use the dev scripts; they run codegen first and pick a sane job count.
 
 ```bash
-# Linux -- one tree per backend, so both can live in one checkout
-bash build_develop.bash -DSS_BACKEND=cuda     # -> build_cuda/
+# Linux
 bash build_develop.bash -DSS_BACKEND=vulkan   # -> build_vulkan/
 # Windows (cmd)
 build_develop.bat -DSS_BACKEND=vulkan         # -> build_vulkan\
@@ -203,9 +226,9 @@ reconstruction and that estimation by re-running itself as a child process, so
 there is no sibling binary to keep next to it. `-DSS_SEPARATE_TOOLS=ON` also builds the old
 per-tool executables.
 
-The dev scripts put each backend in its own tree -- `build_cuda/` or
-`build_vulkan/`, and `build/` on macOS, which has one backend -- so testing
-both needs no reconfiguring and no `-B`. Options:
+The active build tree is `build_vulkan/`, or `build/` on macOS. The legacy
+`build_cuda/` tree and `cuda` option remain available in the source but are not
+part of the supported agent workflow. Options:
 `SS_BACKEND` (`cuda`|`vulkan`), `SS_BUILD_GUI`,
 `SS_BUILD_BACKEND_TESTS`, `SS_DEBUG_SYMBOLS`,
 `SS_BUILD_SFM`, `SS_BUILD_SAM`, `SS_ENABLE_PATENTED`,
@@ -214,8 +237,7 @@ Full matrix and per-platform notes: `docs/build.md`.
 
 **`SS_ENABLE_PATENTED` is OFF by default and should stay that way in
 anything you commit.** It gates `src/video/` -- the H.264 / H.265 / AV1
-bitstream parsers, the VK_KHR_video_decode_* driver and the
-VK_KHR_video_encode_* encoder behind `spirula encode` -- which is the only
+bitstream parsers and the VK_KHR_video_decode_* driver -- which is the only
 patent-encumbered code in the tree. With it off, everything that wanted it
 shells out to ffmpeg instead; no feature disappears, a subprocess appears. See
 the comment on the option in `cmake/SsOptions.cmake` before changing it.
@@ -269,10 +291,8 @@ Rules:
 ## The Vulkan-only subsystems
 
 `src/sfm/`, `src/nn/`, `src/sam/`, `src/aliked/`, `src/loma/`,
-`src/metric3d/`, `src/moge/` and `src/video/` are **not** part of the
-two-backend rule below. They are Vulkan + Slang only, carry their own Vulkan
-context, share nothing with the training engine, and are absent from a CUDA
-build by default (`SS_BUILD_SFM` / `SS_BUILD_SAM` default OFF there).
+`src/metric3d/`, `src/moge/` and `src/video/` are Vulkan + Slang only, carry
+their own Vulkan context and share nothing with the training engine.
 Nothing in them goes through `cmake/sources.txt`.
 
 The layering runs one way and must keep doing so:
@@ -292,15 +312,16 @@ depth/geometry model, goes on top of it unchanged -- so model-specific
 constants, weights formats and pipeline policy stay in `sam/` (or the next
 `src/<model>/`), never in `nn/`.
 
-## The two-backend rule
+## The active-backend rule
 
-Every kernel-level change needs **three** things, or the Vulkan build breaks
-or silently diverges:
+Kernel-level changes must keep the active Vulkan implementation and launcher
+correct and include a relevant behavioral or numerical check on supported
+non-NVIDIA hardware. Use the existing shared Slang math and backend test patterns;
+do not add a duplicate implementation for test convenience.
 
-1. the CUDA implementation (`src/kernels/<family>/<Kernel>.cu` + `_kernel.cuh`),
-2. the Slang implementation (`cuda/slang/vulkan/*.slang`) and its launcher
-   (`src/backend/vulkan/kernels/*.cpp`),
-3. a parity test in `src/backend/tests/` that runs both and compares.
+A matching CUDA implementation, CUDA build, NVIDIA hardware run or fresh
+CUDA-vs-Vulkan reference comparison is **not required and must not be undertaken**
+under the deprecated NVIDIA support policy above.
 
 If the Vulkan side isn't ready, `tools/codegen/generate_vulkan_stubs.py` emits a throwing
 stub so the portable engine still links — that's a deliberate TODO marker, not
@@ -312,14 +333,16 @@ before touching anything under `backend/vulkan/`.
 ## Testing
 
 ```bash
-# native parity tests (CUDA build)
-bash build_develop.bash -DSS_BUILD_BACKEND_TESTS=ON && ./build_cuda/<test_name>
-# the Vulkan build produces the same test binaries unconditionally
+# Build the active backend and run the headless behavioral suite.
+bash build_develop.bash -DSS_BACKEND=vulkan
+cmake -E chdir build_vulkan ctest -L headless --output-on-failure --no-tests=error
 ```
 
 Each `src/backend/tests/*.cpp` becomes an executable of the same name.
-`backend/tests/engine/*` drive the real engine end to end. Details and the
-CUDA-vs-Vulkan reference-dump workflow: `docs/testing.md`.
+`backend/tests/engine/*` drive the real engine end to end. Use relevant
+Vulkan-only checks on supported non-NVIDIA hardware for GPU changes.
+`docs/testing.md` describes the runners and retained parity tooling; its legacy
+CUDA/NVIDIA instructions are superseded by the support policy above.
 
 ## Comments — write fewer, and shorter
 
@@ -596,8 +619,7 @@ no ceremony — do not ask, do not leave a note saying you removed it.
 - **The camera models exist twice, on purpose, and only twice.** The device
   copy is `shaders/projection_utils.slang`; the host copy is
   `data/CameraMath.h`, which the GUI's frustum wireframe and `spirula
-  geometry`'s resampling both call. The wireframe's shape is the web viewer's,
-  in one host copy too: `data/FrustumTemplate.h`. A third copy is a bug waiting to be found
+  geometry`'s resampling both call. A third copy is a bug waiting to be found
   by nobody -- `spirula geometry --check` is what tests the host one, by
   round-tripping an analytic plane through every camera model.
 - **"Is this lens too wide for one pinhole?" is asked in three places and must
@@ -643,23 +665,6 @@ no ceremony — do not ask, do not leave a note saying you removed it.
   vertex color) is written BEFORE the bake, not after. `generate_mesh()` is
   ordered that way on purpose; moving a write past the atlas ships a file whose
   colors no longer match its vertices.
-- **Rotating a splat model means rotating its SH, and the sign convention is
-  where that goes wrong.** `core/ShRotation.h` is the closed form
-  (Ivanic-Ruedenberg), conjugated for the Condon-Shortley phase
-  `shaders/harmonics.slang` carries; without the conjugation bands 1 and 3 are
-  wrong by signs a casual render does not show. `sh_rotation_test` holds it to
-  a sampled fit of that basis and `splat_transform_render` to the engine
-  itself. Touch the basis and both have to follow. docs/notes/sh-rotation.md.
-- **An edited model's placement is applied by the VIEWER until it is saved**
-  (`EditDoc::placement`), so there are two frames on screen: the elements'
-  own, and the saved coordinates the grid, the pivot and the alignment helpers
-  live in. docs/notes/scene-transform.md has the algebra; get a composition
-  order wrong and the model moves the right amount about the wrong point.
-- **The viewport's orthographic view is a pinhole 256x further off with a lens
-  256x longer** (`ViewportPanel`, `kOrthoPull`), because then every renderer,
-  primitive and selection test works unchanged. Anything that takes a
-  RELATIVE depth tolerance has to subtract the pull-back first
-  (`ViewProjection::ortho_back`).
 - **A GUI worker that clears a `busy` flag at the end of its function will
   strand it.** Every early `return set_error(...)` skips the line, and the next
   request is refused forever. Use a scope guard (`SegmentPanel::start_job`).
