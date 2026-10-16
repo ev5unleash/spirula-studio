@@ -248,6 +248,37 @@ below (a). Final selection is the frozen rules above, never this threshold.
 | 3 | Neither is promising, but (b) vs (c) vs (d) names one cause (e.g. refresh closes the gap but not enough → cadence 500; split cost, not refresh → A4 reconciliation stage) | One predeclared variant, then back to this table once. |
 | 4 | Otherwise | Close the tested schedules. Record the numbers. |
 
+Current execution: row 2 matched for both B2 arms; all pilot configurations
+and timing boundaries are unchanged. Required repeats remain incomplete:
+
+| Completed repeat | Complete wall (s) | Mean PSNR | Mean CC PSNR |
+|---|---:|---:|---:|
+| native 2 | 2614.295323 | 18.951683 | 20.639723 |
+| B2 frozen 2 | 1323.576282 | 19.028731 | 20.634828 |
+
+**Blocked by share capacity, not a qualified outcome.** Refresh repeat 2
+started with 30.383 GiB free against a source-derived 4 GiB peak-output
+reserve. Both workers exited 1 while writing the step-18,000 staging PLY;
+the group exited 2 after 1,284.611717 s, with no completed merged endpoint.
+The last committed generation and both retained owner checkpoints are 17,000.
+After failure, share free space was 0.517 GiB; no Spirula processes remained.
+The disappearing space is not attributed: the campaign's entire container
+was 25.787 GiB logical before this attempt, including hardlinked image names.
+
+Preserve `<NET>\runs\b2-ref-2` and `<NET>\logs\step4-b2-ref-2.log`, including
+both scheduler worker logs/results. No attempt was killed or bypassed.
+Do not write new run outputs to this volume until the 10 GiB post-growth
+floor is reachable again. About 25 GiB free covers the current remaining
+repeat batch with the established conservative per-run growth bounds;
+unrelated volume growth must also leave the floor intact.
+
+Next: resolve the storage prerequisite (row 1), rerun refresh repeat 2 from
+the explicit step-10,000 source into a fresh output directory, then complete
+native 3, B2 frozen 3 and B2 refresh 3. Preserve the failed attempt; its
+interrupted/resumed wall is not a qualifying repeat. Compute the frozen
+envelope only after all three native repeats. Steps 5 and 6 are not complete,
+and no selected/experimental-win/closed decision has been made.
+
 ### 5. Settle and document
 
 Scorecard row with medians and spread, the outcome word from the definition
