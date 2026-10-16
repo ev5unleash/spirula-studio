@@ -182,6 +182,14 @@ once `step-000010000.ckpt` is complete (working rule above). Record the
 named train/eval views from the log and the per-step time; every later run
 uses `--resume` of that checkpoint and therefore the same split.
 
+Observed step 2 (build `c1fcd4c0`): the explicit step-10,000 checkpoint has
+1,000,000 splats, full resume state and horizon 30,000; 975 training inputs /
+108 held-out inputs. The launcher exited 42 after saving step 10,001;
+use step 10,000, not that later save. Complete wall 2,700.410222 s;
+trainer elapsed 2,668.792 s / 10,001 completed steps = 266.853 ms/step.
+The explicit checkpoint is 609,594,503 bytes. Named split and run evidence:
+`<NET>\logs\step2-split.log`, `step2-native-src.log`.
+
 ### 3. Pilot: one of each arm, 10,000 → 20,000
 
 Four arms, each started from `SOURCE = <NET>\runs\native-src\step-000010000.ckpt`,
