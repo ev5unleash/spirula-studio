@@ -59,14 +59,15 @@ win.
   question. G1 measured 7× slower; O1 was rejected on its resource bound
   before it was ever timed. Neither is reopened here.
 - **Data:** 4,416 full-resolution JPEGs already extracted from the two `.insv`
-  originals (one per three frames, four camera folders of 1,104). Originals
-  and this corpus are read-only. Paths live in the private selection manifest,
-  never in the repo.
+  originals (one per three frames, four camera folders of 1,104). The corpus
+  was copied to durable share storage and all 4,443 files verified before
+  deleting the Temp copy. Originals and corpus remain read-only. The private
+  handoff beside the corpus records paths; never commit them.
 - **Blocker:** no reconstruction of that corpus. GPU DF bundle adjustment
   reached 878 registered images in 3,600 s; CPU BA reached 1,416 in 1,200 s;
   both were killed by the deadline with empty output.
-- **Machine:** two AMD Radeon AI PRO R9700, 16 threads, no COLMAP, `C:` has
-  ~12 GB free so run outputs go to the network share.
+- **Machine:** two AMD Radeon AI PRO R9700, 16 threads, no COLMAP. Check free
+  space afresh; run outputs belong on the share.
 
 ## Decisions taken 2026-10-16
 
@@ -97,7 +98,8 @@ win.
   run every retained full checkpoint (`--save-only-latest-checkpoint 0`
   keeps one per `--steps-per-save`; size one, multiply). Check before a run.
 - **Never write into** the originals or the 4,416-image corpus directory.
-  The subset is a sibling directory of hardlinks.
+  The subset is a sibling directory of hardlinks on the same share volume;
+  preserve the four `original-{0,1}/cam{0,1}` relative directory names.
 - **One process per GPU**, and SfM (which uses a GPU for features and
   matching even with CPU BA) never overlaps a training run.
 - **Stopping a native run at a step** is done by the launcher, not by
@@ -133,7 +135,11 @@ Corpus layout is `images\original-{0,1}\cam{0,1}\` (1,104 each; the two
 the frame number in the filename). Take the **same frame indices** in all
 four folders (every 4th by sorted name → 276 each), so paired frames stay
 paired; hardlink into `<NET>\ds-1104\images\` with the same four-folder
-layout. The N179 run used no `--rig` and no manifest; its exact arguments:
+layout. The N179 run used no `--rig` and no manifest.
+
+The full-corpus feature/match caches were deleted; extract fresh subset
+features. Corpus and source-preservation archive locations are recorded
+only in the private handoff, outside git. The verified run's commands:
 
 ```bat
 spirula sfm extract <NET>\ds-1104\images -o <NET>\ds-1104\features --features sift ^
