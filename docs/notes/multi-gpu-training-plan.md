@@ -1,4 +1,176 @@
-# Multi-GPU training: autonomous benchmark selection and implementation roadmap
+# Multi-GPU training plan
+
+**Rewritten 2026-10-16 for speed.** Everything under
+[Frozen ledger](#frozen-ledger-2026-09-29--2026-10-16-history-not-instructions)
+is history: its "current authority", budgets, ceilings, admissions and
+approvals are superseded by this section wherever they differ. Do not append
+to it, and do not read it unless a specific measurement is needed.
+
+## Goal and definition of done
+
+Decide whether two-GPU block training beats one GPU on the selected dataset,
+and leave a usable headless path behind. Done means one of:
+
+- **selected:** B2 with live context refresh, three repeats, passes the
+  native-relative six-metric envelope (A1 rule in section 10 below) at step
+  20,000 from a step-10,000 source, with complete wall time and recovery
+  evidence recorded; or
+- **closed:** every candidate has a measured reason it lost, native stays
+  the default.
+
+Either way the code is committed and
+[the scorecard](multi-gpu-training-comparison-20260929.md) carries the numbers.
+
+## What is real today
+
+- **Code** (commit `342f63c3`, the first commit of this work): two-owner block
+  training `src/engine/EngineB1.cpp`, the `spirula train-blocks` group driver
+  `src/app/B1Group.cpp` with the v3 live-refresh contract, `checkpoint/B1Contract`
+  and `B1Merge`, native proofs `g1_native_proof --b1-refresh-check`,
+  `b1_merge`, `b1_merge_contract`. SfM: the zero-rotation autodiff fix in
+  `src/sfm/shaders/common/camera.slang`, DF shaders at `-O0`
+  (`cmake/SsSfm.cmake`), `sfm_bounded_schur_test`.
+- **Old-dataset result:** B2 won a bounded fixed-work comparison (357 s cold /
+  251 s reuse vs 431 s native) but full-view B2 sits 0.60 / 1.05 dB raw/cc
+  PSNR below native. Live refresh is implemented and bounded-validated
+  (`docs/testing.md`, "Experimental live context refresh"); cadence **1,000**
+  is frozen for the experiment. Whether refresh closes the gap is the open
+  question. G1 and O1 are closed as slower.
+- **Data:** 4,416 full-resolution JPEGs already extracted from the two `.insv`
+  originals (one per three frames, four camera folders of 1,104). Originals
+  and this corpus are read-only. Paths live in the private selection manifest,
+  never in the repo.
+- **Blocker:** no reconstruction of that corpus. GPU DF bundle adjustment
+  reached 878 registered images in 3,600 s; CPU BA reached 1,416 in 1,200 s;
+  both were killed by the deadline with empty output.
+- **Machine:** two AMD Radeon AI PRO R9700, 16 threads, no COLMAP, `C:` has
+  ~12 GB free so run outputs go to the network share.
+
+## Decisions taken 2026-10-16
+
+1. **Reconstruct every fourth frame (1,104 views) with CPU bundle adjustment,
+   run to completion.** Same originals, same resolution; only the frame count
+   drops, which also makes every training run after it ~4× cheaper. The
+   1,195-view kitchen dataset already ran this whole pipeline end to end.
+   GPU BA optimization (the "Source19" shared-pair solver) is parked.
+2. **The custody/admission process is retired.** No call ledger, no
+   charge-before-call, no per-artifact SHA receipts, no per-run approval, no
+   private source snapshots. Code changes are commits on this branch; builds
+   are `build_develop.bat -DSS_BACKEND=vulkan`; a run's evidence is its log,
+   its output directory and the commit hash.
+3. The working tree was committed as-is (`342f63c3`) so the tree is the single
+   source of truth.
+
+## Working rules
+
+- **No wall-clock deadlines.** A run is killed only when its log shows no
+  progress for 30 minutes; partial output is kept.
+- **Disk:** keep ≥10 GiB free on every volume you write to. Check before a
+  run, not after.
+- **Never write into** the originals or the 4,416-image corpus directory.
+  The subset is a sibling directory of hardlinks.
+- **One process per GPU**, and SfM (which uses a GPU for features and
+  matching even with CPU BA) never overlaps a training run.
+- **No new candidates, SfM solver work or NVIDIA/CUDA work** unless step 4's
+  table calls for one.
+- **Commit after each step that works**, local only, no push.
+  `bash tools/check_private_paths.sh` before every commit.
+
+## Critical path
+
+Each step starts when the previous one's output exists. Nothing else is on
+the path.
+
+### 0. Build and smoke
+
+`build_develop.bat -DSS_BACKEND=vulkan`, then
+`ctest -L headless --output-on-failure --no-tests=error` in `build_vulkan\`.
+Commit if anything had to change.
+
+### 1. Reconstruct the 1,104-view subset (unattended, hours)
+
+```bat
+:: every 4th file per camera folder by sorted name -> <NET>\ds-1104\images\cam*\ (hardlinks, 276 each)
+spirula sfm auto <NET>\ds-1104\images -o <NET>\ds-1104 --quality medium ^
+    --ba-real cpu --ba-real-coarse cpu <same --rig/--camera-model/--manifest args as the N179 run>
+```
+
+Not `--quiet`: the registration lines are the progress the watchdog reads.
+Output: `<NET>\ds-1104\sparse\0` with all 1,104 images registered, or the
+registered count and the reason it stopped. If fewer than ~95% register,
+look at the log before changing anything.
+
+### 2. Native source checkpoint at step 10,000
+
+```bat
+spirula train --data <NET>\ds-1104 --data-format colmap ^
+    --output-dir-prefix <NET>\runs --output-dir-name native-src ^
+    --num-iterations 30000 --steps-per-save 2000 --save-full-checkpoint 1 ^
+    --save-only-latest-checkpoint 0 --disable-viewer 1 --keep-viewer-alive 0
+```
+
+Run on one GPU. The step-10,000 full checkpoint is the source for every
+arm; its held-out split (default `--train-split-fraction 0.9`) is the
+evaluation set. Record the source hash and the per-step time; that time
+sizes everything below.
+
+### 3. Pilot: one of each arm, 10,000 → 20,000
+
+Views manifest: one `0`/`1` per training image; under `--view-policy full`
+it is provenance only (the kitchen used its visibility partition; an
+alternating assignment is acceptable for the pilot).
+
+```bat
+:: native reference (one GPU); SOURCE = <NET>\runs\native-src\<step-10000 checkpoint>
+set SS_B1_OWNER=all& set SS_B1_STOP_AT_STEP=20000& set SS_WORKER_CONTROL=1
+spirula train --data <NET>\ds-1104 --data-format colmap --resume <SOURCE> ^
+    --output-dir-prefix <NET>\runs --output-dir-name native-1 ^
+    --save-full-checkpoint 1 --disable-viewer 1 --keep-viewer-alive 0
+:: B2 control, frozen context (both GPUs)
+spirula train-blocks --resume <SOURCE> --views <MANIFEST> --devices uuid:A,uuid:B --output <NET>\runs\b2-ctl-1 --updates 10000 --view-policy full
+:: B2 with live refresh (both GPUs)
+spirula train-blocks --resume <SOURCE> --views <MANIFEST> --devices uuid:A,uuid:B --output <NET>\runs\b2-ref-1 --updates 10000 --view-policy full --refresh-cadence 1000
+```
+
+Evaluate all three on the held-out split with the native evaluator
+(`SS_B1_EVAL_PLY=<merged.ply>` for the two merged outputs). Record per-view
+PSNR/SSIM/L1 raw and colour-corrected, and complete wall time including
+merge and readback.
+
+### 4. Decide from the pilot
+
+| Pilot result | Next |
+|---|---|
+| Refresh is within ~0.3 dB of native on mean PSNR **and** its complete wall is below native | Run the remaining two repeats of each arm, apply the A1 envelope, settle. |
+| Refresh beats the frozen control but not native | One predeclared variant only if the pilot data names its cause (cadence 500, or the reconciliation stage from A4); otherwise close. |
+| Refresh is no better than the frozen control, or slower than native | Close B2; native stays the default. Record it. |
+| A crash, refusal or non-finite state | Fix the bug, rerun that arm. Do not route around it. |
+
+### 5. Settle and document
+
+Scorecard row with medians and spread, the selection or closure, release
+limits (recovery, durability, capacity are still unqualified), and a
+one-paragraph summary at the top of
+[the comparison note](multi-gpu-training-comparison-20260929.md). Delete
+scaffolding and diagnostics that nothing uses. Final commit.
+
+## Parked, deliberately
+
+GPU bundle-adjustment optimization (Source19 shared-pair), the 4,416-view
+full corpus, GUI/remote-worker integration, topology growth, O1/G1/G3, and
+any CUDA/NVIDIA validation. None is on the path to the goal; each needs a
+measured reason to reopen.
+
+## What still applies from the ledger
+
+Only the technical contracts: section 3's cross-mode numerical contract,
+section 5's B2 contract and exclusions, and section 10's benchmark
+requirements and A1 quality rule. Their gating language (budgets, ceilings,
+admission, approval) does not.
+
+---
+
+# Frozen ledger (2026-09-29 → 2026-10-16): history, not instructions
 
 ## Approved independent new-producer route
 

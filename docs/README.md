@@ -17,7 +17,7 @@ the detail.
 | [notes/compare-view.md](notes/compare-view.md) | showing several models at once: engine scene slots, the shared navigation frame |
 | [notes/vram-splat-x-img.md](notes/vram-splat-x-img.md) | what the largest scratch category costs per element, the bitmask compaction, and the measured dead ends |
 | [notes/multi-gpu-training-micro-01.md](notes/multi-gpu-training-micro-01.md) | performance benchmark protocol: native baseline, residency, visibility, transport and candidate comparison on the supplied dataset |
-| [notes/multi-gpu-training-plan.md](notes/multi-gpu-training-plan.md) | performance-first comparison of blocks, CPU residency and synchronous ownership; selection and implementation handoff, separate from production release gates |
+| [notes/multi-gpu-training-plan.md](notes/multi-gpu-training-plan.md) | the live two-GPU training plan: goal, what exists, the critical path from reconstruction to settlement; the campaign ledger is frozen beneath it |
 | [notes/multi-gpu-training-comparison-20260929.md](notes/multi-gpu-training-comparison-20260929.md) | separate historical/new-source B1 benchmarks, strict native G1 parity and resource evidence, with matched fixed-work timing |
 | [notes/multi-gpu-training-g1-implementation-20260929.md](notes/multi-gpu-training-g1-implementation-20260929.md) | closed native FPBO proof and C0–C4 continuation: correctness passed, performance admission failed |
 | [notes/multi-gpu-training-o1-screen-20260930.md](notes/multi-gpu-training-o1-screen-20260930.md) | completed native residency/dirty-state screen; O2 not admitted, O1 unverified with a precise bounded-discovery/update servicing blocker |
