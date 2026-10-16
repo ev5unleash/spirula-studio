@@ -221,6 +221,20 @@ Evaluate all four on the held-out split with the native evaluator
 (`SS_B1_EVAL_PLY=<merged.ply>` for (b)–(d), clean environment). Record
 per-view PSNR/SSIM/L1 raw and colour-corrected and the complete wall.
 
+Observed pilots (build `ce9ab00e`, endpoint 20,000, 108 identical named
+held-out views, all six metric arrays finite; evaluation untimed):
+
+| Arm | Complete wall (s) | Mean PSNR | Mean CC PSNR |
+|---|---:|---:|---:|
+| (a) ordinary native | 2616.195639 | 18.974123 | 20.649956 |
+| (b) all-owned frozen causal control | 1337.948733 | 19.118900 | 20.775652 |
+| (c) B2 frozen | 1335.371426 | 19.026793 | 20.635204 |
+| (d) B2 refresh 1000 | 1785.884423 | 18.919929 | 20.386606 |
+
+Evidence: `<NET>\logs\step3-*.log`, `step3-pilot-summary.json`, and
+`<NET>\runs\{native-1,frozen-1,b2-ctl-1,b2-ref-1}` plus each `-eval` output.
+Both B2 arms pass only the screening heuristic. No final qualification yet.
+
 ### 4. Decide from the pilot
 
 In order; the first row that applies wins. "Promising" is a screening
