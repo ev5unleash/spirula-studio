@@ -9,17 +9,38 @@ to it, and do not read it unless a specific measurement is needed.
 ## Goal and definition of done
 
 Decide whether two-GPU block training beats one GPU on the selected dataset,
-and leave a usable headless path behind. Done means one of:
+and leave a usable headless path behind. Done means exactly one of:
 
-- **selected:** B2 with live context refresh, three repeats, passes the
-  native-relative six-metric envelope (A1 rule in section 10 below) at step
-  20,000 from a step-10,000 source, with complete wall time and recovery
-  evidence recorded; or
-- **closed:** every candidate has a measured reason it lost, native stays
-  the default.
+- **selected:** a B2 schedule, three repeats, passes the quality rule and the
+  timing rule below against ordinary native at step 20,000 from a
+  step-10,000 source, **and** passes the recovery check (step 6); or
+- **experimental win:** same, but step 6 was not run or did not pass. Native
+  stays the default; the note says what was and was not shown; or
+- **closed:** no qualifying winner among the tested B2 schedules, each with a
+  measured reason. Native stays the default.
 
 Either way the code is committed and
 [the scorecard](multi-gpu-training-comparison-20260929.md) carries the numbers.
+
+### Quality rule (A1, frozen)
+
+Six metrics: PSNR, SSIM, L1, each raw and colour-corrected, on the held-out
+split. Three native repeats define an envelope; for every metric the
+candidate's median-of-run means and median-of-run medians must be no worse
+than the least favourable native repeat, and for every named view the
+candidate's median must be no worse than that view's least favourable native
+repeat. Every failure is reported; one metric never compensates for another.
+Compute the envelope from these runs, never from older ones, and never widen
+it after a failure. Same endpoint (step 20,000) for every run and metric.
+
+### Timing rule (A5, frozen)
+
+Complete wall from launch to published output: process start, checkpoint
+load, training, every checkpoint and refresh, merge and readback. Evaluation
+is outside the boundary for every arm. A speed win needs a lower median and
+non-overlapping observed ranges over three repeats; if the ranges overlap,
+one further batch of three, then all six count. Otherwise there is no speed
+win.
 
 ## What is real today
 
@@ -35,7 +56,8 @@ Either way the code is committed and
   PSNR below native. Live refresh is implemented and bounded-validated
   (`docs/testing.md`, "Experimental live context refresh"); cadence **1,000**
   is frozen for the experiment. Whether refresh closes the gap is the open
-  question. G1 and O1 are closed as slower.
+  question. G1 measured 7× slower; O1 was rejected on its resource bound
+  before it was ever timed. Neither is reopened here.
 - **Data:** 4,416 full-resolution JPEGs already extracted from the two `.insv`
   originals (one per three frames, four camera folders of 1,104). Originals
   and this corpus are read-only. Paths live in the private selection manifest,
@@ -50,9 +72,10 @@ Either way the code is committed and
 
 1. **Reconstruct every fourth frame (1,104 views) with CPU bundle adjustment,
    run to completion.** Same originals, same resolution; only the frame count
-   drops, which also makes every training run after it ~4× cheaper. The
-   1,195-view kitchen dataset already ran this whole pipeline end to end.
-   GPU BA optimization (the "Source19" shared-pair solver) is parked.
+   drops. Training is fixed-step, so this does not make a run 4× cheaper; it
+   makes reconstruction, caching and evaluation cheaper. The 1,195-view
+   kitchen dataset already ran this whole pipeline end to end. GPU BA
+   optimization (the "Source19" shared-pair solver) is parked.
 2. **The custody/admission process is retired.** No call ledger, no
    charge-before-call, no per-artifact SHA receipts, no per-run approval, no
    private source snapshots. Code changes are commits on this branch; builds
@@ -63,14 +86,30 @@ Either way the code is committed and
 
 ## Working rules
 
-- **No wall-clock deadlines.** A run is killed only when its log shows no
-  progress for 30 minutes; partial output is kept.
-- **Disk:** keep ≥10 GiB free on every volume you write to. Check before a
-  run, not after.
+- **No wall-clock deadlines.** A run is killed only when it demonstrably
+  stops progressing, and the judge is stage-aware: registration prints a
+  line per image, but CPU bundle adjustment is silent for its whole duration
+  and reports afterwards, so silence during BA is not a stall. Watch the
+  process (CPU time still rising) rather than the log there. Mapping writes
+  `sparse/` only at the end, so a killed mapping run has no partial model.
+- **Disk:** keep ≥10 GiB free on every volume you write to *after* the run's
+  own growth: features + matches for 1,104 views (~1 GB), and per training
+  run every retained full checkpoint (`--save-only-latest-checkpoint 0`
+  keeps one per `--steps-per-save`; size one, multiply). Check before a run.
 - **Never write into** the originals or the 4,416-image corpus directory.
   The subset is a sibling directory of hardlinks.
 - **One process per GPU**, and SfM (which uses a GPU for features and
   matching even with CPU BA) never overlaps a training run.
+- **Stopping a native run at a step** is done by the launcher, not by
+  shortening `--num-iterations` (the schedule horizon stays 30,000). Set
+  `SS_WORKER_CONTROL=1` **only** when the process's stdin is a pipe the
+  launcher holds open: on Windows the listener treats a non-pipe or closed
+  stdin as an immediate stop-and-save. Write one byte to the pipe when the
+  wanted `step-NNNNNNNNN.ckpt\state.json` exists; the stop-save lands in a
+  later directory, use the explicit one. `SS_B1_STOP_AT_STEP` works only
+  under `SS_B1_OWNER`.
+- **Evaluate in a clean environment.** `SS_B1_EVAL_PLY` refuses while
+  `SS_B1_OWNER` is set; never leave B1 variables exported between arms.
 - **No new candidates, SfM solver work or NVIDIA/CUDA work** unless step 4's
   table calls for one.
 - **Commit after each step that works**, local only, no push.
@@ -89,70 +128,107 @@ Commit if anything had to change.
 
 ### 1. Reconstruct the 1,104-view subset (unattended, hours)
 
+Corpus layout is `images\original-{0,1}\cam{0,1}\` (1,104 each; the two
+`cam` folders of one `original` are the two lenses of one frame and share
+the frame number in the filename). Take the **same frame indices** in all
+four folders (every 4th by sorted name → 276 each), so paired frames stay
+paired; hardlink into `<NET>\ds-1104\images\` with the same four-folder
+layout. The N179 run used no `--rig` and no manifest; its exact arguments:
+
 ```bat
-:: every 4th file per camera folder by sorted name -> <NET>\ds-1104\images\cam*\ (hardlinks, 276 each)
-spirula sfm auto <NET>\ds-1104\images -o <NET>\ds-1104 --quality medium ^
-    --ba-real cpu --ba-real-coarse cpu <same --rig/--camera-model/--manifest args as the N179 run>
+spirula sfm extract <NET>\ds-1104\images -o <NET>\ds-1104\features --features sift ^
+    --max-image-size 1600 --max-features 4096 --decode-threads 4 --decode-budget 1024 --device uuid:A
+spirula sfm match <NET>\ds-1104\features -o <NET>\ds-1104\matches.bin --pairs prefilter ^
+    --prefilter-neighbors 24 --matcher bruteforce --camera-mode folder ^
+    --camera-model thin-prism-fisheye --device uuid:A
+spirula sfm map <NET>\ds-1104\matches.bin <NET>\ds-1104\features -o <NET>\ds-1104\sparse ^
+    --images <NET>\ds-1104\images --device uuid:A --ba-real cpu --ba-real-coarse cpu
 ```
 
-Not `--quiet`: the registration lines are the progress the watchdog reads.
-Output: `<NET>\ds-1104\sparse\0` with all 1,104 images registered, or the
-registered count and the reason it stopped. If fewer than ~95% register,
-look at the log before changing anything.
+(`spirula sfm --help` is authoritative if a flag has moved.) Not `--quiet`.
+Output: `<NET>\ds-1104\sparse\0`. The registration count that matters is
+the component training will use, not the sum over disconnected models. If
+fewer than ~95% of 1,104 register in it, read the log before changing
+anything.
 
 ### 2. Native source checkpoint at step 10,000
 
 ```bat
 spirula train --data <NET>\ds-1104 --data-format colmap ^
     --output-dir-prefix <NET>\runs --output-dir-name native-src ^
+    --eval-mode fraction --train-split-fraction 0.9 ^
     --num-iterations 30000 --steps-per-save 2000 --save-full-checkpoint 1 ^
     --save-only-latest-checkpoint 0 --disable-viewer 1 --keep-viewer-alive 0
 ```
 
-Run on one GPU. The step-10,000 full checkpoint is the source for every
-arm; its held-out split (default `--train-split-fraction 0.9`) is the
-evaluation set. Record the source hash and the per-step time; that time
-sizes everything below.
+`--eval-mode fraction` is required: the default `all` trains on every image
+and the evaluator returns without evaluating. One GPU; the launcher stops it
+once `step-000010000.ckpt` is complete (working rule above). Record the
+named train/eval views from the log and the per-step time; every later run
+uses `--resume` of that checkpoint and therefore the same split.
 
 ### 3. Pilot: one of each arm, 10,000 → 20,000
 
-Views manifest: one `0`/`1` per training image; under `--view-policy full`
-it is provenance only (the kitchen used its visibility partition; an
-alternating assignment is acceptable for the pilot).
+Four arms, each started from `SOURCE = <NET>\runs\native-src\step-000010000.ckpt`,
+each timed by the timing rule. Views manifest: one `0`/`1` per training
+image; under `--view-policy full` it is provenance only (alternating is
+acceptable for the pilot).
 
 ```bat
-:: native reference (one GPU); SOURCE = <NET>\runs\native-src\<step-10000 checkpoint>
-set SS_B1_OWNER=all& set SS_B1_STOP_AT_STEP=20000& set SS_WORKER_CONTROL=1
+:: (a) ordinary native continuation, one GPU; launcher stops it at step-000020000.ckpt.
+::     This is the baseline the quality and timing rules compare against.
 spirula train --data <NET>\ds-1104 --data-format colmap --resume <SOURCE> ^
     --output-dir-prefix <NET>\runs --output-dir-name native-1 ^
     --save-full-checkpoint 1 --disable-viewer 1 --keep-viewer-alive 0
-:: B2 control, frozen context (both GPUs)
+:: (b) all-owned frozen-state control, one GPU. Same code path as B2 with the
+::     split removed; densification and shared appearance are frozen, so it is
+::     a causal control, NOT the baseline. No SS_WORKER_CONTROL here.
+set SS_B1_OWNER=all& set SS_B1_STOP_AT_STEP=20000
+spirula train --data <NET>\ds-1104 --data-format colmap --resume <SOURCE> ^
+    --output-dir-prefix <NET>\runs --output-dir-name frozen-1 ^
+    --save-full-checkpoint 1 --disable-viewer 1 --keep-viewer-alive 0
+set SS_B1_OWNER=& set SS_B1_STOP_AT_STEP=
+:: (c) B2, frozen context (both GPUs)
 spirula train-blocks --resume <SOURCE> --views <MANIFEST> --devices uuid:A,uuid:B --output <NET>\runs\b2-ctl-1 --updates 10000 --view-policy full
-:: B2 with live refresh (both GPUs)
+:: (d) B2 with live refresh (both GPUs)
 spirula train-blocks --resume <SOURCE> --views <MANIFEST> --devices uuid:A,uuid:B --output <NET>\runs\b2-ref-1 --updates 10000 --view-policy full --refresh-cadence 1000
 ```
 
-Evaluate all three on the held-out split with the native evaluator
-(`SS_B1_EVAL_PLY=<merged.ply>` for the two merged outputs). Record per-view
-PSNR/SSIM/L1 raw and colour-corrected, and complete wall time including
-merge and readback.
+Evaluate all four on the held-out split with the native evaluator
+(`SS_B1_EVAL_PLY=<merged.ply>` for (b)–(d), clean environment). Record
+per-view PSNR/SSIM/L1 raw and colour-corrected and the complete wall.
 
 ### 4. Decide from the pilot
 
-| Pilot result | Next |
-|---|---|
-| Refresh is within ~0.3 dB of native on mean PSNR **and** its complete wall is below native | Run the remaining two repeats of each arm, apply the A1 envelope, settle. |
-| Refresh beats the frozen control but not native | One predeclared variant only if the pilot data names its cause (cadence 500, or the reconciliation stage from A4); otherwise close. |
-| Refresh is no better than the frozen control, or slower than native | Close B2; native stays the default. Record it. |
-| A crash, refusal or non-finite state | Fix the bug, rerun that arm. Do not route around it. |
+In order; the first row that applies wins. "Promising" is a screening
+heuristic only: mean raw PSNR within 0.3 dB of (a) **and** complete wall
+below (a). Final selection is the frozen rules above, never this threshold.
+
+| # | Pilot result | Next |
+|---|---|---|
+| 1 | A crash, refusal or non-finite state | Fix the bug, rerun that arm. Do not route around it. |
+| 2 | (c) or (d) is promising | Two more repeats of that arm and of (a); apply both rules. The pilot counts as a repeat only if nothing in its configuration or timing boundary changed. |
+| 3 | Neither is promising, but (b) vs (c) vs (d) names one cause (e.g. refresh closes the gap but not enough → cadence 500; split cost, not refresh → A4 reconciliation stage) | One predeclared variant, then back to this table once. |
+| 4 | Otherwise | Close the tested schedules. Record the numbers. |
 
 ### 5. Settle and document
 
-Scorecard row with medians and spread, the selection or closure, release
-limits (recovery, durability, capacity are still unqualified), and a
+Scorecard row with medians and spread, the outcome word from the definition
+of done, release limits (durability and capacity are unqualified), and a
 one-paragraph summary at the top of
 [the comparison note](multi-gpu-training-comparison-20260929.md). Delete
-scaffolding and diagnostics that nothing uses. Final commit.
+scaffolding and diagnostics that nothing uses. Commit.
+
+### 6. Recovery check — finalist only, untimed
+
+Only if step 4 produced a candidate that passed both rules. The A5 recovery
+procedure in the ledger, unchanged: from the same source, a late STOP/resume,
+one killed worker, and for refresh a failure immediately before and
+immediately after a generation commit, each compared with the uninterrupted
+run's exposure lineage, owner coverage and generation lineage. The known open
+failure in `docs/testing.md` ("Experimental live context refresh") is the
+bar; short smokes do not clear it. Pass → **selected**; otherwise
+**experimental win**, with the failure recorded. Final commit.
 
 ## Parked, deliberately
 
@@ -164,9 +240,10 @@ measured reason to reopen.
 ## What still applies from the ledger
 
 Only the technical contracts: section 3's cross-mode numerical contract,
-section 5's B2 contract and exclusions, and section 10's benchmark
-requirements and A1 quality rule. Their gating language (budgets, ceilings,
-admission, approval) does not.
+section 5's B2 contract and exclusions, and A5's recovery procedure (quoted
+by step 6). The quality and timing rules are restated above and the live
+copy wins. Gating language (budgets, ceilings, admission, approval) does not
+apply.
 
 ---
 
