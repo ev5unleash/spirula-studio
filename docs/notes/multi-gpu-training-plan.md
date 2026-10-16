@@ -106,10 +106,13 @@ win.
   shortening `--num-iterations` (the schedule horizon stays 30,000). Set
   `SS_WORKER_CONTROL=1` **only** when the process's stdin is a pipe the
   launcher holds open: on Windows the listener treats a non-pipe or closed
-  stdin as an immediate stop-and-save. Write one byte to the pipe when the
-  wanted `step-NNNNNNNNN.ckpt\state.json` exists; the stop-save lands in a
-  later directory, use the explicit one. `SS_B1_STOP_AT_STEP` works only
-  under `SS_B1_OWNER`.
+  stdin as an immediate stop-and-save. The checkpoint is validated before
+  its final directory rename; `state.json` is inside `state.tar`, not loose.
+  `reference/python/stop_at_checkpoint.py` waits for that publication, checks
+  the embedded step/full-resume marker, writes one byte, and waits with stdin
+  open. It propagates the child's exit code (42 for saved stop) and prints
+  complete wall. The stop-save may land later; use the explicit target.
+  `SS_B1_STOP_AT_STEP` works only under `SS_B1_OWNER`.
 - **Evaluate in a clean environment.** `SS_B1_EVAL_PLY` refuses while
   `SS_B1_OWNER` is set; never leave B1 variables exported between arms.
 - **No new candidates, SfM solver work or NVIDIA/CUDA work** unless step 4's
@@ -130,12 +133,12 @@ Commit if anything had to change.
 
 ### 1. Reconstruct the 1,104-view subset (unattended, hours)
 
-Corpus layout is `images\original-{0,1}\cam{0,1}\` (1,104 each; the two
-`cam` folders of one `original` are the two lenses of one frame and share
-the frame number in the filename). Take the **same frame indices** in all
-four folders (every 4th by sorted name → 276 each), so paired frames stay
-paired; hardlink into `<NET>\ds-1104\images\` with the same four-folder
-layout. The N179 run used no `--rig` and no manifest.
+Corpus layout is `images\original-{0,1}\cam{0,1}\` (1,104 each).
+The approved selection is **sorted positions 0,4,8,... in each folder**:
+276 each, 1,104 total. Sharpness-selected source-frame numbers differ across
+the folders; only 121 filenames are common to all four, so this selection
+does not claim exact-frame pairing. Hardlink into `<NET>\ds-1104\images\`
+with the same four-folder layout. Use no `--rig` and no manifest.
 
 The full-corpus feature/match caches were deleted; extract fresh subset
 features. Corpus and source-preservation archive locations are recorded
@@ -160,7 +163,8 @@ anything.
 ### 2. Native source checkpoint at step 10,000
 
 ```bat
-spirula train --data <NET>\ds-1104 --data-format colmap ^
+python reference/python/stop_at_checkpoint.py <NET>\runs\native-src 10000 ^
+    spirula train --data <NET>\ds-1104 --data-format colmap ^
     --output-dir-prefix <NET>\runs --output-dir-name native-src ^
     --eval-mode fraction --train-split-fraction 0.9 ^
     --num-iterations 30000 --steps-per-save 2000 --save-full-checkpoint 1 ^
