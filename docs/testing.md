@@ -50,6 +50,9 @@ also rejects invalid block-owner payloads and
 unequal, incomplete or stale group completion. These are headless contract
 checks, not supported-device training recovery proof.
 
+On Windows, `subprocess_test` cancels the nested helper after its `READY`
+output, so the cancellation check does not depend on PowerShell startup speed.
+
 On failure, read `Testing/Temporary/LastTest.log` and the printed directory under
 `Testing/Artifacts/<test>-<unique-id>/`: it retains `process.log`, requests,
 results, isolated application state and relevant outputs. Successful roots are
