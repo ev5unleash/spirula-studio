@@ -15,6 +15,7 @@
 #include "data/CameraMath.h"
 #include "data/ImageProbe.h"
 #include "data/Knn.h"
+#include "data/JsonWrite.h"
 #include "sfm/core/Exif.h"
 #include "core/Env.h"
 #include "engine/EngineDiagnostic.h"
@@ -720,12 +721,10 @@ void TrainerSession::load_dataset() {
     }
     if (!cfg.auto_scale_poses) ds.train_frame_scale = 1.0f;
 
-    // POST-split camera bake (identity when no warp flag applies).
     post = bake_post_split(
         ds, cfg.warp_to_pinhole, cfg.warp_spherical_to_pinhole,
         resolve_face_fit(cfg), cfg.warp_back_face);
 
-    // Warp-path guards, plus: a modality no weight reads is not loaded at all.
     has_mask   = !ds.mask_filenames.empty()   && cfg.load_masks;
     has_depth  = !ds.depth_filenames.empty()  && cfg.load_depths &&
                  cfg.depth_supervision_weight > 0.0f;
@@ -742,6 +741,12 @@ void TrainerSession::load_dataset() {
     log(lfmt(lmsg::parsed_dataset,
              {(long long)ds.num_cameras, (long long)post.n_post,
               (long long)ds.points.num(), scale}));
+    const fs::path image_root = fs::absolute(fs::path(cfg.data) / cfg.image_dir).lexically_normal();
+    for (int32_t i : ds.train_indices) {
+        const std::string name = fs::absolute(ds.image_filenames[(size_t)i])
+            .lexically_normal().lexically_relative(image_root).generic_string();
+        std::printf("TRAIN_VIEW %s\n", json_quote(name).c_str());
+    }
 }
 
 // Pre-flight GPU check. A binary compiled by a newer CUDA toolkit than the
@@ -1881,11 +1886,7 @@ void TrainerSession::eval() {
 
     log(lfmt(lmsg::eval_views, {(long long)epost.n_post}));
 
-    // Rendering is serial (one process-global engine), but scoring a view --
-    // colour correction, the metrics, and the PNG encode -- is pure host work
-    // that depends on nothing else, so it runs on a pool while the GPU gets on
-    // with the next view. Results are written into a slot indexed by view, so
-    // the per-image lists in metrics.json do not depend on who finished first.
+    // Scoring overlaps rendering; slots preserve view identity across workers.
     struct ViewJob {
         int64_t index = 0;
         int H = 0, W = 0, C = 0;
@@ -1896,10 +1897,8 @@ void TrainerSession::eval() {
         float l1 = 0, psnr = 0, ssim = 0, cc_l1 = 0, cc_psnr = 0, cc_ssim = 0;
     };
 
-    // Per worker: a GT + a render + the colour-corrected copy (3 x H*W*C
-    // floats) plus SSIM's eleven H*W double buffers. ~725 MB at 4K, so the
-    // pool is capped by a memory budget as well as by cores -- an eval run
-    // must not be the thing that OOMs the machine.
+    // GT, render, colour correction and SSIM scratch cost ~725 MB per 4K view.
+    // Cap the pool by memory as well as cores.
     const int64_t view_pixels = eds.widths.empty()
         ? (int64_t)1 << 20
         : (int64_t)eds.widths[0] * eds.heights[0];
@@ -1998,13 +1997,13 @@ void TrainerSession::eval() {
         {
             std::lock_guard<std::mutex> lk(engine_mutex);
             int n_view = engine_eval_forward(
-                cfg.primitive, sh_deg, cfg.packed,
-                (m0_train_trace || spirula::env("B1_EVAL_PLY")) ? (int)i : -1);
-            if (n_view == 0) break;
+                cfg.primitive, sh_deg, cfg.packed, (int)i);
+            if (n_view != epost.K_per_camera[(size_t)i]) break;
             if (m0_train_trace) continue;
             auto shape = engine_get_render_rgb_shape();
             B = std::get<0>(shape); H = std::get<1>(shape);
             W = std::get<2>(shape); Cc = std::get<3>(shape);
+            if (B != epost.K_per_camera[(size_t)i]) break;
             const int64_t npx = B * H * W * Cc;
             render.resize((size_t)npx);
             gt.resize((size_t)npx);
@@ -2016,7 +2015,6 @@ void TrainerSession::eval() {
                 TorchTensorView{(uint64_t)(uintptr_t)gt.data(), 4, {B, H, W, Cc}});
         }
 
-        // Per POST-split view inside the batch (K faces of one input image).
         const int64_t view_px = H * W * Cc;
         for (int64_t v = 0; v < B; v++) {
             ViewJob job;
@@ -2043,6 +2041,11 @@ void TrainerSession::eval() {
     qcv.notify_all();
     for (auto& t : workers) t.join();
     if (worker_error) std::rethrow_exception(worker_error);
+    if (!m0_train_trace &&
+        (next_slot != epost.n_post || scores.size() != (size_t)epost.n_post ||
+         std::any_of(scores.begin(), scores.end(),
+                     [](const ViewScore& s) { return !s.filled; })))
+        throw std::runtime_error("Evaluation did not cover every held-out view");
 
     std::map<std::string, std::vector<float>> per_image;
     for (const ViewScore& s : scores) {
@@ -2068,8 +2071,6 @@ void TrainerSession::eval() {
         log("  " + k + ": " + std::to_string(avg[k]));
     }
 
-    // metrics.json: per-image lists plus avg_* scalars, the shape
-    // reference/python/benchmark.py reads back.
     std::ofstream mf((out_dir / "metrics.json").string());
     if (!mf) throw std::runtime_error("cannot write metrics.json");
     mf << "{\n";
@@ -2084,8 +2085,20 @@ void TrainerSession::eval() {
     for (const auto& [k, v] : avg)
         mf << ",\n    \"avg_" << k << "\": " << v;
     mf << ",\n    \"num_eval_images\": " << per_image.begin()->second.size();
-    // Per-run training stats: a benchmark launches each scene as its own
-    // process, so metrics.json is the only place it can read these.
+    mf << ",\n    \"eval_views\": [";
+    const fs::path image_root = fs::absolute(fs::path(cfg.data) / cfg.image_dir).lexically_normal();
+    for (int64_t i = 0; i < eds.num_cameras; ++i) {
+        const std::string name = json_quote(fs::absolute(eds.image_filenames[(size_t)i])
+            .lexically_normal().lexically_relative(image_root).generic_string());
+        for (int32_t v = 0; v < epost.K_per_camera[(size_t)i]; ++v) {
+            const int32_t slot = epost.post_offsets[(size_t)i] + v;
+            const int32_t face = epost.post_faces[(size_t)slot];
+            mf << (slot ? ", " : "") << "{\"image\": " << name
+               << ", \"face\": " << face << "}";
+            std::printf("EVAL_VIEW {\"image\": %s, \"face\": %d}\n", name.c_str(), face);
+        }
+    }
+    mf << "]";
     mf << ",\n    \"training_time\": " << training_time_s;
     mf << ",\n    \"engine_vram\": " << engine_vram_mb;
     mf << "\n}\n";

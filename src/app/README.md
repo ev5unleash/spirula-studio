@@ -372,6 +372,17 @@ eval pairs: l1 and psnr agree to 1e-7, ssim to 1e-5. `color_correct` is closer
 to a float64 reference than the torch implementation it replaces (3e-8 vs
 1.4e-3 relative) — torch accumulates the normal equations in float32.
 
+Evaluation visits inputs by explicit index in parser order, then each input's
+uniform faces in canonical order. `metrics.json` includes `eval_views`: entry
+`s` identifies element `s` of all six metric arrays and PNG suffix `NNNNN`.
+Each entry has an `image` path relative to the configured image directory and
+a canonical `face` (`-1` for unsplit inputs). Nested paths remain distinct.
+Incomplete post-split coverage fails instead of publishing partial metrics.
+
+The machine-readable log records `TRAIN_VIEW <JSON string>` identify actual
+training inputs; `EVAL_VIEW <JSON object>` records match `eval_views`. These
+identifiers and JSON field names are language-independent.
+
 Two things worth knowing about the SSIM: torchmetrics reflect-pads and
 averages over the **full** H×W, cropping the border back off only on its
 `return_contrast_sensitivity` path. A valid-interior SSIM is ~0.5% different,
