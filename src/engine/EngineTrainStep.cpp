@@ -8,6 +8,7 @@
 #include "core/Env.h"
 #include "engine/EngineCommon.h"
 #include "engine/EngineState.h"
+#include "engine/EngineDiagnostic.h"
 
 #include <cstdio>
 #include <map>
@@ -154,6 +155,7 @@ static std::map<std::string, float> _engine_step_fwd_bwd_only(
         if (bg_enabled)  engine_bilagrid_forward(bilagrid_cam_indices);
         if (ppisp_after) engine_ppisp_forward(bilagrid_cam_indices);
     }
+    engine_diagnostic_stage("forward", step);
 
     auto losses = engine_compute_loss_backward(
         step, cfg.loss.weights, cfg.loss.w_ssim,
@@ -170,6 +172,7 @@ static std::map<std::string, float> _engine_step_fwd_bwd_only(
         cfg.loss.overexposure_reg_weight,
         cfg.loss.color_shift_reg_weight,
         cfg.loss.color_shift_reg_beta);
+    engine_diagnostic_stage("backward", step);
     engine_bin_tile_observe(std::chrono::duration<double>(
         std::chrono::steady_clock::now() - step_t0).count());
     return losses;
@@ -186,14 +189,17 @@ static void _engine_step_optim_and_densify(
     const EngineStepConfig& cfg,
     std::map<std::string, float>& loss_dict
 ) {
-    engine_optim_step(step, cfg.optim);
+    if (!engine_diagnostic_probe_optim(step, cfg))
+        engine_optim_step(step, cfg.optim);
 
-    if (engine().background.enabled) {
+    int num_added = 0;
+    if (engine().b1.owner < 0 && engine().background.enabled) {
         engine_background_optim_step(step, cfg.background);
     }
 
-    if (engine().bilagrid_rgb.enabled || engine().bilagrid_depth.enabled ||
-        engine().bilagrid_normal.enabled) {
+    if (engine().b1.owner < 0 &&
+        (engine().bilagrid_rgb.enabled || engine().bilagrid_depth.enabled ||
+         engine().bilagrid_normal.enabled)) {
         engine_bilagrid_optim_step(step, cfg.bilagrid);
 
         float* tv_buf = DevicePool::global().acquire<float>(PoolSlot::EngBgTvReadout, 3);
@@ -208,7 +214,7 @@ static void _engine_step_optim_and_densify(
         tv_readout.issue(tv_buf);
     }
 
-    if (engine().ppisp.enabled) {
+    if (engine().b1.owner < 0 && engine().ppisp.enabled) {
         engine_ppisp_optim_step(step, cfg.ppisp);
 
         float* losses_buf = _engine_ppisp_reg_loss_into(cfg.ppisp.reg_weights,
@@ -226,7 +232,8 @@ static void _engine_step_optim_and_densify(
         ppisp_reg_readout.issue(losses_buf);
     }
 
-    int num_added = engine_densify_step(step, max_steps, cfg.densify);
+    if (engine().b1.owner < 0)
+        num_added = engine_densify_step(step, max_steps, cfg.densify);
 
     loss_dict["num_added"] = (float)num_added;
     loss_dict["cur_num_splats"] = (float)engine().cur_num_splats;

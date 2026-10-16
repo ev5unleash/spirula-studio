@@ -4,6 +4,7 @@
 #include "engine/EngineCommon.h"
 #include "engine/EngineInternal.h"
 #include "engine/EngineState.h"
+#include "engine/EngineDiagnostic.h"
 
 #include "kernels/bilagrid/BilagridBindings.h"
 
@@ -150,6 +151,18 @@ void _engine_ppisp_backward_hook(TorchTensorView v_render_rgb) {
     DeviceTensor3D<float3> in_img(pre_tv);
     DeviceTensor3D<float3> v_out_img(v_render_rgb);
     DeviceTensor3D<float3> v_in_img(v_render_rgb);  // overwrite in place
+    auto param_grads = _ppisp_params_full_tv(engine().ppisp.grads);
+#if defined(SS_BACKEND_VULKAN)
+    if (engine().b1.owner >= 0) std::get<0>(param_grads) = 0;
+#endif
+    const auto& probe = engine_diagnostic_ppisp_probe();
+    if (probe) probe(std::get<0>(pre_tv),
+        (uint64_t)engine().ppisp.params.data_ptr(),
+        (uint64_t)engine().camera.intrins.data_ptr(),
+        std::get<0>(_ppisp_cam_indices_tv()), std::get<0>(v_render_rgb),
+        C_batch, H, W, (int)engine().ppisp.params.size<0>(),
+        (int)engine().ppisp.params.size<1>(), (float)W, (float)H,
+        engine().ppisp.param_type);
 
     ppisp_backward(
         in_img,
@@ -160,7 +173,7 @@ void _engine_ppisp_backward_hook(TorchTensorView v_render_rgb) {
         engine().ppisp.param_type,
         _ppisp_cam_indices_tv(),
         v_in_img,
-        _ppisp_params_full_tv(engine().ppisp.grads)
+        param_grads
     );
 }
 

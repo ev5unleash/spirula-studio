@@ -4,6 +4,7 @@
 #include "app/Tools.h"
 #include "app/WorkerRequest.h"
 #include "app/TextFile.h"
+#include "app/B1Group.h"
 #include "core/Env.h"
 
 #ifdef SS_TOOL_SFM
@@ -246,6 +247,8 @@ int run_tool_phase(const app::worker::Request& r, app::worker::Result& result) {
     const int argc = (int)argv.size() - 1;
     if (r.phase == "train") {
 #ifdef SS_TOOL_TRAIN
+        if (!r.payload.empty() && r.payload != "{}")
+            app::configure_b1_worker(app::parse_b1_worker_payload(r.payload));
 #ifdef _WIN32
         _putenv_s("SS_WORKER_CONTROL", "1");
 #else

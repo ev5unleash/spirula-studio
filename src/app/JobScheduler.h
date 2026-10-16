@@ -134,7 +134,8 @@ public:
     // exe_path is this executable's own path; the worker is spawned as
     // `<exe_path> worker --request <file>` so a PATH lookup cannot reach a
     // different build.
-    explicit JobScheduler(std::string config_dir, std::string exe_path);
+    explicit JobScheduler(std::string config_dir, std::string exe_path,
+                          std::string admission_lock_dir = {});
     ~JobScheduler();
 
     JobScheduler(const JobScheduler&) = delete;

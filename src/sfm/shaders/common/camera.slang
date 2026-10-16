@@ -32,11 +32,22 @@ interface ICameraModel : IDifferentiable {
 
 [Differentiable]
 RVec3 angleAxisRotate(RVec3 axis, RVec3 p) {
-    Real theta = length3(axis);
-    RVec3 a = axis * (Real(1.0) / (theta + Real(1e-15)));
-    RVec2 sc = rsincos(theta);
-    Real st = sc.x, ct = sc.y;
-    return p * ct + cross3(a, p) * st + a * (dot3(a, p) * (Real(1.0) - ct));
+    Real norm2 = dot3(axis, axis);
+#if defined(REAL_DF)
+    bool isZero = norm2.hi == 0.0f && norm2.lo == 0.0f;
+#else
+    bool isZero = norm2 == Real(0.0);
+#endif
+    // The analytic first-order limit avoids differentiating sqrt at zero.
+    if (isZero) return p + cross3(axis, p);
+    Real theta = sqrt(norm2);
+    RVec3 a = axis * (Real(1.0) / theta);
+    // Half-angle identities avoid cancellation in 1 - cos(theta).
+    RVec2 sc = rsincos(theta * Real(0.5));
+    Real st = Real(2.0) * sc.x * sc.y;
+    Real oneMinusCt = Real(2.0) * sc.x * sc.x;
+    Real ct = Real(1.0) - oneMinusCt;
+    return p * ct + cross3(a, p) * st + a * (dot3(a, p) * oneMinusCt);
 }
 
 // pose = [angle-axis(3), translation(3)]

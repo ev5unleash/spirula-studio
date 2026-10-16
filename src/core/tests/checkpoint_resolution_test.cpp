@@ -2,6 +2,7 @@
 
 #include "checkpoint/Adapt.h"
 #include "checkpoint/Resume.h"
+#include "checkpoint/B1Contract.h"
 #include "core/CheckpointIO.h"
 
 #include <algorithm>
@@ -516,12 +517,292 @@ bool needs_adapt_changes(const std::string& state,
 }  // namespace
 
 int main() {
+    ckpt::B1Contract a;
+    a.owner = 0; a.source_step = 10; a.completed_step = 12;
+    a.horizon = 30; a.rows = 257; a.frozen_context = std::string(64, '1');
+    const std::string digest(64, 'a');
+    a.source_state_sha256 = a.config_sha256 = a.views_sha256 =
+        a.train_indices_sha256 = a.full_train_indices_sha256 = a.mask_sha256 = a.frozen_shared_sha256 =
+        a.blocks_sha256 = a.owned_ids_sha256 = a.excluded_ids_sha256 = a.ply_sha256 = digest;
+    auto b = a; b.owner = 1;
+    b.frozen_context = std::string(64, '2'); b.mask_sha256 = std::string(64, 'b');
+    b.train_indices_sha256 = std::string(64, 'c');
+    auto pair_rejected = [&](const ckpt::B1Contract& right) {
+        try { ckpt::validate_b1_pair(a, right); return false; }
+        catch (const std::exception&) { return true; }
+    };
+    check(!pair_rejected(b), "complementary owners allow owner-specific context and view indices");
+    auto changed = b; changed.completed_step++;
+    check(pair_rejected(changed), "rejects unequal completed owner schedule");
+    changed = b; changed.source_state_sha256[0] = 'b';
+    check(pair_rejected(changed), "rejects changed original source");
+    changed = b; changed.config_sha256[0] = 'b';
+    check(pair_rejected(changed), "rejects different numerical configuration");
+    changed = b; changed.owner = 0;
+    check(pair_rejected(changed), "rejects duplicate owner");
+    changed = b; changed.sampler_version++;
+    check(pair_rejected(changed), "rejects incompatible sampler");
+    changed = b; changed.full_train_indices_sha256[0] = 'b';
+    check(pair_rejected(changed), "rejects different canonical training identity");
+    changed = b; changed.view_policy = "full";
+    changed.train_indices_sha256 = changed.full_train_indices_sha256;
+    check(pair_rejected(changed), "rejects mixed view policies");
+    changed = b; changed.version = 1;
+    check(pair_rejected(changed), "rejects mixed checkpoint schema versions");
+    auto contract_rejected = [](const JsonValue& json) {
+        try { ckpt::parse_b1_contract(json); return false; }
+        catch (const std::exception&) { return true; }
+    };
+    for (const char* missing : {"view_policy", "full_train_indices_sha256"}) {
+        auto json = ckpt::b1_contract_json(a);
+        json.obj.erase(std::remove_if(json.obj.begin(), json.obj.end(),
+            [&](const auto& field) { return field.first == missing; }), json.obj.end());
+        check(contract_rejected(json), "rejects missing v2 view identity");
+    }
+    changed = a; changed.view_policy = "unknown";
+    check(contract_rejected(ckpt::b1_contract_json(changed)), "rejects unknown view policy");
+    changed = a; changed.full_train_indices_sha256 = "invalid";
+    check(contract_rejected(ckpt::b1_contract_json(changed)), "rejects malformed canonical training digest");
+    auto unknown_field = ckpt::b1_contract_json(a);
+    for (auto& field : unknown_field.obj)
+        if (field.first == "view_policy") field.first = "alternate_view_policy";
+    check(contract_rejected(unknown_field), "rejects unknown v2 field replacing required policy");
+    auto full_left = a; full_left.view_policy = "full";
+    auto full_right = full_left; full_right.owner = 1;
+    bool full_pair_valid = false;
+    try { ckpt::validate_b1_pair(full_left, full_right); full_pair_valid = true; }
+    catch (const std::exception&) {}
+    check(full_pair_valid, "accepts full owners with identical canonical training identity");
+    full_left.train_indices_sha256 = full_right.train_indices_sha256 = std::string(64, 'c');
+    bool incomplete_full_rejected = false;
+    try { ckpt::validate_b1_pair(full_left, full_right); }
+    catch (const std::exception&) { incomplete_full_rejected = true; }
+    check(incomplete_full_rejected, "rejects two matching full subsets that differ from canonical coverage");
+    auto legacy_left = a; legacy_left.version = 1;
+    auto legacy_right = b; legacy_right.version = 1;
+    bool legacy_pair_valid = false;
+    try { ckpt::validate_b1_pair(legacy_left, legacy_right); legacy_pair_valid = true; }
+    catch (const std::exception&) {}
+    check(legacy_pair_valid, "accepts historical partitioned pair");
+    const auto legacy_json = ckpt::b1_contract_json(legacy_left);
+    check(!legacy_json.find("view_policy") && !legacy_json.find("full_train_indices_sha256"),
+          "legacy serialization preserves original schema");
+    const auto legacy_parsed = ckpt::parse_b1_contract(legacy_json);
+    check(legacy_parsed.view_policy == "partitioned" && legacy_parsed.full_train_indices_sha256.empty(),
+          "historical owners retain partitioned semantics without inferred canonical coverage");
+    legacy_left.owner = 2;
+    const auto legacy_all = ckpt::parse_b1_contract(ckpt::b1_contract_json(legacy_left));
+    check(legacy_all.view_policy == "full" && legacy_all.full_train_indices_sha256 == legacy_all.train_indices_sha256,
+          "historical all-owned reference retains full native semantics");
+    changed = a; changed.owner = 2;
+    check(contract_rejected(ckpt::b1_contract_json(changed)), "rejects partitioned v2 all-owned reference");
+    auto duplicate = ckpt::b1_contract_json(a);
+    duplicate.obj.push_back(duplicate.obj.front());
+    bool duplicate_rejected = false;
+    try { ckpt::parse_b1_contract(duplicate); }
+    catch (const std::exception&) { duplicate_rejected = true; }
+    check(duplicate_rejected, "rejects duplicate contract field");
+    auto fractional = ckpt::b1_contract_json(a);
+    for (auto& field : fractional.obj)
+        if (field.first == "completed_step") field.second.num = 12.5;
+    bool fractional_rejected = false;
+    try { ckpt::parse_b1_contract(fractional); }
+    catch (const std::exception&) { fractional_rejected = true; }
+    check(fractional_rejected, "rejects fractional schedule position");
+    auto live_left = a;
+    live_left.version = 3; live_left.view_policy = "full";
+    live_left.refresh_cadence = 2;
+    live_left.refresh_generation = live_left.refresh_parent = live_left.source_step;
+    live_left.refresh_group_sha256 = live_left.refresh_commit_sha256 = digest;
+    live_left.refresh_payload0_sha256 = live_left.refresh_payload1_sha256 = std::string(64, '0');
+    auto live_right = live_left; live_right.owner = 1;
+    live_right.frozen_context = std::string(64, '2');
+    auto live_pair_rejected = [&](const ckpt::B1Contract& right) {
+        try { ckpt::validate_b1_pair(live_left, right); return false; }
+        catch (const std::exception&) { return true; }
+    };
+    check(!live_pair_rejected(live_right), "initial live context pair accepts receiver-specific frozen hashes");
+    for (const char* field : {"refresh_cadence", "refresh_generation", "refresh_parent",
+            "refresh_group_sha256", "refresh_payload0_sha256", "refresh_payload1_sha256",
+            "refresh_commit_sha256"}) {
+        auto json = ckpt::b1_contract_json(live_left);
+        json.obj.erase(std::remove_if(json.obj.begin(), json.obj.end(),
+            [&](const auto& entry) { return entry.first == field; }), json.obj.end());
+        check(contract_rejected(json), "rejects missing live context binding");
+    }
+    changed = live_left; changed.refresh_cadence = 0;
+    check(contract_rejected(ckpt::b1_contract_json(changed)), "rejects zero refresh cadence");
+    changed = live_left; changed.refresh_parent = 9;
+    check(contract_rejected(ckpt::b1_contract_json(changed)), "rejects wrong initial parent");
+    changed = live_left; changed.refresh_payload0_sha256 = digest;
+    check(contract_rejected(ckpt::b1_contract_json(changed)), "rejects partial initial payload");
+    changed = live_left; changed.refresh_commit_sha256 = std::string(64, 'b');
+    check(contract_rejected(ckpt::b1_contract_json(changed)), "rejects initial commit not bound to group");
+    changed = live_left; changed.completed_step = 13;
+    check(contract_rejected(ckpt::b1_contract_json(changed)), "rejects generation stale by more than cadence");
+    changed = live_left; changed.view_policy = "partitioned";
+    check(contract_rejected(ckpt::b1_contract_json(changed)), "rejects partitioned live context");
+    changed = live_left; changed.owner = 2;
+    check(contract_rejected(ckpt::b1_contract_json(changed)), "rejects all-owned live context");
+    live_left.refresh_generation = 12;
+    live_left.refresh_payload0_sha256 = std::string(64, 'b');
+    live_left.refresh_payload1_sha256 = std::string(64, 'c');
+    live_left.refresh_commit_sha256 = std::string(64, 'd');
+    live_right = live_left; live_right.owner = 1;
+    live_right.frozen_context = std::string(64, '2');
+    check(!live_pair_rejected(live_right), "accepts installed matching live generation");
+    for (auto member : {&ckpt::B1Contract::refresh_group_sha256,
+            &ckpt::B1Contract::refresh_payload0_sha256, &ckpt::B1Contract::refresh_payload1_sha256,
+            &ckpt::B1Contract::refresh_commit_sha256}) {
+        changed = live_right; changed.*member = std::string(64, 'e');
+        check(live_pair_rejected(changed), "rejects mixed live payload/group/commit identities");
+        changed = live_left; changed.*member = "invalid";
+        check(contract_rejected(ckpt::b1_contract_json(changed)), "rejects malformed live digest");
+    }
+    changed = live_right; changed.refresh_generation = changed.refresh_parent = 10;
+    changed.refresh_payload0_sha256 = changed.refresh_payload1_sha256 = std::string(64, '0');
+    changed.refresh_commit_sha256 = changed.refresh_group_sha256;
+    check(live_pair_rejected(changed), "rejects individually valid owners across refresh barrier");
+    changed = live_left; changed.refresh_parent = 11;
+    check(contract_rejected(ckpt::b1_contract_json(changed)), "rejects skipped parent lineage");
+    changed = live_left; changed.refresh_generation = 11;
+    check(contract_rejected(ckpt::b1_contract_json(changed)), "rejects off-cadence generation");
+    changed = live_left; changed.refresh_generation = 14;
+    check(contract_rejected(ckpt::b1_contract_json(changed)), "rejects future generation");
+    changed = live_left; changed.refresh_payload1_sha256 = std::string(64, '0');
+    check(contract_rejected(ckpt::b1_contract_json(changed)), "rejects partial installed payload pair");
+    changed = live_left; changed.refresh_commit_sha256 = changed.refresh_group_sha256;
+    check(contract_rejected(ckpt::b1_contract_json(changed)), "rejects installed payload with initial commit");
+    changed = live_right; changed.version = 2;
+    check(live_pair_rejected(changed), "rejects mixed frozen/live schemas");
+    auto live_policy = ckpt::b1_contract_json(live_left);
+    for (auto& field : live_policy.obj)
+        if (field.first == "policy") field.second.str = "native_fpbo_fixed_context_v1";
+    check(contract_rejected(live_policy), "rejects live fields under historical frozen policy");
+    auto historical_extra = ckpt::b1_contract_json(a);
+    historical_extra.obj.push_back({"refresh_generation", json_parse("10")});
+    check(contract_rejected(historical_extra), "rejects refresh fields in historical schema");
+    changed = live_right; changed.refresh_cadence = 1; changed.refresh_parent = 11;
+    check(live_pair_rejected(changed), "rejects different otherwise valid cadence and lineage");
+    for (const char* name : {"refresh_cadence", "refresh_generation", "refresh_parent"}) {
+        for (const char* value : {"-1", "1.5", "2147483648", "\"12\""}) {
+            auto json = ckpt::b1_contract_json(live_left);
+            for (auto& field : json.obj)
+                if (field.first == name) field.second = json_parse(value);
+            check(contract_rejected(json), "rejects invalid numeric refresh binding");
+        }
+    }
+    TrainConfig numerical;
+    const auto original_hash = ckpt::b1_config_hash(numerical);
+    numerical.resume = "owner"; numerical.output_dir_name = "attempt";
+    numerical.steps_per_save = 1; numerical.save_full_checkpoint = true;
+    check(ckpt::b1_config_hash(numerical) == original_hash,
+          "output and checkpoint logistics do not change numerical identity");
+    numerical.eval_mode = "fraction";
+    check(ckpt::b1_config_hash(numerical) != original_hash,
+          "training split remains part of numerical identity");
+    numerical.eval_mode = "all"; numerical.num_iterations++;
+    check(ckpt::b1_config_hash(numerical) != original_hash,
+          "original learning-rate horizon remains bound");
     const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
     const fs::path root =
         fs::temp_directory_path() /
         ("spirula_checkpoint_resolution_" + std::to_string(nonce));
     std::error_code ec;
     fs::create_directories(root, ec);
+    const auto marked = root / "marked.ckpt";
+    fs::create_directories(marked);
+    {
+        std::ofstream tar(marked / "state.tar", std::ios::binary);
+        const auto state = std::string("{\"format_version\":2,\"arrays\":[],\"full_resume\":1,\"step\":12,\"cur_num_splats\":257,\"b1\":") +
+            ckpt::serialize_b1_contract(a) + "}";
+        ckpt::tar_write_bytes(tar, "state.json", state.data(), state.size());
+        ckpt::tar_finish(tar);
+    }
+    bool lost_sidecars_rejected = false;
+    try { ckpt::read_b1_contract(marked); }
+    catch (const std::exception&) { lost_sidecars_rejected = true; }
+    check(lost_sidecars_rejected, "embedded owner marker rejects complete sidecar loss");
+    ckpt::TargetLayout marked_target;
+    marked_target.max_num_splats = 257;
+    bool marked_adaptation_rejected = false;
+    try { ckpt::adapt_checkpoint(marked, marked_target, root / "adapted-owner"); }
+    catch (const std::exception&) { marked_adaptation_rejected = true; }
+    check(marked_adaptation_rejected, "direct adaptation rejects marked owner checkpoint");
+    auto write_marked_state = [&] {
+        std::ofstream tar(marked / "state.tar", std::ios::binary);
+        const auto state = std::string("{\"format_version\":2,\"arrays\":[],\"full_resume\":1,\"step\":12,\"cur_num_splats\":257,\"b1\":") +
+            ckpt::serialize_b1_contract(a) + "}";
+        ckpt::tar_write_bytes(tar, "state.json", state.data(), state.size());
+        ckpt::tar_finish(tar);
+    };
+    auto put_le = [](std::ostream& out, uint64_t value, int bytes) {
+        for (int i = 0; i < bytes; ++i) out.put((char)(value >> (8 * i)));
+    };
+    {
+        std::ofstream blocks(marked / "b1-owned-blocks.bin", std::ios::binary);
+        put_le(blocks, 257, 8); put_le(blocks, 1, 8); put_le(blocks, 12, 8);
+        put_le(blocks, 2, 4); put_le(blocks, 0, 4);
+        put_le(blocks, 1, 4); put_le(blocks, 0, 4);
+        std::ofstream ids(marked / "b1-owned-ids.bin", std::ios::binary);
+        put_le(ids, 256, 8);
+        for (uint32_t id = 0; id < 256; ++id) put_le(ids, id, 4);
+        std::ofstream excluded(marked / "b1-excluded-ids.bin", std::ios::binary);
+        put_le(excluded, 0, 8);
+    }
+    std::ofstream(marked / "config.json") << "{}";
+    a.config_sha256 = ckpt::b1_config_hash(TrainConfig{});
+    const std::string owner_ply =
+        "ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nend_header\n1 2 3\n";
+    std::ofstream(marked / "splat.ply", std::ios::binary) << owner_ply;
+    a.ply_sha256 = ckpt::b1_file_hash(marked / "splat.ply");
+    a.frozen_shared_sha256 = ckpt::b1_shared_hash(marked);
+    ckpt::bind_b1_sidecars(a, marked);
+    write_marked_state();
+    bool valid_marked = false;
+    try { valid_marked = ckpt::read_b1_contract(marked).has_value(); }
+    catch (const std::exception&) {}
+    check(valid_marked, "accepts complete native owner artifact binding");
+    auto mutated_ply = owner_ply;
+    mutated_ply.replace(mutated_ply.size() - 6, 1, "9");
+    std::ofstream(marked / "splat.ply", std::ios::binary) << mutated_ply;
+    bool changed_ply_rejected = false;
+    try { ckpt::read_b1_contract(marked); }
+    catch (const std::exception&) { changed_ply_rejected = true; }
+    check(changed_ply_rejected, "rejects same-count owner PLY coordinate mutation");
+    std::ofstream(marked / "splat.ply", std::ios::binary) << owner_ply;
+    const auto appearance_source = root / "appearance-source";
+    fs::create_directories(appearance_source);
+    {
+        std::ofstream tar(appearance_source / "state.tar", std::ios::binary);
+        const std::string state = "{\"format_version\":2,\"arrays\":[]}";
+        ckpt::tar_write_bytes(tar, "state.json", state.data(), state.size());
+        ckpt::tar_finish(tar);
+    }
+    auto appearance = a;
+    appearance.source_state_sha256 = ckpt::b1_file_hash(appearance_source / "state.tar");
+    appearance.frozen_shared_sha256 = ckpt::b1_shared_hash(appearance_source);
+    const auto merged_ply = root / "merged.ply";
+    std::ofstream(merged_ply, std::ios::binary) << owner_ply;
+    const auto body_digest = ckpt::b1_ply_body_hash(merged_ply);
+    const auto merged_bytes = std::string("ply\n") +
+        ckpt::b1_appearance_comment(appearance, body_digest) + owner_ply.substr(4);
+    std::ofstream(merged_ply, std::ios::binary) << merged_bytes;
+    bool valid_appearance = false;
+    try { ckpt::validate_b1_appearance(merged_ply, appearance_source); valid_appearance = true; }
+    catch (const std::exception&) {}
+    check(valid_appearance, "accepts merged PLY with embedded source and body binding");
+    bool wrong_source_rejected = false;
+    try { ckpt::validate_b1_appearance(merged_ply, marked); }
+    catch (const std::exception&) { wrong_source_rejected = true; }
+    check(wrong_source_rejected, "rejects merged appearance from a different source");
+    auto changed_merged = merged_bytes;
+    changed_merged.replace(changed_merged.size() - 6, 1, "9");
+    std::ofstream(merged_ply, std::ios::binary) << changed_merged;
+    bool merged_mutation_rejected = false;
+    try { ckpt::validate_b1_appearance(merged_ply, appearance_source); }
+    catch (const std::exception&) { merged_mutation_rejected = true; }
+    check(merged_mutation_rejected, "rejects mutated merged PLY body");
 
     const fs::path first = root / "step-000001000.ckpt";
     write_checkpoint(first, 1000);

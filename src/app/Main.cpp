@@ -75,6 +75,7 @@ const std::vector<Tool>& tools() {
 #endif
 #ifdef SS_TOOL_TRAIN
         {app::kToolTrain, &cmsg::tool_train, spirula_train_main},
+        {app::kToolTrainBlocks, &cmsg::tool_train, spirula_train_blocks_main},
 #endif
 #ifdef SS_TOOL_SAM
         {app::kToolSam, &cmsg::tool_sam, spirula_sam_main},

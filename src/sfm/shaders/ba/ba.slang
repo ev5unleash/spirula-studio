@@ -283,18 +283,13 @@ void obsCamCols<let MD : int>(uint o, out uint dof, out uint base, out uint cols
     base = u_jc_off[o];
 }
 
-// One thread per observation ("row" i of its point's pair block):
-//   S += Jc^T Jc,  g += Jc^T r,  S -= A_up (App+l)^-1 A_up^T,  g -= A_up W Bp
-// Work per thread is linear in the point's track length (one thread per point
-// would be quadratic and can exceed the GPU watchdog on long tracks).
-//
-// The atomic fallback for the Schur assembly: the pair kernel below aggregates
-// the same sums per image pair and needs no atomics, but it requires exclusive
-// column ownership. The (1+lambda) damping of the J^T J diagonal is folded in
-// here exactly as it is there.
-// u0 = num_obs, f0 = lambda_point
-void schurObsImpl<let MD : int>(uint ti) {
-    if (ti >= u0) return;
+// Atomic Schur rows support shared camera columns without pair tables.
+// Work per observation is linear in its point's track length.
+// u0 = num_obs, u1 = absolute observation offset, f0 = lambda_point
+void schurObsImpl<let MD : int>(uint localTid) {
+    if (u1 >= u0) return;
+    if (localTid >= u0 - u1) return;
+    uint ti = localTid + u1;
     uint p = u_obs_point[ti];
 
     // W = (App + lambda)^-1, already inverted per point by point_prep

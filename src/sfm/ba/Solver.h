@@ -27,8 +27,10 @@
 #include <stdexcept>
 #include <string>
 #include <memory>
+#include <utility>
 #include <vector>
 
+#include "sfm/ba/ObservationSchurDispatch.h"
 #include "sfm/ba/Options.h"
 #include "sfm/ba/Problem.h"
 #include "sfm/ba/SolverCpu.h"
@@ -269,7 +271,7 @@ public:
         {
             VkCommandBuffer cb = ctx_.begin();
             for (GpuBuffer* b : ownBufs_) ctx_.fillZero(cb, *b);
-            ctx_.submit(cb);
+            ctx_.submit(std::exchange(cb, VK_NULL_HANDLE));
         }
 
         // Only the entry points this problem dispatches: a cold driver cache
@@ -294,7 +296,7 @@ public:
                 entries.push_back("y_prep");
                 entries.push_back(std::string("schur_pair") + schurSuffix_);
             } else {
-                entries.push_back(std::string("schur_obs") + schurSuffix_);
+                entries.push_back(schurObsEntry_);
             }
         }
         for (const BAProblem::ModelRange& mr : P_.model_ranges) {
@@ -441,7 +443,7 @@ public:
         recordCost(cb);
         ctx_.barrier(cb);
         ctx_.recordDownload(cb, bCost_, realSize(opt_.real), 0, kDlCost);
-        ctx_.submit(cb);
+        ctx_.submit(std::exchange(cb, VK_NULL_HANDLE));
         return readCost();
     }
 
@@ -467,7 +469,7 @@ public:
             LinSolve path = useCG_ ? LinSolve::CG : densePath_;
             VkCommandBuffer cb = ctx_.begin();
             recordIteration(cb, (float)damping, reuse, path);
-            ctx_.submit(cb);
+            ctx_.submit(std::exchange(cb, VK_NULL_HANDLE));
             double newCost = readCost();
             stats_.iterations = it + 1;
 
@@ -501,7 +503,7 @@ public:
                         restore_pending_ = true;
                         cb = ctx_.begin();
                         recordIteration(cb, (float)damping, true, densePath_);
-                        ctx_.submit(cb);
+                        ctx_.submit(std::exchange(cb, VK_NULL_HANDLE));
                         newCost = readCost();
                         stats_.cg_fallbacks++;
                         if (++consec_fallbacks >= 3) {
@@ -569,7 +571,7 @@ public:
         if (cpu_) return cpu_->assembleOnly(damping);
         VkCommandBuffer cb = ctx_.begin();
         recordAssembly(cb, damping, false, densePath_);
-        ctx_.submit(cb);
+        if (cb != VK_NULL_HANDLE) ctx_.submit(std::exchange(cb, VK_NULL_HANDLE));
     }
 
     // debug: the assembled S (packed lower triangle) and g, from whichever path
@@ -595,15 +597,16 @@ public:
         recordPCG(cb, (uint32_t)opt_.cg_max_iters);
         ctx_.barrier(cb);
         ctx_.recordDownload(cb, bCgScal_, 8 * realSize(opt_.real), 0, kDlCgScal);
-        ctx_.submit(cb);
+        ctx_.submit(std::exchange(cb, VK_NULL_HANDLE));
         std::vector<double> xcg = downloadG();
         bool conv;
         double cg_iters;
         readCgStatus(conv, cg_iters);
         cb = ctx_.begin();
         recordAssembly(cb, damping, true, densePath_);  // reuse the same assembly
+        if (cb == VK_NULL_HANDLE) cb = ctx_.begin();
         recordCholesky(cb);
-        ctx_.submit(cb);
+        ctx_.submit(std::exchange(cb, VK_NULL_HANDLE));
         std::vector<double> xd = downloadG();
         double dmax = 0, xmax = 0;
         for (uint32_t i = 0; i < P_.n_dim; i++) {
@@ -662,6 +665,7 @@ private:
         for (uint32_t i = 0; i < P_.num_images; i++)
             maxDof = std::max(maxDof, 6 + P_.memberFree(i) + P_.groups[P_.image_group[i]].n_intr);
         schurSuffix_ = maxDof <= 12 ? "_c" : maxDof <= 14 ? "_m" : maxDof <= 18 ? "_w" : "_x";
+        schurObsEntry_ = std::string("schur_obs") + schurSuffix_;
         cgSuffix_ = maxDof <= 18 ? "_w" : "_x";
         const uint32_t tier = maxDof <= 18 ? 18 : 24;
         bBlk_ = tier * (tier + 1) / 2;
@@ -801,14 +805,11 @@ private:
         ctx_.barrier(cb);
     }
 
-    void recordAssembly(VkCommandBuffer cb, float damping, bool reuse, LinSolve path) {
+    void recordAssembly(VkCommandBuffer& cb, float damping, bool reuse, LinSolve path) {
         const bool dense = path != LinSolve::CG;
         if (reuse) {
-            // Params were restored after a reject; the per-observation
-            // Jacobians (Jc/Jp/res/App) still match them, so skip the Jacobian
-            // pass. S and g are rebuilt from those by the Schur kernels -- on
-            // every path, which is why none of them is snapshotted. Bp is the
-            // one thing the back-substitution overwrote, so it is.
+            // Restored parameters still match Jc/Jp/res/App. Rebuild S/g;
+            // only Bp needs its snapshot after back-substitution overwrote it.
             ctx_.copy(cb, bBp0_, bBp_, bBp_.size);
             if (dense) {
                 ctx_.fillZero(cb, bS_);
@@ -866,8 +867,8 @@ private:
                 p.u0 = P_.num_pair_chunks;
                 ctx_.dispatch(cb, std::string("schur_pair") + schurSuffix_, P_.num_pair_chunks, p);
             } else if (path == LinSolve::DenseObs) {
-                p.u0 = P_.num_obs;
-                ctx_.dispatch(cb, std::string("schur_obs") + schurSuffix_, (P_.num_obs + 127) / 128, p);
+                spirula::submitObservationSchur(ctx_, cb, P_.num_obs, damping, schurObsEntry_);
+                return;
             } else {
                 p.u0 = P_.num_cam_chunks;
                 p.u1 = P_.prec_exclusive ? 1 : 0;
@@ -984,15 +985,16 @@ private:
         restore_pending_ = false;
         VkCommandBuffer cb = ctx_.begin();
         recordRestore(cb);
-        ctx_.submit(cb);
+        ctx_.submit(std::exchange(cb, VK_NULL_HANDLE));
     }
 
-    void recordIteration(VkCommandBuffer cb, float damping, bool reuse, LinSolve path) {
+    void recordIteration(VkCommandBuffer& cb, float damping, bool reuse, LinSolve path) {
         if (restore_pending_) {
             restore_pending_ = false;
             recordRestore(cb);
         }
         recordAssembly(cb, damping, reuse, path);
+        if (cb == VK_NULL_HANDLE) cb = ctx_.begin();
 
         if (path == LinSolve::CG)
             recordPCG(cb, cgMaxit_);
@@ -1027,12 +1029,7 @@ private:
         ctx_.barrier(cb);
 
         recordCost(cb);
-        // Fold the two readbacks the LM loop needs into this command buffer.
-        // A separate download() is its own fenced submit, so taking them here
-        // halves the submits per iteration -- and a submit's latency, not its
-        // arithmetic, is what a forty-image solve costs. The atom phase of a
-        // bottom-up run spends five thousand iterations on problems that size,
-        // with several solvers sharing the device.
+        // Fold readbacks into the update/cost buffer to avoid separate fenced downloads.
         ctx_.barrier(cb);
         ctx_.recordDownload(cb, bCost_, realSize(opt_.real), 0, kDlCost);
         if (path == LinSolve::CG)
@@ -1073,6 +1070,7 @@ private:
     std::string selector_;
     std::unique_ptr<bacpu::Solver> cpu_;  // non-null when running on the host
     const char* schurSuffix_ = "_c";  // dof tier of the Schur kernels (pickTiers)
+    std::string schurObsEntry_;
     const char* cgSuffix_ = "_w";     // ... and of the CG ones
     uint32_t bBlk_ = kCamBlk;         // per-image B block stride at that tier
     SolverStats stats_;

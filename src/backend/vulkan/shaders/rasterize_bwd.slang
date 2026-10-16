@@ -240,6 +240,7 @@ struct Raster2dBwdParams {  // via params ring
     float* v_s_screen;  // [.., SCR2_STRIDE]
     uint* o_accum_weight;   // kAccumWeight; Max writes float bits, else float
     float* o_accum_weight_den;  // kAccumAvg lane 2
+    float* ordered_partials; // [n_isects, 4^macro_log2, SCR2_STRIDE]
     uint32_t I;
     uint32_t N;
     uint32_t n_isects;
@@ -248,6 +249,7 @@ struct Raster2dBwdParams {  // via params ring
     uint32_t tile_width;
     uint32_t tile_height;
     uint32_t macro_log2;  // was _pad0; the struct size is unchanged
+    uint32_t ordered_stride; // screen fields plus optional densify lanes
 };
 
 struct Frag2d_ {
@@ -469,19 +471,38 @@ void rasterize_bwd_2d(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
                 uint wid = kPacked != 0 ? uint(p.gaussian_ids[splat_sid])
                                         : splat_sid % p.N;
                 float* v_row = scr2_row(p.v_s_screen, int(splat_sid));
-                _rb_atomic_add(v_row + SCR2_XY, v_splat.xy.x);
-                _rb_atomic_add(v_row + SCR2_XY + 1, v_splat.xy.y);
-                _rb_atomic_add(v_row + SCR2_CONIC, v_splat.conic.x);
-                _rb_atomic_add(v_row + SCR2_CONIC + 1, v_splat.conic.y);
-                _rb_atomic_add(v_row + SCR2_CONIC + 2, v_splat.conic.z);
-                _rb_atomic_add(v_row + SCR2_OPAC, v_splat.opac);
-                _rb_atomic_add(v_row + SCR2_DEPTH, v_splat.depth);
-                _rb_atomic_add(v_row + SCR2_RGB, v_splat.rgb.x);
-                _rb_atomic_add(v_row + SCR2_RGB + 1, v_splat.rgb.y);
-                _rb_atomic_add(v_row + SCR2_RGB + 2, v_splat.rgb.z);
-                if (kAccumWeight == kAccumMax)
+                if (kOrderedRaster == 0) {
+                    _rb_atomic_add(v_row + SCR2_XY, v_splat.xy.x);
+                    _rb_atomic_add(v_row + SCR2_XY + 1, v_splat.xy.y);
+                    _rb_atomic_add(v_row + SCR2_CONIC, v_splat.conic.x);
+                    _rb_atomic_add(v_row + SCR2_CONIC + 1, v_splat.conic.y);
+                    _rb_atomic_add(v_row + SCR2_CONIC + 2, v_splat.conic.z);
+                    _rb_atomic_add(v_row + SCR2_OPAC, v_splat.opac);
+                    _rb_atomic_add(v_row + SCR2_DEPTH, v_splat.depth);
+                    _rb_atomic_add(v_row + SCR2_RGB, v_splat.rgb.x);
+                    _rb_atomic_add(v_row + SCR2_RGB + 1, v_splat.rgb.y);
+                    _rb_atomic_add(v_row + SCR2_RGB + 2, v_splat.rgb.z);
+                }
+                if (kOrderedRaster != 0) {
+                    // Each (intersection, microtile) has exactly one survivor
+                    // lane; no atomic append, no change to the pixel sweep.
+                    uint side = 1u << p.macro_log2;
+                    uint subtile = (wg.y & (side - 1u)) * side +
+                                   (wg.z & (side - 1u));
+                    uint slot = uint(splat_idx) * side * side + subtile;
+                    float* dst = p.ordered_partials + slot * p.ordered_stride;
+                    scr2_store(dst, v_splat.xy, v_splat.depth, v_splat.conic,
+                               v_splat.opac, v_splat.rgb);
+                    // Match _rb_atomic_add's per-field finite filtering.
+                    for (uint f = 0; f < SCR2_STRIDE; ++f)
+                        if (!_rb_finitef(dst[f])) dst[f] = 0.0f;
+                    if (kAccumWeight != 0) dst[SCR2_STRIDE] = accum_weight;
+                    if (kAccumWeight == kAccumAvg)
+                        dst[SCR2_STRIDE + 1] = accum_weight_den;
+                }
+                if (kOrderedRaster == 0 && kAccumWeight == kAccumMax)
                     atomic_max_f32_nonneg(p.o_accum_weight + wid, accum_weight);
-                else if (kAccumWeight != 0) {
+                else if (kOrderedRaster == 0 && kAccumWeight != 0) {
                     atomic_add_f32((float*)p.o_accum_weight + wid, accum_weight);
                     if (kAccumWeight == kAccumAvg)
                         atomic_add_f32(p.o_accum_weight_den + wid,
@@ -505,6 +526,63 @@ void rasterize_bwd_2d(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
         count = rem;
         GroupMemoryBarrierWithGroupSync();
     }
+}
+
+struct RasterOrderedParams {
+    int* flatten_ids;
+    int* keys;
+    int* perm;
+    float* partials;
+    float* v_screen;
+    int* gaussian_ids;
+    uint* accum_weight;
+    float* accum_weight_den;
+    uint n_isects;
+    uint subtiles;
+    uint wgs_per_row;
+    uint N;
+    uint stride;
+    uint accum_mode;
+};
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void raster_ordered_keys(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
+                         uniform RasterOrderedParams* pp) {
+    RasterOrderedParams p = *pp;
+    uint i = (wg.y * p.wgs_per_row + wg.x) * 256u + tid;
+    if (i >= p.n_isects) return;
+    p.keys[i] = p.flatten_ids[i];
+    p.perm[i] = int(i);
+}
+
+// Stable screen-ID sort preserves intersection order; microtiles fold in y/x order.
+// ponytail: serial segment fold for bounded proof; parallelize only if measured.
+[shader("compute")]
+[numthreads(32, 1, 1)]
+void raster_ordered_reduce(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
+                           uniform RasterOrderedParams* pp) {
+    RasterOrderedParams p = *pp;
+    uint start = wg.y * p.wgs_per_row + wg.x;
+    if (start >= p.n_isects || tid >= p.stride) return;
+    int sid = p.keys[start];
+    if (start > 0 && p.keys[start - 1] == sid) return;
+    uint wid = p.N == 0 ? uint(p.gaussian_ids[sid]) : uint(sid) % p.N;
+    float* out_row = tid < SCR2_STRIDE ? scr2_row(p.v_screen, sid) :
+        (tid == SCR2_STRIDE ? (float*)p.accum_weight + wid :
+                             p.accum_weight_den + wid);
+    uint out_field = tid < SCR2_STRIDE ? tid : 0u;
+    float total = out_row[out_field];
+    for (uint i = start; i < p.n_isects && p.keys[i] == sid; ++i) {
+        uint base = uint(p.perm[i]) * p.subtiles * p.stride;
+        for (uint s = 0; s < p.subtiles; ++s) {
+            float v = p.partials[base + s * p.stride + tid];
+            if (tid == SCR2_STRIDE && p.accum_mode == kAccumMax)
+                total = asfloat(max(asuint(total), asuint(v)));
+            else if (v != 0.0f) total += v;
+        }
+    }
+    out_row[out_field] = total;
 }
 
 // ---------------------------------------------------------------------------
@@ -907,3 +985,5 @@ void rasterize_bwd_3dgut(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
 // Declared last: spec IDs follow declaration order (see dist_spec.slang).
 [SpecializationConstant]
 const int kDistortion = 0;
+[SpecializationConstant]
+const int kOrderedRaster = 0; // appended: preserve historical 3dgut spec IDs

@@ -1,8 +1,13 @@
 // Engine Adam + per-splat regularization optimizer step.
 
 #include "engine/Engine.h"
+#include "engine/EngineInternal.h"
 #include "engine/EngineCommon.h"
 #include "engine/EngineState.h"
+
+#if defined(SS_BACKEND_VULKAN)
+#include "backend/vulkan/kernels/B1Ownership.h"
+#endif
 
 #include <stdexcept>
 #include <variant>
@@ -286,18 +291,115 @@ static inline DeviceTensorFloatND _fnd_view(float* ptr, int64_t N, int64_t P) {
     return DeviceTensorFloatND(tv);
 }
 
+#if defined(SS_BACKEND_VULKAN)
+static void _engine_b1_prepare_optimizer(bool fpbo) {
+    auto& b1 = engine().b1;
+    if (b1.owner < 0) {
+        vkk::b1_set_owned_blocks(nullptr);
+        return;
+    }
+    if (!fpbo || !engine().packed || b1.owned_blocks.data_ptr() == nullptr)
+        throw std::runtime_error(
+            "B1 ownership requires packed FPBO optimization");
+    vkk::b1_set_owned_blocks(b1.owned_blocks.data_ptr());
+}
+#else
+static void _engine_b1_prepare_optimizer(bool) {
+    if (engine().b1.owner >= 0)
+        throw std::runtime_error("B1 ownership requires the Vulkan backend");
+}
+#endif
 
-// Fused projection-bwd + Adam-and-regularization optimizer step. Replaces
-// the projection_*_backward + engine_optim_step pair when
-// `cfg.use_fused_proj_bwd_optim` is set. Requires
-// engine_compute_loss_backward to have stashed v_splats_s into
-// engine().fwd.v_splats_s. World-space gradient buffers are not allocated
-// in this path (raster_*_bwd's world atomicStore is null-pointer-guarded
-// per channel, and the fused kernel's atomicLoad uses the same guard).
-void engine_fused_proj_bwd_optim_step(int step, const OptimConfig& cfg) {
-    _ensure_optim_state(cfg.sh_optim_bits, cfg.sh_value_bits,
-                        cfg.non_sh_optim_bits,
-                        cfg.use_per_splat_bias_correction);
+
+enum class EngineFpboMode { Internal, Capture, External };
+
+#if defined(SS_BACKEND_VULKAN)
+static void _fpbo_validate_seam(const OptimConfig& cfg, bool external) {
+    const auto& e = engine();
+    const auto& o = e.optim;
+    const int64_t M = e.max_num_splats;
+    const bool level0 = cfg.quantization_level == 0 &&
+        cfg.sh_optim_bits == 32 && cfg.sh_value_bits == 32 &&
+        cfg.non_sh_optim_bits == 32;
+    const bool level1 = cfg.quantization_level == 1 &&
+        cfg.sh_optim_bits == 8 && cfg.sh_value_bits == 16 &&
+        cfg.non_sh_optim_bits == 16;
+    if (e.primitive != "3dgs" || !e.packed || !cfg.use_fused_proj_bwd_optim ||
+        cfg.split_batch || (!level0 && !level1) || e.num_sh <= 0 ||
+        e.num_sh > 15 || e.cur_num_splats <= 0 || e.cur_num_splats > M ||
+        !o.initialized || !o.use_fused_proj_bwd_optim ||
+        !o.fused_state_active || o.sh_optim_bits != cfg.sh_optim_bits ||
+        o.non_sh_optim_bits != cfg.non_sh_optim_bits ||
+        e.world.sh_value_bits != cfg.sh_value_bits ||
+        o.use_per_splat_bias_correction != cfg.use_per_splat_bias_correction ||
+        e.fwd.splats_w.size() != 6 || e.fwd.v_splats_s.empty() ||
+        (e.fwd.v_splats_s[0].numel() &&
+         !e.fwd.v_splats_s[0].data_ptr()) ||
+        e.fwd.splats_w[0].data_ptr() != (float*)e.world.means.data_ptr() ||
+        e.fwd.splats_w[1].data_ptr() != (float*)e.world.quats.data_ptr() ||
+        e.fwd.splats_w[2].data_ptr() != (float*)e.world.scales.data_ptr() ||
+        e.fwd.splats_w[3].data_ptr() != e.world.opacities.data_ptr() ||
+        e.fwd.splats_w[4].data_ptr() != (float*)e.world.features_dc.data_ptr() ||
+        e.fwd.camera_ids.size() != e.fwd.gaussian_ids.size() ||
+        e.fwd.aabb.numel() != e.fwd.camera_ids.size() ||
+        (e.fwd.camera_ids.size() &&
+         (!e.fwd.aabb.data_ptr() || !e.fwd.camera_ids.data_ptr() ||
+          !e.fwd.gaussian_ids.data_ptr())) ||
+        e.camera.num <= 0 ||
+        !e.camera.viewmats.data_ptr() || !e.camera.intrins.data_ptr() ||
+        !o.radii.data_ptr() || o.radii.size() != M ||
+        (cfg.use_per_splat_bias_correction &&
+         (!o.bias_correction_steps.data_ptr() ||
+          o.bias_correction_steps.size() != M)) ||
+        (e.b1.owner >= 0 &&
+         (!e.b1.owned_blocks.data_ptr() ||
+          e.b1.owned_blocks.size() < (e.cur_num_splats + 255) / 256)))
+        throw std::runtime_error("FPBO gradient seam requires an initialized packed 3dgs FPBO forward and matching native optimizer state");
+    if (level1 && (!o.sh_quant_state_fpbo.initialized() ||
+                   !e.world.features_sh_quant16_fpbo.initialized() ||
+                   !o.means_quant_state_fpbo.initialized() ||
+                   !o.quats_quant_state_fpbo.initialized() ||
+                   !o.scales_quant_state_fpbo.initialized() ||
+                   !o.opacities_quant_state_fpbo.initialized() ||
+                   !o.features_dc_quant_state_fpbo.initialized()))
+        throw std::runtime_error("FPBO gradient seam requires native FPBO codec buffers");
+    if (external) {
+        const auto& g = e.grad;
+        if (!g.means.data_ptr() || g.means.size() != M ||
+            !g.quats.data_ptr() || g.quats.size() != M ||
+            !g.scales.data_ptr() || g.scales.size() != M ||
+            !g.opacities.data_ptr() || g.opacities.size() != M ||
+            !g.features_dc.data_ptr() || g.features_dc.size() != M ||
+            !g.features_sh.data_ptr() || g.features_sh.size<0>() != M ||
+            g.features_sh.size<1>() != e.num_sh)
+            throw std::runtime_error("FPBO external gradients require six full row-major fp32 buffers");
+    }
+}
+
+static vkk::FpboGradientLaunch _fpbo_gradient_buffers(EngineFpboMode mode) {
+    const auto& g = engine().grad;
+    return {static_cast<vkk::FpboGradientMode>(mode), (float*)g.means.data_ptr(), (float*)g.quats.data_ptr(),
+            (float*)g.scales.data_ptr(), g.opacities.data_ptr(),
+            (float*)g.features_dc.data_ptr(), (float*)g.features_sh.data_ptr()};
+}
+
+struct FpboLaunchReset {
+    ~FpboLaunchReset() { vkk::fpbo_set_gradient_launch({}); }
+};
+#endif
+
+static void _engine_fpbo_step(int step, const OptimConfig& cfg,
+                              EngineFpboMode mode) {
+    const bool diagnostic = mode != EngineFpboMode::Internal;
+#if defined(SS_BACKEND_VULKAN)
+    if (diagnostic)
+        _fpbo_validate_seam(cfg, mode == EngineFpboMode::External);
+#endif
+    _engine_b1_prepare_optimizer(true);
+    if (!diagnostic)
+        _ensure_optim_state(cfg.sh_optim_bits, cfg.sh_value_bits,
+                            cfg.non_sh_optim_bits,
+                            cfg.use_per_splat_bias_correction);
 
     int64_t N = engine().cur_num_splats;
     if (engine().fwd.v_splats_s.empty())
@@ -305,16 +407,9 @@ void engine_fused_proj_bwd_optim_step(int step, const OptimConfig& cfg) {
             "engine_fused_proj_bwd_optim_step: v_splats_s not stashed; "
             "engine_compute_loss_backward must run first");
 
-    // World-grad vector handed to the FPBO kernel. For 3dgs / mip the
-    // per-channel slots stay null (raster_*_bwd never writes the world
-    // buffer for those prims, so there is nothing to pick up). For 3dgut,
-    // raster_*_bwd has already atomicAdded mean / quat / scale into the
-    // engine grad buffers (_alloc_grad_buffers allocates them in that case);
-    // pass those three slots so the kernel's atomicLoad picks them up and
-    // sums them with the projection-bwd contribution. Other slots remain
-    // null -- they were never written and reading 0 is correct.
+    // Only 3DGUT has raster world VJPs; 2D traits must not read retained capture buffers.
     std::vector<DeviceTensorFloatND> v_splats_w;
-    if (engine().grad.means.data_ptr() != nullptr) {
+    if (engine().primitive == "3dgut" && engine().grad.means.data_ptr() != nullptr) {
         v_splats_w = {
             DeviceTensorFloatND(engine().grad.means),         // [N, 3]
             DeviceTensorFloatND(engine().grad.quats),         // [N, 4]
@@ -369,9 +464,11 @@ void engine_fused_proj_bwd_optim_step(int step, const OptimConfig& cfg) {
 
     // Per-splat bias correction: increment all steps by 1 before use.
     std::variant<int32_t, TorchTensorView> step_arg;
-    if (cfg.use_per_splat_bias_correction) {
+    if (cfg.use_per_splat_bias_correction && mode != EngineFpboMode::Capture) {
+        const int64_t bias_N = engine().b1.owner >= 0
+            ? engine().cur_num_splats : engine().max_num_splats;
         increment_int32_inplace(engine().optim.bias_correction_steps,
-                                engine().max_num_splats);
+                                bias_N);
         step_arg = _dv_tv(engine().optim.bias_correction_steps);
     } else {
         step_arg = (int32_t)(step + 1);
@@ -413,11 +510,11 @@ void engine_fused_proj_bwd_optim_step(int step, const OptimConfig& cfg) {
     // the per-splat store. Consumed by engine_densify_step, which runs after
     // this optim step within the same training step.
     DeviceVector<float> densify_score;
-    if (cfg.write_densify_world_grad_score) {
+    if (cfg.write_densify_world_grad_score && mode != EngineFpboMode::Capture) {
         engine().fwd.world_grad_score.resize(
             PoolSlot::EngDensifyWorldGradScore, engine().max_num_splats);
         densify_score = engine().fwd.world_grad_score;
-    } else {
+    } else if (mode != EngineFpboMode::Capture) {
         engine().fwd.world_grad_score = DeviceVector<float>();
     }
 
@@ -476,6 +573,11 @@ void engine_fused_proj_bwd_optim_step(int step, const OptimConfig& cfg) {
             cfg.quantization_level
         );
     };
+#if defined(SS_BACKEND_VULKAN)
+    FpboLaunchReset reset;
+    if (diagnostic)
+        vkk::fpbo_set_gradient_launch(_fpbo_gradient_buffers(mode));
+#endif
 
     if (engine().primitive == "3dgs") {
         call_dispatch(&fused_projection_bwd_optimizer_3dgs);
@@ -490,12 +592,37 @@ void engine_fused_proj_bwd_optim_step(int step, const OptimConfig& cfg) {
     }
 }
 
+void engine_fused_proj_bwd_optim_step(int step, const OptimConfig& cfg) {
+    _engine_fpbo_step(step, cfg, EngineFpboMode::Internal);
+}
+
+#if defined(SS_BACKEND_VULKAN)
+void engine_fpbo_capture_data_gradients(int step, const OptimConfig& cfg) {
+    _fpbo_validate_seam(cfg, false);
+    const int64_t M = engine().max_num_splats;
+    auto& g = engine().grad;
+    g.means.resize(PoolSlot::EngVMeans, M);
+    g.quats.resize(PoolSlot::EngVQuats, M);
+    g.scales.resize(PoolSlot::EngVScales, M);
+    g.opacities.resize(PoolSlot::EngVOpacities, M);
+    g.features_dc.resize(PoolSlot::EngVFeaturesDc, M);
+    g.features_sh.resize(PoolSlot::EngVFeaturesSh, M, engine().num_sh);
+    _engine_fpbo_step(step, cfg, EngineFpboMode::Capture);
+}
+
+void engine_fpbo_step_from_data_gradients(int step, const OptimConfig& cfg) {
+    _engine_fpbo_step(step, cfg, EngineFpboMode::External);
+}
+#endif
+
 
 void engine_optim_step(int step, const OptimConfig& cfg) {
     if (engine().optim.use_fused_proj_bwd_optim) {
         engine_fused_proj_bwd_optim_step(step, cfg);
         return;
     }
+
+    _engine_b1_prepare_optimizer(false);
 
     _ensure_optim_state(cfg.sh_optim_bits, cfg.sh_value_bits,
                         cfg.non_sh_optim_bits, cfg.use_per_splat_bias_correction);

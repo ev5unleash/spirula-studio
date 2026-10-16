@@ -54,6 +54,7 @@ bash build_develop.bash -DSS_BACKEND=vulkan
 ./build_vulkan/spirula sfm ba /path/to/sparse/0 --real cpu        # ... on the host
 ./build_vulkan/sfm_cholesky_test 500 --real df          # dense solver unit test
 ./build_vulkan/sfm_ba_cpu_test                          # host solver vs a written-out reference
+./build_vulkan/sfm_bounded_schur_test --device uuid:<supported-non-NVIDIA-UUID>
 ```
 
 Given a *directory* rather than a BAL file, `ba` reads a COLMAP sparse model and
@@ -65,6 +66,11 @@ intrinsics groups nor any camera model but Snavely's.
 The shader variant matrix can be trimmed for faster iteration:
 `-DSS_SFM_REALS=df -DSS_SFM_LOSSES=trivial`. slangc is taken from PATH
 or downloaded into the build tree (`cmake/SsSlang.cmake`).
+The default matrix includes DF on Windows. DF BA variants compile with Slang
+`-O0` and the existing `spirv_tool nocontract` pass; float/double BA and other
+SfM shaders retain `-O2`. The O0 choice addresses an observed optimization-
+dependent DF Jacobian precision failure, not a general error bound or a
+performance claim. Scalar-selection and host-fallback policies are unchanged.
 
 Options: `--real float|double|df|cpu`, `--loss trivial|huber|cauchy`,
 `--loss-param X`, `--model snavely|snavely_f`, `--shared-intrinsics`,
@@ -91,6 +97,14 @@ packed dense lower triangle via per-observation global column maps
 model; Schur assembly, the dense solver, and all updates are model-agnostic
 (dynamic block widths, bounded by `kMaxCamDof`). `--shared-intrinsics` (all
 images in one group) exercises the pose/intrinsics cross-coupling path.
+
+Angle-axis rotation takes the analytic first-order branch `p + axis × p` at
+exact zero **before** evaluating the norm's square root. Nonzero rotations
+normalize by the actual angle without an epsilon and use one half-angle
+sin/cos pair: `sin(theta) = 2*sin(theta/2)*cos(theta/2)` and
+`1-cos(theta) = 2*sin(theta/2)^2`. CPU and shader paths use the same form,
+avoiding both a zero-norm derivative and tiny-angle cancellation.
+
 
 ### Rigs
 
@@ -171,6 +185,30 @@ Jacobian kernel matters enormously for the emulated `df` config, where atomics
 are CAS loops: ~63 per obs onto ~50 hot addresses per camera made the Jacobian
 kernel ~9x slower than the same kernel with atomics removed (measured);
 float/double use native atomic-add hardware and barely noticed.
+
+### Bounded observation-Schur dispatch
+
+DenseObs assembly uses `ObservationSchurDispatch.h` for all observation-Schur
+column tiers (`c`, `m`, `w`, `x`). Each dispatch covers at most 8,192 observations
+(64 groups of 128); `Push.u0` remains the total observation count, `Push.u1` is
+the absolute observation offset and `Push.f0` is damping. The shader bounds the
+partial final workgroup against the total count. This uses ordinary dispatch,
+not dispatch-base, so the global observation range is not one dispatch's group
+count.
+
+The helper consumes and fences any pending prefix first, clearing its caller's
+handle before submission. Each chunk owns a fresh command buffer with barriers,
+is fenced before the next chunk, and checks cancellation between chunks.
+Callers must record Cholesky or other downstream work in a fresh buffer rather
+than reuse the consumed prefix. The shared sequence also covers rejected-step
+reassembly and solver reuse; it does not split pair-Schur or implicit CG work.
+
+`sfm_bounded_schur_test` exercises the actual DF `BundleSolver` route against
+the host oracle across every column tier, multi-chunk/partial-tail assembly,
+rejected-step restoration and cold/reused solves. It requires an explicit
+supported physical non-NVIDIA device and refuses CPU fallback. This is a
+behavioral gate, not a reconstruction-quality or watchdog-causality guarantee.
+
 
 ### Groupshared budget
 
@@ -340,10 +378,9 @@ a CPU rather than choices:
 - **Jacobians by forward-mode duals** (`CpuCamera.h`), against Slang's reverse
   mode on the device. The widths are small (3 + intrinsics) and it needs no
   generated code. The angle-axis block gets a dual pass of its own and the point
-  block comes from the rotation matrix, because the axis norm has no derivative
-  at a zero rotation -- which is every seed pair's first image -- and one pass
-  over both would spread that 0/0 across the point and translation blocks
-  instead of leaving it where reverse mode does.
+  block comes from the rotation matrix. Both CPU and shader rotation branch
+  analytically at exact zero before the norm's square root; no rotation columns
+  are skipped by the CPU zero-rotation tests, including rig frame/member columns.
 - **A process-wide worker pool** (`CpuParallel.h`), not one per solver: the
   bottom-up phase runs a mapper per atom worker and a pool inside each would
   oversubscribe the machine by that factor. Solves too small to be worth

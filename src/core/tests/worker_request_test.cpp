@@ -1,11 +1,13 @@
 // worker_request_test -- schema and output-boundary checks for worker requests.
 
 #include "app/WorkerRequest.h"
+#include "app/B1Group.h"
 
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <stdexcept>
 #include <string>
 
@@ -78,6 +80,150 @@ int main() {
 
     try {
         fs::create_directories(root);
+        const app::B1WorkerPayload block{0, 10003, fs::absolute(root / "source.ckpt").u8string(),
+                                        fs::absolute(root / "views.txt").u8string()};
+        const auto block_json = app::b1_worker_payload(block);
+        const auto decoded_block = app::parse_b1_worker_payload(block_json);
+        check(decoded_block.owner == 0 && decoded_block.target == 10003 &&
+              decoded_block.source == block.source && decoded_block.views == block.views,
+              "block worker retains fixed owner inputs and target");
+        auto rejects_block = [](const std::string& text) {
+            try { app::parse_b1_worker_payload(text); return false; }
+            catch (const std::exception&) { return true; }
+        };
+        check(rejects_block(replace_once(block_json, "\"owner\": 0", "\"owner\": 2")),
+              "block worker rejects all-owned or invalid owner");
+        check(rejects_block(replace_once(block_json, "\"target\": 10003", "\"target\": 10003.5")),
+              "block worker rejects fractional schedule boundary");
+        check(rejects_block(replace_once(block_json, "\"kind\": \"b1\"", "\"env\": \"SS_B1_OWNER=1\"")),
+              "block worker rejects arbitrary environment injection");
+        check(rejects_block(replace_once(block_json, json_quote(block.source), "\"relative.ckpt\"")),
+              "block worker rejects relative original source");
+        check(rejects_block(replace_once(block_json, "\"owner\": 0", "\"owner\": 0, \"owner\": 1")),
+              "block worker rejects duplicate identity fields");
+        auto bound_block = block;
+        bound_block.group = fs::absolute(root / "group.json").u8string();
+        bound_block.group_sha256 = std::string(64, 'c');
+        const auto bound_json = app::b1_worker_payload(bound_block);
+        const auto bound_decoded = app::parse_b1_worker_payload(bound_json);
+        check(bound_decoded.group == bound_block.group &&
+              bound_decoded.group_sha256 == bound_block.group_sha256 &&
+              decoded_block.group.empty(), "new workers bind group identity; historical payload has no policy");
+        check(rejects_block(replace_once(bound_json, "\"version\": 2", "\"version\": 1")),
+              "bound worker rejects unknown schema version");
+        check(rejects_block(replace_once(bound_json, "\"version\": 2", "\"view_policy\": \"full\"")),
+              "worker rejects independently supplied view policy");
+        check(rejects_block(replace_once(bound_json, "\"group_sha256\"", "\"unknown\"")),
+              "worker rejects missing or unknown group identity field");
+        check(rejects_block(replace_once(bound_json, json_quote(bound_block.group), "\"group.json\"")),
+              "worker rejects relative group path");
+        check(rejects_block(replace_once(bound_json, json_quote(bound_block.group_sha256), "\"bad\"")),
+              "worker rejects malformed group digest");
+        check(rejects_block(replace_once(bound_json, "\"version\": 2", "\"version\": \"2\"")),
+              "worker rejects nonnumeric bound schema version");
+        auto live_block = bound_block;
+        live_block.refresh_attempt = fs::absolute(root / "attempts" / "1").u8string();
+        const auto live_json = app::b1_worker_payload(live_block);
+        check(app::parse_b1_worker_payload(live_json).refresh_attempt == live_block.refresh_attempt,
+              "live worker retains immutable exchange attempt");
+        check(rejects_block(replace_once(live_json, json_quote(live_block.refresh_attempt), "\"relative\"")),
+              "live worker refuses relative exchange path");
+        check(rejects_block(replace_once(live_json, "\"version\": 3", "\"version\": 2")),
+              "frozen worker refuses live exchange fields");
+        check(rejects_block(replace_once(bound_json, "\"version\": 2", "\"version\": 3")),
+              "live worker requires exchange attempt");
+        const std::string group_json =
+            "{\"version\":2,\"source\":\"source\",\"views\":\"views\","
+            "\"source_sha256\":\"a\",\"views_sha256\":\"b\",\"config_sha256\":\"c\","
+            "\"shared_sha256\":\"d\",\"source_step\":10000,\"target\":10003,"
+            "\"device0\":\"a\",\"device1\":\"b\",\"view_policy\":\"full\"}";
+        auto rejects_group = [](const std::string& text) {
+            try { app::b1_group_view_policy(json_parse(text)); return false; }
+            catch (const std::exception&) { return true; }
+        };
+        check(app::b1_group_view_policy(json_parse(group_json)) == "full",
+              "new group explicitly selects full policy");
+        check(app::b1_group_view_policy(json_parse(replace_once(group_json,
+              "\"view_policy\":\"full\"", "\"view_policy\":\"partitioned\""))) == "partitioned",
+              "new group explicitly selects partitioned policy");
+        const auto historical_group = replace_once(replace_once(group_json,
+              "\"version\":2", "\"version\":1"), ",\"view_policy\":\"full\"", "");
+        check(app::b1_group_view_policy(json_parse(historical_group)) == "partitioned",
+              "historical group retains partitioned semantics");
+        check(rejects_group(replace_once(group_json, ",\"view_policy\":\"full\"", "")),
+              "new group requires policy");
+        check(rejects_group(replace_once(group_json, "\"full\"", "\"automatic\"")),
+              "group rejects unknown policy");
+        check(rejects_group(replace_once(group_json, "\"version\":2", "\"version\":3")),
+              "live group requires cadence");
+        const auto live_group = replace_once(replace_once(group_json, "\"version\":2", "\"version\":3"),
+            "\"view_policy\":\"full\"", "\"view_policy\":\"full\",\"refresh_cadence\":3");
+        check(app::b1_group_view_policy(json_parse(live_group)) == "full",
+              "live group accepts full view immutable cadence");
+        for (const auto* value : {"0", "-1", "1.5", "\"3\""}) {
+            check(rejects_group(replace_once(live_group, "\"refresh_cadence\":3",
+                std::string("\"refresh_cadence\":") + value)), "live group rejects invalid cadence");
+        }
+        check(rejects_group(replace_once(live_group, "\"full\"", "\"partitioned\"")),
+              "live group refuses partitioned views");
+        check(rejects_group(replace_once(live_group, "\"version\":3", "\"version\":2")),
+              "frozen group refuses refresh contract fields");
+        const auto commit_path = root / "generation.json";
+        auto read_file = [](const fs::path& path) {
+            std::ifstream input(path, std::ios::binary);
+            return std::string(std::istreambuf_iterator<char>(input), {});
+        };
+        std::ofstream(fs::path(commit_path.u8string() + ".pending")) << "interrupted old attempt";
+        app::b1_publish_record(commit_path, "new committed pair", root / "new-attempt.pending");
+        check(read_file(commit_path) == "new committed pair",
+              "new attempt recovers same boundary despite stale unpublished global pending");
+        bool refused_replacement = false;
+        try { app::b1_publish_record(commit_path, "replacement", root / "replacement.pending"); }
+        catch (const std::exception&) { refused_replacement = true; }
+        check(refused_replacement && read_file(commit_path) == "new committed pair",
+              "commit publication refuses replacing an existing coherent pair");
+        const auto parent_digest = std::string(64, 'a');
+        for (int side = 0; side < 2; ++side) {
+            bool refused_parent = false;
+            try { app::validate_b1_refresh_parent(side == 0 ? std::string(64, 'b') : parent_digest,
+                side == 1 ? std::string(64, 'b') : parent_digest, parent_digest); }
+            catch (const std::exception&) { refused_parent = true; }
+            check(refused_parent, "same-step foreign parent commit is refused");
+        }
+        check(rejects_group(replace_once(group_json, "\"version\":2", "\"version\":\"2\"")),
+              "group rejects nonnumeric version");
+        check(rejects_group(replace_once(group_json, "\"views_sha256\"", "\"unknown\"")),
+              "group rejects unknown field even at expected field count");
+        check(rejects_group(replace_once(group_json, "\"version\":2", "\"version\":1")),
+              "historical group cannot smuggle a policy override");
+        check(rejects_group(replace_once(group_json, "\"view_policy\":\"full\"",
+              "\"view_policy\":\"full\",\"view_policy\":\"partitioned\"")),
+              "group rejects duplicate policies");
+        ckpt::B1Contract left;
+        left.owner = 0; left.source_step = 10000; left.completed_step = 10003;
+        left.horizon = 30000; left.rows = 257; left.frozen_context = std::string(64, '1');
+        for (auto* digest : {&left.source_state_sha256, &left.config_sha256, &left.views_sha256,
+                            &left.train_indices_sha256, &left.full_train_indices_sha256,
+                            &left.mask_sha256, &left.frozen_shared_sha256,
+                            &left.blocks_sha256, &left.owned_ids_sha256, &left.excluded_ids_sha256,
+                            &left.ply_sha256})
+            *digest = std::string(64, 'a');
+        auto right = left; right.owner = 1;
+        auto accepts_completion = [&](const ckpt::B1Contract& a, const ckpt::B1Contract& b,
+                                      int64_t target) {
+            try { app::validate_b1_group_completion(a, b, target); return true; }
+            catch (const std::exception&) { return false; }
+        };
+        check(accepts_completion(left, right, 10003), "complementary target completion accepted");
+        check(!accepts_completion(left, right, 10004), "equal but incomplete owner progress rejected");
+        check(!accepts_completion(left, left, 10003), "duplicate owner completion rejected");
+        right.view_policy = "full";
+        check(!accepts_completion(left, right, 10003), "mixed view policies never complete a group");
+        right.view_policy = "partitioned";
+        right.completed_step = 10002;
+        check(!accepts_completion(left, right, 10003), "unequal owner progress never completes group");
+        right.completed_step = 10003; right.source_state_sha256 = std::string(64, 'b');
+        check(!accepts_completion(left, right, 10003), "stale source completion rejected");
         write_text(request_path, valid);
         const app::worker::Request request =
             app::worker::parse_request(request_path.u8string());

@@ -586,6 +586,9 @@ bool needs_adapt(const JsonValue& state, const TargetLayout& t) {
             throw std::runtime_error(
                 "resume: changing PPISP optimizer is unsupported");
     }
+    if (shape_changed && state.find("b1"))
+        throw std::runtime_error(
+            "resume: block checkpoints cannot change layout or ownership");
     return shape_changed;
 }
 

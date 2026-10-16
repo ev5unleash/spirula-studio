@@ -182,6 +182,14 @@ void _ensure_ppisp_optim_state();
 void engine_ensure_optim_state(int sh_optim_bits, int sh_value_bits,
                                int non_sh_optim_bits,
                                bool use_per_splat_bias_correction);
+struct OptimConfig;
+#if defined(SS_BACKEND_VULKAN)
+// Diagnostic FPBO seam: six full [max_num_splats, 3/4/3/1/3/num_sh*3]
+// row-major fp32 buffers in engine().grad; active rows are [0, cur_num_splats).
+// Capture produces data gradients only; external consumes them without scaling.
+void engine_fpbo_capture_data_gradients(int step, const OptimConfig& cfg);
+void engine_fpbo_step_from_data_gradients(int step, const OptimConfig& cfg);
+#endif
 // Returns a pool-backed [PPISPRegLossIndex::length] device buffer.
 float* _engine_ppisp_reg_loss_into(
     const std::array<float, (int)PPISPRegLossIndex::length>& loss_weights,

@@ -13,7 +13,7 @@ endfunction()
 
 foreach(SS_TEST IN ITEMS source_path frame_motion_test mesh_format_roundtrip
         delaunay_degenerate worker_request_test checkpoint_resolution_test
-        dataset_parser_test step_config_test)
+        dataset_parser_test step_config_test data_sampler_test engine_diagnostic_compare_test)
     ss_register_test(${SS_TEST} "headless;fast" 60)
 endforeach()
 
@@ -23,6 +23,9 @@ add_dependencies(cli_training_smoke spirula)
 ss_register_test(scheduler_test "headless;worker" 300 "$<TARGET_FILE:spirula>")
 ss_register_test(subprocess_test "headless;worker" 300)
 ss_register_test(scheduler_result_test "headless;worker" 60)
+if(TARGET b1_merge_contract)
+    ss_register_test(b1_merge_contract "headless;fast" 60)
+endif()
 foreach(SS_TEST IN ITEMS split_faces_test frustum_size_test bilagrid_selector_test)
     if(TARGET ${SS_TEST})
         ss_register_test(${SS_TEST} "headless;fast" 60)

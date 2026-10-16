@@ -200,6 +200,23 @@ void engine_backward_from_render_grad(
 
 void engine_optim_step(int step, const OptimConfig& cfg);
 
+// Fixed native FPBO block ownership; marked owner checkpoints cannot disable it.
+void engine_b1_configure(int owner, const std::string& source_checkpoint_dir,
+                         int64_t checkpoint_step);
+void engine_b1_verify_context();
+struct TrainConfig;
+void engine_b1_bind_contract(const TrainConfig&, const std::string& views,
+                            const std::vector<int32_t>& train_indices,
+                            const std::string& original_source,
+                            const std::string& view_policy,
+                            const std::vector<int32_t>& full_train_indices);
+// Exact native render rows; callers hold the engine mutex at a completed boundary.
+std::string engine_b1_export_refresh(const std::string& path, int64_t boundary);
+void engine_b1_install_refresh(const std::string& peer_path, int64_t boundary,
+                               const std::string& expected_sha256);
+void engine_b1_commit_refresh(int64_t boundary, const std::string& payload0,
+                              const std::string& payload1, const std::string& commit);
+
 // --- Bilagrid (RGB / depth / normal) ---
 // Allocates and identity-initializes a bilagrid per camera. Must be called
 // after set_camera_params. RGB applies to the rendered prediction; depth and
@@ -454,6 +471,10 @@ void engine_setup_data_manager(
     std::vector<int32_t>      train_indices,
     std::vector<int32_t>      val_indices);
 
+// Resolve DataManager-dependent training options before managed execution or
+// checkpoint layout validation. Returns cfg unchanged without a DataManager.
+EngineStepConfig engine_resolve_managed_step_config(const EngineStepConfig& cfg);
+
 std::map<std::string, float> engine_train_step_managed(
     int step, int max_steps,
     std::string primitive,
@@ -465,19 +486,10 @@ std::map<std::string, float> engine_train_step_managed(
 // the worker is parked on, false abandons the pipeline. See DataManager.h.
 void engine_resolve_data_error(bool retry);
 
-// Pull the next batch from the DataManager, install it as GT + camera params,
-// and run the forward pass only -- no loss, no backward, no optimizer, no
-// densification. What an eval pass needs: it reuses the same decode, mask and
-// fisheye/equirect warp path training does, so eval GT is the warped GT and
-// not a host-side reconstruction of it.
-//
-// Afterwards `engine_copy_gt_rgb_to_host` and `engine_copy_render_to_host`
-// read the pair back. Returns the POST-split view count in the batch (K per
-// input image), or 0 when the stream is exhausted.
-//
-// Call `engine_setup_data_manager` with the eval split first; that replaces
-// the training DataManager, so this belongs after the training loop.
-int engine_eval_forward(std::string primitive, int sh_degree, bool packed);
+// The optional index fetches one eval image in dataset order for B1 comparison;
+// -1 preserves the ordinary sampler. Configure the eval DataManager first.
+int engine_eval_forward(std::string primitive, int sh_degree, bool packed,
+                        int index = -1);
 
 // Same, for ONE image by dataset index (the GUI's compare view), rendering one
 // pass of its faces: returns that pass's views, `out_passes` the image's count.

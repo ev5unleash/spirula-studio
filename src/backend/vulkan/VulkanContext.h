@@ -55,6 +55,7 @@ public:
     uint32_t queue_family() const { return _queue_family; }
     const Capabilities& caps() const { return _caps; }
     const std::string& device_name() const { return _device_name; }
+    const VkPhysicalDeviceMemoryProperties& memory_properties() const { return _mem_props; }
 
     // Submits `cb` on the compute queue, signaling the queue timeline with
     // the returned (monotonically increasing) value. Thread-safe.

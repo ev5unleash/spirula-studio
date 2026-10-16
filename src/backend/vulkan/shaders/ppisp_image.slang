@@ -2,13 +2,14 @@
 // kernels/ppisp/Ppisp.cu. All device math is shaders/ppisp.slang, the same
 // functions the CUDA build calls through generated/ppisp.cuh.
 //
-// Spec constants (IDs by declaration order — dispatches must pass ALL):
+// Spec constants (IDs by declaration order; all dispatches pass three):
 //   0: kParamType — 0 = Original (36), 1 = RQS (39), 2 = NoCRF (24),
 //                   3 = NoCRFNoVig (9)
 //   1: kClampOutput — clamp the result to [0,1] (CRF-less layouts only)
 //   2: kExposureArithmeticMean — regularize log2(mean gain), not mean(log2 gain)
 
 #include "atomic_float.slang"
+#include "int64_compat.slang"
 
 #define CudaDeviceExport ForceInline
 #include "shaders/ppisp.slang"
@@ -216,19 +217,21 @@ void ppisp_image_bwd(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
         p.v_in_image[3 * pix + 2] = v_pixel.z;
     }
 
-    // Block-wide per-parameter reduce, one atomic per (block, param).
-    for (int i = 0; i < np; i++) {
-        float param = _pp_finite(vbuf[i]) ? vbuf[i] : 0.0f;
-        GroupMemoryBarrierWithGroupSync();
-        _pp_red64[tid] = param;
-        GroupMemoryBarrierWithGroupSync();
-        [ForceUnroll]
-        for (uint s = 32; s > 0; s >>= 1) {
-            if (tid < s) _pp_red64[tid] += _pp_red64[tid + s];
+    // Runtime-uniform guard: both modes use the same specialized RGB code.
+    if (!is_null(p.v_ppisp_params)) {
+        for (int i = 0; i < np; i++) {
+            float param = _pp_finite(vbuf[i]) ? vbuf[i] : 0.0f;
             GroupMemoryBarrierWithGroupSync();
+            _pp_red64[tid] = param;
+            GroupMemoryBarrierWithGroupSync();
+            [ForceUnroll]
+            for (uint s = 32; s > 0; s >>= 1) {
+                if (tid < s) _pp_red64[tid] += _pp_red64[tid + s];
+                GroupMemoryBarrierWithGroupSync();
+            }
+            if (tid == 0 && _pp_red64[0] != 0.0f)
+                atomic_add_f32(&p.v_ppisp_params[p_id * np + i], _pp_red64[0]);
         }
-        if (tid == 0 && _pp_red64[0] != 0.0f)
-            atomic_add_f32(&p.v_ppisp_params[p_id * np + i], _pp_red64[0]);
     }
 }
 

@@ -20,6 +20,8 @@
 #include <fstream>
 #include <random>
 #include <vector>
+#include <stdexcept>
+#include <type_traits>
 
 using backend::MemcpyKind;
 
@@ -81,6 +83,55 @@ struct TypeInfo {
     int n_raw;
 };
 
+
+#if defined(SS_BACKEND_VULKAN)
+static void nullable_rgb_parity(const TypeInfo* types) {
+    Rng r(261003u); // Independent: do not change historical reference streams.
+    constexpr int B = 3, H = 22, W = 26;
+    for (int t = 0; t < 6; ++t) for (bool indexed : {false, true}) {
+        const int N = indexed ? 5 : B, P = types[t].n_params;
+        auto image = r.vec(B * H * W * 3, -0.2f, 3.f);
+        auto params = r.vec(N * P, -0.2f, 0.2f);
+        auto cot = r.vec(image.size(), -0.3f, 0.3f);
+        for (size_t i = 0; i < cot.size(); ++i) {
+            if ((i / 3) % 5 == 0 || i % 7 == 0) cot[i] = 0.f;
+            if (i % 11 == 0) image[i] = 1e-8f;
+        }
+        std::vector<float> intr = {80,80,40,35,80,80,50,42,80,80,60,50};
+        std::vector<int> indices = {4,1,4};
+        std::vector<void*> allocations;
+        auto keep = [&](auto* p) { allocations.push_back(p); return p; };
+        try {
+            auto* im = keep(upload(image)); auto* pa = keep(upload(params));
+            auto* in = keep(upload(intr)); auto* ca = indexed ? keep(upload(indices)) : nullptr;
+            auto* joint_cot = keep(upload(cot)); auto* rgb = keep(upload(cot));
+            auto* joint = keep(alloc_zero<float>(image.size()));
+            auto* grad = keep(alloc_zero<float>(params.size()));
+            auto cam = indexed ? ttv(ca, {B}) : ttv_null();
+            ppisp_backward(dt3(im,B,H,W),ttv(pa,{N,P}),ttv(in,{B,4}),104,88,
+                dt3(joint_cot,B,H,W),types[t].name,cam,dt3(joint,B,H,W),ttv(grad,{N,P}));
+            ppisp_backward(dt3(im,B,H,W),ttv(pa,{N,P}),ttv(in,{B,4}),104,88,
+                dt3(rgb,B,H,W),types[t].name,cam,dt3(rgb,B,H,W),ttv_null());
+            std::vector<float> a,b;
+            readback_f(a,joint,image.size()); readback_f(b,rgb,image.size());
+            if (std::memcmp(a.data(),b.data(),a.size()*4))
+                throw std::runtime_error("nullable PPISP RGB exact parity failed");
+            auto unchanged = [&](const auto& host, const auto* device) {
+                using T = typename std::decay_t<decltype(host)>::value_type;
+                std::vector<T> got(host.size());
+                backend::memcpy_sync(got.data(),device,got.size()*sizeof(T),MemcpyKind::DeviceToHost);
+                if (std::memcmp(got.data(),host.data(),got.size()*sizeof(T)))
+                    throw std::runtime_error("nullable PPISP immutable input changed");
+            };
+            unchanged(image,im); unchanged(params,pa); unchanged(intr,in);
+            unchanged(cot,joint_cot); if (indexed) unchanged(indices,ca);
+            backend::device_synchronize();
+            if (const char* error = backend::last_error()) throw std::runtime_error(error);
+        } catch (...) { for (auto* p : allocations) backend::device_free(p); throw; }
+        for (auto* p : allocations) backend::device_free(p);
+    }
+}
+#endif
 int main(int argc, char** argv) {
     if (argc != 3 ||
         (std::strcmp(argv[1], "dump") && std::strcmp(argv[1], "compare"))) {
@@ -100,6 +151,9 @@ int main(int argc, char** argv) {
         {"no_crf_no_vig_clamp", 9,
          (int)RawPPISPRegLossIndexNoCRFNoVig::length},
     };
+#if defined(SS_BACKEND_VULKAN)
+    nullable_rgb_parity(types);
+#endif
 
     const int64_t B = 3, H = 22, W = 26, N_cam = 5;
     const float aw = 104.0f, ah = 88.0f;

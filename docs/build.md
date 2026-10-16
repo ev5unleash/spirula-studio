@@ -170,15 +170,20 @@ The GUI runs reconstruction by re-running **itself** (`spirula sfm auto ...`) as
 a child process -- see `src/app/gui/SfmRunner.h` for why that stage and only
 that stage is out of process. Masking, decoding and training are in-process.
 
-### Known: `SS_SFM_REALS=df` does not compile on Windows
+### SfM double-float shader precision
 
-slangc 2026.12.0.1 hits an internal error on all three `ba_df_*` variants under
-Windows (`error[E99998]: Slang compilation aborted due to internal error`),
-deterministically; `float` and `double` are fine, and all three build on Linux.
-So `SS_SFM_REALS` defaults to `float;double` on Windows. The double-float real
-is not the default (`--ba-real` defaults to `double`), so this costs nothing
-unless someone asks for `--ba-real df`, which then reports "variant not built
-into this binary". Not yet reduced to a minimal repro or filed upstream.
+`SS_SFM_REALS` defaults to `float;double;df`, including on Windows. Existing
+build trees retain cached selections; pass `"-DSS_SFM_REALS=float;double;df"`
+to restore the full matrix if an older Windows cache omitted `df`.
+
+Only the double-float BA variants compile with Slang `-O0`; float/double BA
+and other SfM shaders retain `-O2`. The DF variants still run the existing
+`spirv_tool nocontract` post-pass. Disabling contraction alone did not prevent
+an optimization-dependent camera-Jacobian precision failure on supported AMD
+hardware; the same consumer passed its unchanged checks with the O0 module.
+This is a numerical build policy, not a shader-performance or driver-root-cause
+claim. It does not change the mapper's `--ba-real double` default or its
+existing device-capability fallback policy.
 
 ### Known: `sfm_mask_test` fails on Windows
 

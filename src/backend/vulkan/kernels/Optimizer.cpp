@@ -7,6 +7,7 @@
 
 #include <kernels/optim/Optimizer.cuh>
 
+#include "backend/vulkan/kernels/B1Ownership.h"
 #include "backend/vulkan/kernels/KernelCommon.h"
 
 #include <core/Env.h>
@@ -69,10 +70,10 @@ static_assert(sizeof(FloatAddParams) == 2 * 8 + 2 * 4, "layout");
 
 // Mirrors IncI32Params.
 struct IncI32Params {
-    uint64_t data;
-    uint32_t n, wgs_per_row;
+    uint64_t data, owned_blocks;
+    uint32_t n, wgs_per_row, has_owned_blocks, _pad0;
 };
-static_assert(sizeof(IncI32Params) == 8 + 2 * 4, "layout");
+static_assert(sizeof(IncI32Params) == 2 * 8 + 4 * 4, "layout");
 
 uint32_t checked_u32_numel(int64_t numel, const char* what) {
     if (numel < 0 || numel > (int64_t)UINT32_MAX)
@@ -356,6 +357,9 @@ void increment_int32_inplace(DeviceVector<int32_t> data, int64_t n) {
     if (n == 0 || data.data_ptr() == nullptr) return;
     IncI32Params p{};
     p.data = (uint64_t)data.data_ptr();
+    const uint32_t* owned_blocks = vkk::b1_owned_blocks();
+    p.owned_blocks = vkk::or_fallback((uint64_t)owned_blocks);
+    p.has_owned_blocks = owned_blocks ? 1u : 0u;
     p.n = checked_u32_numel(n, "increment_int32_inplace");
     vkk::dispatch_flat("optimizer.increment_i32", backend::vk::SpecList{}, n,
                        256, &p, sizeof(p), &p.wgs_per_row);

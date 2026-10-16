@@ -1,26 +1,17 @@
-// Engine ↔ DataManager glue.
-//
-// engine_setup_data_manager:
-//   Build / replace the engine-owned DataManager from a parsed-out dataset.
-//   Idempotent; an existing DataManager is destroyed first (and its disk
-//   prefetch threads cleanly joined) before swap-in.
-//
-// engine_train_step_managed:
-//   Pull the next training batch from engine().dm and dispatch the same
-//   fused step as engine_train_step. The DataManager owns the per-step
-//   host buffers; we hand pointers into those buffers to the engine as
-//   TorchTensorViews. They stay alive until the *next* call to
-//   next_train_batch().
+// Engine ↔ DataManager glue. Batch host views live until the next fetch.
 
 #include "core/Camera.h"         // camera_model_to_string
 #include "core/ColorSpace.h"
+#include "core/Env.h"
 #include "data/DataManager.h"
 #include "engine/Engine.h"
 #include "engine/EngineInternal.h"
 #include "engine/EngineState.h"
+#include "engine/EngineDiagnostic.h"
 #include "i18n/catalog/Log.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <limits>
@@ -122,6 +113,12 @@ static EngineStepConfig _resolve_split_vs_fpbo(const EngineStepConfig& cfg,
         }
     }
     return out;
+}
+
+EngineStepConfig engine_resolve_managed_step_config(const EngineStepConfig& cfg) {
+    if (!engine().dm) return cfg;
+    return _resolve_split_vs_fpbo(
+        cfg, engine().dm->max_input_batch_size(), engine().dm->max_face_passes());
 }
 
 
@@ -292,16 +289,39 @@ std::map<std::string, float> engine_train_step_managed(
             "call engine_setup_data_manager(...) first.");
     }
 
-    // Resolve split_batch vs FPBO using the DataManager's view of the
-    // dataset (max train batch size × max K). Done once per session via
-    // the static warned flag inside the helper.
-    EngineStepConfig cfg = _resolve_split_vs_fpbo(
-        cfg_in, engine().dm->max_input_batch_size(),
-        engine().dm->max_face_passes());
+    // Accumulation and unequal face sizes cannot use FPBO.
+    EngineStepConfig cfg = engine_resolve_managed_step_config(cfg_in);
 
     const TrainStep& stp = engine().dm->next_train_step();
+    engine_diagnostic_input(stp, step);
     if (stp.subs.empty())
         throw std::runtime_error("engine_train_step_managed: empty training step");
+
+    static const bool log_exposures = [] {
+        const char* value = spirula::env("M0_EXPOSURES");
+        return value && *value && value[0] != '0';
+    }();
+    if (log_exposures) {
+        for (const auto& sub : stp.subs) {
+            const auto& b = *sub;
+            for (int j = 0; j < b.input_num; ++j) {
+                for (int k = 0; k < b.K; ++k) {
+                    int width = b.width, height = b.height;
+                    for (const auto& pass : b.face_passes) {
+                        if (k >= pass.k0 && k < pass.k1) {
+                            width = pass.width;
+                            height = pass.height;
+                            break;
+                        }
+                    }
+                    std::fprintf(stderr,
+                        "M0_EXPOSURE step=%d input=%d face=%d width=%d height=%d pixels=%lld\n",
+                        step, b.indices[(size_t)j], b.post_offsets[(size_t)j] + k,
+                        width, height, (long long)width * height);
+                }
+            }
+        }
+    }
 
     if (cfg.loss.luminance_normalization > 0.0f)
         _normalize_weights_by_luminance(cfg.loss, stp, cfg.loss.luminance_normalization);
@@ -510,25 +530,138 @@ static int _install_and_forward(const DecodedBatch& b, std::string primitive,
     return _batch_views(b, pass);
 }
 
-int engine_eval_forward(std::string primitive, int sh_degree, bool packed) {
+static void m0_eval_visibility(const DecodedBatch& b) {
+    if (!spirula::env_on("M0_VISIBILITY")) return;
+    auto& s = engine();
+    const int64_t n = s.cur_num_splats;
+    const int64_t nnz = s.fwd.gaussian_ids.size();
+    if (b.indices.size() != 1 || s.camera.num != 1 || !s.packed ||
+        n <= 0 || nnz < 0 || nnz > n)
+        throw std::runtime_error("M0 visibility requires one packed post-split eval face");
+
+    static const DataManager* cached_dm = nullptr;
+    static int64_t cached_n = 0;
+    static std::vector<uint8_t> owners;
+    static std::array<std::array<std::vector<uint8_t>, 2>, 3> context_seen;
+    static std::array<int64_t, 3> owned_left{};
+    static std::array<std::array<int64_t, 2>, 3> context_count{};
+    static std::array<std::array<int64_t, 2>, 3> view_count{};
+    static std::array<std::array<int64_t, 2>, 3> isect_load{};
+    static int64_t traced = 0;
+    if (cached_dm != s.dm.get() || cached_n != n) {
+        std::vector<float3> means((size_t)n);
+        backend::memcpy_sync(means.data(), s.world.means.data_ptr(),
+                             (size_t)n * sizeof(float3), backend::MemcpyKind::DeviceToHost);
+        if (const char* error = backend::last_error()) throw std::runtime_error(error);
+        std::vector<int32_t> order;
+        order.reserve((size_t)n);
+        for (int64_t id = 0; id < n; ++id) {
+            const float3 v = means[(size_t)id];
+            if (std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z))
+                order.push_back((int32_t)id);
+        }
+        if (order.empty()) throw std::runtime_error("M0 visibility has no finite source rows");
+        const int64_t finite = (int64_t)order.size();
+        std::printf("M0_VIS_PARTITION model=finite_row_median source_rows=%lld finite_rows=%lld excluded_rows=%lld\n",
+                    (long long)n, (long long)finite, (long long)(n - finite));
+        owners.assign((size_t)n, 0);
+        owned_left = {};
+        for (int axis = 0; axis < 3; ++axis) {
+            auto coordinate = [&](int32_t id) {
+                const float3 v = means[(size_t)id];
+                return axis == 0 ? v.x : axis == 1 ? v.y : v.z;
+            };
+            std::nth_element(order.begin(), order.begin() + finite / 2, order.end(),
+                             [&](int32_t a, int32_t b) {
+                                 const float av = coordinate(a), bv = coordinate(b);
+                                 return av != bv ? av < bv : a < b;
+                             });
+            for (int64_t i = 0; i < finite / 2; ++i)
+                owners[(size_t)order[(size_t)i]] |= (uint8_t)(1 << axis);
+            owned_left[(size_t)axis] = finite / 2;
+        }
+        cached_dm = s.dm.get();
+        cached_n = n;
+        traced = 0;
+        context_count = {};
+        view_count = {};
+        isect_load = {};
+        for (auto& axis : context_seen)
+            for (auto& block : axis) block.assign((size_t)n, 0);
+    }
+
+    std::vector<int32_t> ids((size_t)nnz);
+    if (nnz) {
+        backend::memcpy_sync(ids.data(), s.fwd.gaussian_ids.data_ptr(),
+                             (size_t)nnz * sizeof(int32_t), backend::MemcpyKind::DeviceToHost);
+        if (const char* error = backend::last_error()) throw std::runtime_error(error);
+    }
+    std::array<int64_t, 3> left{};
+    for (int32_t id : ids) {
+        if (id < 0 || id >= n) throw std::runtime_error("M0 visibility row out of range");
+        const uint8_t mask = owners[(size_t)id];
+        for (int axis = 0; axis < 3; ++axis) left[(size_t)axis] += (mask >> axis) & 1;
+    }
+    for (int axis = 0; axis < 3; ++axis) {
+        const int block = left[(size_t)axis] * 2 >= nnz ? 1 : 0;
+        ++view_count[(size_t)axis][(size_t)block];
+        isect_load[(size_t)axis][(size_t)block] += s.fwd.flatten_ids.size();
+        auto& seen = context_seen[(size_t)axis][(size_t)block];
+        for (int32_t id : ids) {
+            if (((owners[(size_t)id] >> axis) & 1) == block || seen[(size_t)id]) continue;
+            seen[(size_t)id] = 1;
+            ++context_count[(size_t)axis][(size_t)block];
+        }
+    }
+    std::printf("M0_VIS input=%d width=%d height=%d active=%lld nnz=%lld isects=%lld x=%lld y=%lld z=%lld\n",
+                b.indices[0], s.camera.width, s.camera.height,
+                (long long)n, (long long)nnz, (long long)s.fwd.flatten_ids.size(),
+                (long long)left[0], (long long)left[1], (long long)left[2]);
+    std::fflush(stdout);
+    if (++traced == s.dm->num_train()) {
+        for (int axis = 0; axis < 3; ++axis)
+            std::printf("M0_VIS_SUM axis=%c owned=%lld,%lld views=%lld,%lld isects=%lld,%lld context_union=%lld,%lld\n",
+                        "xyz"[axis], (long long)(n - owned_left[(size_t)axis]),
+                        (long long)owned_left[(size_t)axis],
+                        (long long)view_count[(size_t)axis][0],
+                        (long long)view_count[(size_t)axis][1],
+                        (long long)isect_load[(size_t)axis][0],
+                        (long long)isect_load[(size_t)axis][1],
+                        (long long)context_count[(size_t)axis][0],
+                        (long long)context_count[(size_t)axis][1]);
+        std::fflush(stdout);
+    }
+}
+
+int engine_eval_forward(std::string primitive, int sh_degree, bool packed,
+                        int index) {
     if (!engine().dm)
         throw std::runtime_error(
             "engine_eval_forward: DataManager not configured — call "
             "engine_setup_data_manager(...) with the eval split first.");
 
-    const TrainStep& stp = engine().dm->next_train_step();
-    if (stp.subs.empty()) return 0;
-    if (stp.subs.size() != 1)
-        throw std::runtime_error(
-            "engine_eval_forward: expected one sub-batch per eval step "
-            "(set train_batch_size = 1)");
-
-    const DecodedBatch& b = *stp.subs[0];
+    static DecodedBatch ordered;
+    const DecodedBatch* batch = nullptr;
+    if (index >= 0) {
+        engine().dm->fetch_one(index, ordered);
+        batch = &ordered;
+    } else {
+        const TrainStep& stp = engine().dm->next_train_step();
+        if (stp.subs.empty()) return 0;
+        if (stp.subs.size() != 1)
+            throw std::runtime_error(
+                "engine_eval_forward: expected one sub-batch per eval step "
+                "(set train_batch_size = 1)");
+        batch = stp.subs[0].get();
+    }
+    const DecodedBatch& b = *batch;
     if (b.face_passes.size() > 1)
         throw std::runtime_error(
             "engine_eval_forward: the eval split must be baked with uniform "
             "faces, which is what TrainerCore does");
-    return _install_and_forward(b, std::move(primitive), sh_degree, packed);
+    const int views = _install_and_forward(b, std::move(primitive), sh_degree, packed);
+    m0_eval_visibility(b);
+    return views;
 }
 
 int engine_preview_forward(int index, std::string primitive, int sh_degree,

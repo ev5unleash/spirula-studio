@@ -4,6 +4,7 @@
 #include "engine/EngineCommon.h"
 #include "engine/EngineInternal.h"
 #include "engine/EngineState.h"
+#include "engine/EngineDiagnostic.h"
 
 #include "core/Env.h"
 
@@ -68,6 +69,7 @@ bool bin_tile_log() {
 }  // namespace
 
 void engine_bin_tile_observe(double step_seconds) {
+    engine_diagnostic_timing(step_seconds);
     if (engine().bin_tile_request != 0) return;
     BinTileChoice& c = bin_choice();
     if (c.warmup > 0) { --c.warmup; return; }

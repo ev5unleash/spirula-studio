@@ -99,6 +99,13 @@ struct FpboParams {
     float* radii;          // (kScaleAgnostic)
     float* densify_score;  // optional output (has_densify_score)
     int* steps;            // per-splat steps (has_steps)
+    uint* owned_blocks;    // one nonzero entry per 256-row block
+    float* grad_means;
+    float* grad_quats;
+    float* grad_scales;
+    float* grad_opacities;
+    float* grad_dc;
+    float* grad_sh;
     // learning rates + regularizer weights (already divided by N host-side)
     float lr_means;
     float lr_quats;
@@ -121,6 +128,8 @@ struct FpboParams {
     int32_t scalar_step;
     uint32_t has_steps;
     uint32_t has_densify_score;
+    uint32_t has_owned_blocks;
+    uint32_t gradient_mode; // 0 internal, 1 capture, 2 external
     uint32_t C;
     uint32_t N;
     uint32_t width;
@@ -193,9 +202,13 @@ void fpbo(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
     // Grid-fold tail: block_id can pad past the last quant block, so bounds
     // writes below are blk_ok-gated (optimizer.slang convention).
     bool blk_ok = block_id < (p.N + 255u) / 256u;
+    // Ownership is block-uniform; leave before any quantized-state barrier.
+    if (p.has_owned_blocks != 0 &&
+        (!blk_ok || p.owned_blocks[block_id] == 0))
+        return;
 
     int cid_0 = 0, cid_1 = int(p.C);
-    if (kPacked != 0) {
+    if (kPacked != 0 && p.gradient_mode != 2) {
         cid_0 = inside ? p.camera_id_bounds[gid] : 0;
         cid_1 = inside ? p.camera_id_bounds[gid + 1] : 0;
     }
@@ -209,34 +222,71 @@ void fpbo(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
         s = pb_load_splat(p.means, p.quats, p.scales, p.opacities,
                           p.features_dc, gid);
 
-        // v_splats_world contributions from rasterization backward
-        // (World::atomicLoad; kVwMask folds absent tensors away).
-        if ((kVwMask & 1) != 0)
-            g.v_mean += float3(p.vw_means[3 * gid], p.vw_means[3 * gid + 1],
-                               p.vw_means[3 * gid + 2]);
-        if ((kVwMask & 2) != 0)
-            g.v_quat += float4(p.vw_quats[4 * gid], p.vw_quats[4 * gid + 1],
-                               p.vw_quats[4 * gid + 2],
-                               p.vw_quats[4 * gid + 3]);
-        if ((kVwMask & 4) != 0)
-            g.v_scale += float3(p.vw_scales[3 * gid],
-                                p.vw_scales[3 * gid + 1],
-                                p.vw_scales[3 * gid + 2]);
-        if ((kVwMask & 8) != 0)
-            g.v_opacity += p.vw_opacities[gid];
-        if ((kVwMask & 16) != 0)
-            g.v_dc += float3(p.vw_dc[3 * gid], p.vw_dc[3 * gid + 1],
-                             p.vw_dc[3 * gid + 2]);
+        if (p.gradient_mode == 2) {
+            g.v_mean = float3(p.grad_means[3 * gid], p.grad_means[3 * gid + 1],
+                              p.grad_means[3 * gid + 2]);
+            g.v_quat = float4(p.grad_quats[4 * gid], p.grad_quats[4 * gid + 1],
+                              p.grad_quats[4 * gid + 2], p.grad_quats[4 * gid + 3]);
+            g.v_scale = float3(p.grad_scales[3 * gid], p.grad_scales[3 * gid + 1],
+                               p.grad_scales[3 * gid + 2]);
+            g.v_opacity = p.grad_opacities[gid];
+            g.v_dc = float3(p.grad_dc[3 * gid], p.grad_dc[3 * gid + 1],
+                            p.grad_dc[3 * gid + 2]);
+            for (int j = 0; j < int(p.num_sh_buffer); ++j) {
+                gindex_t idx = (gindex_t)gid * (gindex_t)(3u * p.num_sh_buffer) +
+                               (gindex_t)(3 * j);
+                float* row = elem_at(p.grad_sh, idx);
+                g.v_sh[j] = float3(row[0], row[1], row[2]);
+            }
+        } else {
+            if ((kVwMask & 1) != 0)
+                g.v_mean += float3(p.vw_means[3 * gid], p.vw_means[3 * gid + 1],
+                                   p.vw_means[3 * gid + 2]);
+            if ((kVwMask & 2) != 0)
+                g.v_quat += float4(p.vw_quats[4 * gid], p.vw_quats[4 * gid + 1],
+                                   p.vw_quats[4 * gid + 2], p.vw_quats[4 * gid + 3]);
+            if ((kVwMask & 4) != 0)
+                g.v_scale += float3(p.vw_scales[3 * gid], p.vw_scales[3 * gid + 1],
+                                    p.vw_scales[3 * gid + 2]);
+            if ((kVwMask & 8) != 0)
+                g.v_opacity += p.vw_opacities[gid];
+            if ((kVwMask & 16) != 0)
+                g.v_dc += float3(p.vw_dc[3 * gid], p.vw_dc[3 * gid + 1],
+                                 p.vw_dc[3 * gid + 2]);
+            ShAddrW sha = sh_quant_addr_w(p.num_sh_buffer, 0);
+            gindex_t qbase = sh_addr_base(sha, gid);
+            gindex_t vstride = sha.bounds_stride;
+            gindex_t vpitch = sha.pair_pitch;
+            SS_DISPATCH_CAM_DIST(_fpbo_call)
+        }
 
-        // camera loop (register accumulation, no atomics)
-        // kLevel 1: source SH reads go through the 16-bit value codec in
-        // the FPBO layout (docs/notes/sh-quant-layout.md).
-        ShAddrW sha = sh_quant_addr_w(p.num_sh_buffer, 0);
-        gindex_t qbase = sh_addr_base(sha, gid);
-        gindex_t vstride = sha.bounds_stride;
-        gindex_t vpitch = sha.pair_pitch;
-        SS_DISPATCH_CAM_DIST(_fpbo_call)
-
+        if (p.gradient_mode == 1) {
+            p.grad_means[3 * gid] = g.v_mean.x;
+            p.grad_means[3 * gid + 1] = g.v_mean.y;
+            p.grad_means[3 * gid + 2] = g.v_mean.z;
+            p.grad_quats[4 * gid] = g.v_quat.x;
+            p.grad_quats[4 * gid + 1] = g.v_quat.y;
+            p.grad_quats[4 * gid + 2] = g.v_quat.z;
+            p.grad_quats[4 * gid + 3] = g.v_quat.w;
+            p.grad_scales[3 * gid] = g.v_scale.x;
+            p.grad_scales[3 * gid + 1] = g.v_scale.y;
+            p.grad_scales[3 * gid + 2] = g.v_scale.z;
+            p.grad_opacities[gid] = g.v_opacity;
+            p.grad_dc[3 * gid] = g.v_dc.x;
+            p.grad_dc[3 * gid + 1] = g.v_dc.y;
+            p.grad_dc[3 * gid + 2] = g.v_dc.z;
+            for (int j = 0; j < int(p.num_sh_buffer); ++j) {
+                gindex_t idx = (gindex_t)gid * (gindex_t)(3u * p.num_sh_buffer) +
+                               (gindex_t)(3 * j);
+                float* row = elem_at(p.grad_sh, idx);
+                float3 v = g.v_sh[j];
+                row[0] = v.x; row[1] = v.y; row[2] = v.z;
+            }
+        }
+    }
+    if (p.gradient_mode == 1)
+        return;
+    if (inside) {
         // per-splat regularizers -> gradient
         float v_losses[5] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
         float3 v_scale_t;

@@ -8,6 +8,7 @@
 //   sfm_ba_cpu_test [--quick]
 //
 // Prints PASS/FAIL per case and returns 0/1. Needs no GPU. See docs/testing.md.
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -174,21 +175,65 @@ void testJacobianRig(const char* name, const double* intr0, std::mt19937& rng) {
     report(name, worst, 1e-6);
 }
 
-// At a zero angle-axis -- the identity every seed pair starts from -- the norm
-// has no derivative. That belongs to the axis columns alone.
-template <class M>
-void testZeroRotation(const char* name, const double* intr) {
-    double pose[6] = {0, 0, 0, 0.1, -0.2, 0.0};
-    double X[3] = {0.3, -0.4, 3.0}, obs[2] = {5.0, -2.0};
-    double r[2], Jc[2 * (6 + M::kNumIntr)], Jp[6];
-    bacpu::jacobian<M>(pose, intr, X, obs, r, Jc, Jp);
-    const int DOF = 6 + M::kNumIntr;
-    bool ok = std::isfinite(r[0]) && std::isfinite(r[1]);
-    for (int i = 0; i < 6; i++) ok = ok && std::isfinite(Jp[i]);
-    for (int row = 0; row < 2; row++)
-        for (int k = 3; k < DOF; k++) ok = ok && std::isfinite(Jc[row * DOF + k]);
-    printf("%-34s %s\n", name, ok ? "                          PASS" : "  FAIL");
-    if (!ok) g_fail++;
+// The exact-zero angle-axis limit must include every rotation derivative,
+// including both rotations in the rig composition.
+template <class M, bool Rig = false>
+void testZeroRotation(const char* name, const double* intr0) {
+    constexpr int DOF = (Rig ? 12 : 6) + M::kNumIntr;
+    double worst = 0;
+    bool finite = true;
+    for (int trial = 0; trial < (Rig ? 3 : 1); trial++) {
+        double pose[6] = {0, 0, 0, 0.1, -0.2, 0.0};
+        double ext[6] = {0, 0, 0, -0.05, 0.03, 0.02};
+        if (trial == 1) ext[0] = 0.15;
+        if (trial == 2) pose[1] = -0.12;
+        double intr[M::kNumIntr];
+        std::copy(intr0, intr0 + M::kNumIntr, intr);
+        double X[3] = {0.3, -0.4, 3.0}, obs[2] = {5.0, -2.0};
+        double r[2], Jc[2 * DOF], Jp[6];
+        if constexpr (Rig)
+            bacpu::jacobianRig<M>(pose, ext, intr, X, obs, r, Jc, Jp);
+        else
+            bacpu::jacobian<M>(pose, intr, X, obs, r, Jc, Jp);
+        for (double v : r) finite = std::isfinite(v) && finite;
+        for (double v : Jc) finite = std::isfinite(v) && finite;
+        for (double v : Jp) finite = std::isfinite(v) && finite;
+        for (int k = 0; k < DOF + 3; k++) {
+            double* p;
+            if (k < 6) p = &pose[k];
+            else if constexpr (Rig)
+                p = k < 12 ? &ext[k - 6] : k < DOF ? &intr[k - 12] : &X[k - DOF];
+            else
+                p = k < DOF ? &intr[k - 6] : &X[k - DOF];
+            const double keep = *p;
+            const double h = 1e-6 * std::max(1.0, std::fabs(keep));
+            double rp[2], rm[2];
+            auto residual = [&](double* out) {
+                if constexpr (Rig)
+                    bacpu::residualRig<M>(pose, ext, intr, X, obs, out);
+                else
+                    bacpu::residual<M>(pose, intr, X, obs, out);
+            };
+            *p = keep + h;
+            residual(rp);
+            *p = keep - h;
+            residual(rm);
+            *p = keep;
+            for (int row = 0; row < 2; row++) {
+                const double num = (rp[row] - rm[row]) / (2 * h);
+                const double ana = k < DOF ? Jc[row * DOF + k] : Jp[row * 3 + k - DOF];
+                // std::max can hide NaNs, so check before aggregating.
+                if (!std::isfinite(rp[row]) || !std::isfinite(rm[row]) ||
+                    !std::isfinite(num) || !std::isfinite(ana)) {
+                    finite = false;
+                    continue;
+                }
+                worst = std::max(worst, std::fabs(num - ana) /
+                                            std::max(1.0, std::fabs(num) + std::fabs(ana)));
+            }
+        }
+    }
+    report(name, finite ? worst : INFINITY, 1e-6);
 }
 
 void testEquirectSeamResidual() {
@@ -556,6 +601,11 @@ int run(int argc, char** argv) {
         testZeroRotation<bacpu::ThinPrismFisheyeModel>("zero rotation thin_prism",
                                                        defaultIntr(8, n));
         testZeroRotation<bacpu::EquirectModel>("zero rotation equirect", defaultIntr(9, n));
+        testZeroRotation<bacpu::OpenCVModel, true>("zero rig opencv", defaultIntr(3, n));
+        testZeroRotation<bacpu::SnavelyModel, true>("zero rig snavely", defaultIntr(0, n));
+        testZeroRotation<bacpu::ThinPrismFisheyeModel, true>("zero rig thin_prism",
+                                                            defaultIntr(8, n));
+        testZeroRotation<bacpu::EquirectModel, true>("zero rig equirect", defaultIntr(9, n));
         testEquirectSeamResidual();
         testEquirectSeamJacobian();
     }

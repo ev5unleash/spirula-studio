@@ -21,6 +21,10 @@ struct Allocation {
     VkDeviceSize size = 0;    // rounded-up capacity
     void* mapped = nullptr;   // non-null for host-pinned allocations
     uint64_t device_addr = 0; // buffer device address (all allocations)
+    VkDeviceSize backing_bytes = 0;
+    BackingCategory category = BackingCategory::Device;
+    uint32_t heap = 0;
+    bool host_visible = false;
 };
 
 // Resolves a pointer that may be a device address (from device_malloc) or a
@@ -29,6 +33,9 @@ struct Allocation {
 // `is_device` distinguishes the two maps.
 bool resolve_pointer(const void* p, Allocation* alloc, VkDeviceSize* offset,
                      bool* is_device);
+
+// Private bounded smoke: uses the same reservation transitions as allocations.
+bool backing_cap_smoke();
 
 // --- streams ---------------------------------------------------------------
 

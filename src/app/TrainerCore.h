@@ -187,6 +187,7 @@ public:
     // Output-dir / config.json overrides, for a front-end that owns them.
     std::string out_dir_override;      // "" = derive from cfg
     bool        write_config_json = true;
+    bool diagnostic_sync_sampler = false;
 
     // Filled by load_dataset().
     ParsedDataset ds;
@@ -194,6 +195,9 @@ public:
     bool has_mask = false;
     bool has_depth = false;
     bool has_normal = false;
+    std::string b1_views_sha256;
+    std::string b1_view_policy = "partitioned";
+    std::vector<int32_t> b1_full_train_indices;
 
     // Filled by setup_engine().
     std::filesystem::path out_dir;
@@ -258,10 +262,11 @@ public:
     // colour-corrected render). LPIPS is not computed here -- pass
     // --save-eval-images and run reference/python/eval_lpips.py over the PNGs.
     void eval();
+    void eval_ply(const std::string& path);
 
     // Restore engine state from cfg.resume; sets start_step. Called by
     // setup_engine().
-    void restore_checkpoint();
+    std::string restore_checkpoint();
 
     // Wall clock of the step loop, with paused spans excluded. 0 before
     // train() starts, frozen once it returns.
@@ -281,6 +286,7 @@ public:
     void log(const std::string& msg);
 
 private:
+    void run_causal_diagnostic(int completed_step);
     // Bracket the train loop's pause gate so paused time stays out of
     // elapsed_seconds().
     void pause_clock_start();

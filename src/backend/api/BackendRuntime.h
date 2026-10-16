@@ -101,7 +101,7 @@ int device_current();
 // no device selected yet). Callers must fall back on the flags rather than
 // treat 0 as "empty". Never throws; cheap enough to poll per frame.
 struct MemoryUsage {
-    uint64_t process_bytes = 0;  // device memory allocated by THIS process
+    uint64_t process_bytes = 0;  // best-effort process estimate; Vulkan device_malloc only
     uint64_t used_bytes = 0;     // device memory in use system-wide (all apps)
     uint64_t total_bytes = 0;    // device-local memory capacity
     bool has_process = false;
@@ -110,7 +110,26 @@ struct MemoryUsage {
 };
 MemoryUsage memory_usage();
 
+#ifdef SS_BACKEND_VULKAN
+enum class BackingCategory { Device, Pinned, Staging, Params, Count };
+struct BackingUsage {
+    uint64_t limit = 0, current = 0, peak = 0, reserved = 0;
+    uint64_t reservation_peak = 0;  // conservative current+reserved high-water
+    uint64_t failures = 0, allocation_calls = 0;
+    uint64_t category_current[4] = {}, category_peak[4] = {};
+    uint64_t category_reserved[4] = {}, category_reservation_peak[4] = {};
+    uint64_t category_failures[4] = {};
+    uint64_t host_visible_current = 0, host_visible_peak = 0;
+    uint64_t budget = 0, usage = 0;
+    bool has_budget = false;
+};
+// All owned VkDeviceMemory backing, including host-visible storage, counted once.
+BackingUsage backing_usage();
+void backing_report(const char* lifecycle);
+#endif
+
 // --- memory ---
+// Vulkan SS_WORKER_DEVICE_LIMIT_BYTES refusal throws, including pinned/staging.
 void* device_malloc(size_t bytes);
 // CONTRACT: device_free must ensure all in-flight device work that may
 // reference the allocation completes before the memory is reclaimed

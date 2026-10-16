@@ -192,6 +192,11 @@ enum class SaveClass : uint8_t {
   X(RasterBwdVViewmats             , "raster_bwd.v_viewmats",             Other    , Never) \
   X(RasterBwdVScreen               , "raster_bwd.v_screen",               SplatXImg, Never) \
   X(RasterBwdVWorld                , "raster_bwd.v_world",                Splat    , Never) \
+  X(RasterBwdOrderedPartials       , "raster_bwd.ordered_partials",       SplatXImg, Never) \
+  X(RasterBwdOrderedKeysA          , "raster_bwd.ordered_keys_a",         SplatXImg, Never) \
+  X(RasterBwdOrderedKeysB          , "raster_bwd.ordered_keys_b",         SplatXImg, Never) \
+  X(RasterBwdOrderedPermA          , "raster_bwd.ordered_perm_a",         SplatXImg, Never) \
+  X(RasterBwdOrderedPermB          , "raster_bwd.ordered_perm_b",         SplatXImg, Never) \
   /* ---- fused proj-bwd scratch ---- */ \
   X(FusedProjBwdGaussSorted        , "fused_proj_bwd.gauss_sorted",       SplatXImg, Never) \
   X(FusedProjBwdPerm               , "fused_proj_bwd.perm",               SplatXImg, Never) \

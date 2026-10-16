@@ -11,10 +11,14 @@
 #include <kernels/raster/RasterizationEval3DBwd.cuh>
 
 #include "backend/vulkan/kernels/KernelCommon.h"
+#include "backend/vulkan/kernels/B1Ownership.h"
+#include <shaders/screen_layout.h>
 
 #include <optional>
 
 namespace {
+
+thread_local bool g1_ordered_raster = false;
 
 // Mirrors Raster2dBwdParams in shaders/rasterize_bwd.slang.
 struct Raster2dBwdParams {
@@ -26,11 +30,22 @@ struct Raster2dBwdParams {
         v_dist_depth;
     uint64_t v_s_screen;
     uint64_t o_accum_weight, o_accum_weight_den;
+    uint64_t ordered_partials;
     uint32_t I, N, n_isects, width, height, tile_width, tile_height, macro_log2;
+    uint32_t ordered_stride;
 };
-static_assert(sizeof(Raster2dBwdParams) == 20 * 8 + 8 * 4,
+static_assert(sizeof(Raster2dBwdParams) == 21 * 8 + 10 * 4,
               "params layout must match the slang struct");
 
+
+struct RasterOrderedParams {
+    uint64_t flatten_ids, keys, perm, partials, v_screen;
+    uint64_t gaussian_ids, accum_weight, accum_weight_den;
+    uint32_t n_isects, subtiles, wgs_per_row;
+    uint32_t N, stride, accum_mode;
+};
+static_assert(sizeof(RasterOrderedParams) == 8 * 8 + 6 * 4,
+              "params layout must match the slang struct");
 // Mirrors Raster3dgutBwdParams.
 struct Raster3dgutBwdParams {
     uint64_t means, quats, scales, s_screen, gaussian_ids;
@@ -59,6 +74,10 @@ uint32_t dist_spec_bwd(DistortionType dist_type) {
 }
 
 }  // namespace
+
+void vkk::g1_set_ordered_raster(bool enabled) {
+    g1_ordered_raster = enabled;
+}
 
 /* API definition matching kernels/raster/RasterizationBwd.cuh */
 
@@ -117,10 +136,65 @@ std::tuple<
     const uint32_t tile_width = (uint32_t)tile_offsets.size<2>();
     const uint32_t n_isects = (uint32_t)flatten_ids.size();
 
+    const bool ordered = g1_ordered_raster;
+    uint32_t subtiles = 0;
+    const uint32_t ordered_stride = SCR2_STRIDE +
+        (aw ? accum_lanes(accum_mode) : 0);
+    if (ordered) {
+        if (I != 1 || num_splats < 0 ||
+            (packed ? gaussian_ids.size() : num_splats) >
+                0x7fffffffLL / SCR2_STRIDE ||
+            macro_log2 < kMacroLog2Min || macro_log2 > kMacroLog2Max)
+            throw std::runtime_error(
+                "G1 ordered raster requires single-image 3dgs "
+                "and supported binning/row sizes");
+        subtiles = 1u << (2 * macro_log2);
+        const uint64_t scalars = uint64_t(flatten_ids.size()) *
+                                 subtiles * ordered_stride;
+        if (scalars > 0x7fffffffULL ||
+            (uint64_t(tile_height) << macro_log2) > 65535 ||
+            (uint64_t(tile_width) << macro_log2) > 65535)
+            throw std::runtime_error(
+                "G1 ordered raster scratch/index or dispatch limit exceeded");
+    }
+
     if (n_isects > 0) {
         Vanilla3DGS<0>::ScreenBuffer sb(splats_s);
         Vanilla3DGS<0>::ScreenBuffer vsb(v_splats_s.value());
 
+
+        DeviceVector<float> partials;
+        DeviceVector<int32_t> keys_a, keys_b, perm_a, perm_b;
+        RasterOrderedParams op{};
+        if (ordered) {
+            partials.resize(PoolSlot::RasterBwdOrderedPartials,
+                            int64_t(n_isects) * subtiles * ordered_stride);
+            // Culled, untouched and outside-image subtiles remain explicit zero.
+            partials.zero();
+            keys_a.resize(PoolSlot::RasterBwdOrderedKeysA, n_isects);
+            keys_b.resize(PoolSlot::RasterBwdOrderedKeysB, n_isects);
+            perm_a.resize(PoolSlot::RasterBwdOrderedPermA, n_isects);
+            perm_b.resize(PoolSlot::RasterBwdOrderedPermB, n_isects);
+            op.flatten_ids = (uint64_t)flatten_ids.data_ptr();
+            op.keys = (uint64_t)keys_a.data_ptr();
+            op.perm = (uint64_t)perm_a.data_ptr();
+            op.partials = (uint64_t)partials.data_ptr();
+            op.v_screen = (uint64_t)vsb.raw_data();
+            op.n_isects = n_isects;
+            op.subtiles = subtiles;
+            op.gaussian_ids = vkk::or_fallback(gaussian_ids.data_ptr());
+            op.accum_weight = vkk::or_fallback(o_accum_weight.data_ptr());
+            op.accum_weight_den = vkk::or_fallback(
+                accum_mode == DensifyAccumMode::Avg
+                    ? o_accum_weight.data_ptr() + num_splats : nullptr);
+            op.N = packed ? 0u : (uint32_t)num_splats;
+            op.stride = ordered_stride;
+            op.accum_mode = (uint32_t)accum_mode;
+            const auto g = vkk::fold_1d(n_isects, 256);
+            op.wgs_per_row = g.per_row;
+            vkk::dispatch_ring("rasterize_bwd.raster_ordered_keys", {},
+                               g.per_row, g.rows, 1, &op, sizeof(op));
+        }
         Raster2dBwdParams p{};
         p.s_screen = (uint64_t)sb.raw_data();
         p.gaussian_ids = vkk::or_fallback(gaussian_ids.data_ptr());
@@ -158,6 +232,7 @@ std::tuple<
         p.o_accum_weight_den = vkk::or_fallback(
             accum_mode == DensifyAccumMode::Avg
                 ? o_accum_weight.data_ptr() + num_splats : nullptr);
+        p.ordered_partials = vkk::or_fallback(partials.data_ptr());
         p.I = I;
         p.N = packed ? 0u : (uint32_t)num_splats;
         p.n_isects = n_isects;
@@ -166,15 +241,30 @@ std::tuple<
         p.tile_width = tile_width;
         p.tile_height = tile_height;
         p.macro_log2 = (uint32_t)macro_log2;
+        p.ordered_stride = ordered_stride;
 
         // Spec IDs: cam(0, unused), dist(1), median(2), accum(3),
-        // viewmat(4, unused), packed(5).
+        // viewmat(4, unused), packed(5), distortion(6, unused), ordered(7).
         backend::vk::SpecList spec{0u,           spec_dist,
                                    md ? 1u : 0u, (uint32_t)accum_mode,
-                                   0u,           packed ? 1u : 0u};
+                                   0u,           packed ? 1u : 0u,
+                                   0u, ordered ? 1u : 0u};
         vkk::dispatch_ring("rasterize_bwd.rasterize_bwd_2d", spec, I,
                            tile_height << macro_log2,
                            tile_width << macro_log2, &p, sizeof(p));
+        if (ordered) {
+            backend::DoubleBuffer<int32_t> keys(keys_a.data_ptr(),
+                                                keys_b.data_ptr());
+            backend::DoubleBuffer<int32_t> perm(perm_a.data_ptr(),
+                                                perm_b.data_ptr());
+            backend::sort_pairs(keys, perm, n_isects, 0, 32);
+            op.keys = (uint64_t)keys.current();
+            op.perm = (uint64_t)perm.current();
+            const auto g = vkk::fold_1d(n_isects, 1);
+            op.wgs_per_row = g.per_row;
+            vkk::dispatch_ring("rasterize_bwd.raster_ordered_reduce", {},
+                               g.per_row, g.rows, 1, &op, sizeof(op));
+        }
     }
 
     return std::make_tuple(v_splats_w.value(), v_splats_s.value(),
@@ -219,6 +309,8 @@ std::tuple<
     std::optional<std::vector<DeviceTensorFloatND>> v_splats_s,
     bool need_viewmat_grad
 ) {
+    if (g1_ordered_raster)
+        throw std::runtime_error("G1 ordered raster does not support 3dgut");
     (void)loss_map;  // declared but unused by the CUDA kernel as well
     const vkk::CamDistSpec cd = vkk::cam_dist_spec(camera_model, distortion);
     const uint32_t spec_dist = dist_spec_bwd(dist_type);

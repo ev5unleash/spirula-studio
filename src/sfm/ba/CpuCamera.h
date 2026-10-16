@@ -379,15 +379,28 @@ template <class Fn> inline void withLoss(const std::string& loss, Fn&& fn) {
 // Residual and Jacobian
 // ================
 
-// out = R(aa) p, matching camera.slang down to its 1e-15 guard on the norm.
+inline double primalValue(double x) { return x; }
+template <int N> inline double primalValue(const Jet<N>& x) { return x.a; }
+
 template <class T> inline void angleAxisRotate(const T axis[3], const T p[3], T out[3]) {
-    T theta = sqrt(axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]);
-    T inv = T(1.0) / (theta + T(1e-15));
+    T norm2 = axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2];
+    // The analytic first-order limit avoids differentiating sqrt at zero.
+    if (primalValue(norm2) == 0.0) {
+        T cr[3] = {axis[1] * p[2] - axis[2] * p[1], axis[2] * p[0] - axis[0] * p[2], axis[0] * p[1] - axis[1] * p[0]};
+        for (int i = 0; i < 3; i++) out[i] = p[i] + cr[i];
+        return;
+    }
+    T theta = sqrt(norm2);
+    T inv = T(1.0) / theta;
     T a[3] = {axis[0] * inv, axis[1] * inv, axis[2] * inv};
-    T st = sin(theta), ct = cos(theta);
+    // Half-angle identities avoid cancellation in 1 - cos(theta).
+    T halfTheta = theta * T(0.5);
+    T sh = sin(halfTheta), ch = cos(halfTheta);
+    T st = T(2.0) * sh * ch, oneMinusCt = T(2.0) * sh * sh;
+    T ct = T(1.0) - oneMinusCt;
     T dp = a[0] * p[0] + a[1] * p[1] + a[2] * p[2];
     T cr[3] = {a[1] * p[2] - a[2] * p[1], a[2] * p[0] - a[0] * p[2], a[0] * p[1] - a[1] * p[0]};
-    T w = dp * (T(1.0) - ct);
+    T w = dp * oneMinusCt;
     for (int i = 0; i < 3; i++) out[i] = p[i] * ct + cr[i] * st + a[i] * w;
 }
 
@@ -429,10 +442,18 @@ inline void residualRig(const double pose[6], const double ext[6], const double*
 // ct I + st [a]_x + (1-ct) a a^T: what angleAxisRotate applies, and its
 // derivative in the point.
 inline void angleAxisMatrix(const double axis[3], double R[9]) {
-    const double th = std::sqrt(axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]);
-    const double inv = 1.0 / (th + 1e-15);
+    const double norm2 = axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2];
+    if (norm2 == 0.0) {
+        R[0] = R[4] = R[8] = 1.0;
+        R[1] = R[2] = R[3] = R[5] = R[6] = R[7] = 0.0;
+        return;
+    }
+    const double th = std::sqrt(norm2);
+    const double inv = 1.0 / th;
     const double a0 = axis[0] * inv, a1 = axis[1] * inv, a2 = axis[2] * inv;
-    const double st = std::sin(th), ct = std::cos(th), w = 1.0 - ct;
+    const double halfTheta = th * 0.5;
+    const double sh = std::sin(halfTheta), ch = std::cos(halfTheta);
+    const double st = 2.0 * sh * ch, w = 2.0 * sh * sh, ct = 1.0 - w;
     R[0] = ct + w * a0 * a0;
     R[1] = w * a0 * a1 - st * a2;
     R[2] = w * a0 * a2 + st * a1;
@@ -444,9 +465,7 @@ inline void angleAxisMatrix(const double axis[3], double R[9]) {
     R[8] = ct + w * a2 * a2;
 }
 
-// d(R(aa) p)/d aa as a 3x3 (row-major), by a dual pass over the axis alone:
-// the norm has no derivative at a zero rotation (every seed pair's first image)
-// and this keeps that 0/0 in the axis columns, where isfinite guards drop it.
+// d(R(aa) p)/d aa as a 3x3 (row-major), by a dual pass over the axis alone.
 inline void angleAxisJacobian(const double axis[3], const double p[3], double J[9], double out[3]) {
     Jet<3> aa[3], pj[3], oj[3];
     for (int i = 0; i < 3; i++) aa[i] = Jet<3>::var(axis[i], i);

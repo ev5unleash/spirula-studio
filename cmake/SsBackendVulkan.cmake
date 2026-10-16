@@ -112,6 +112,9 @@ foreach(test_src ${SS_ENGINE_TESTS})
     target_compile_options(${test_name} PRIVATE
         $<$<COMPILE_LANGUAGE:CXX>:${SPLAT_CXX_FLAGS}>)
 endforeach()
+if(WIN32 AND TARGET g1_native_proof)
+    target_link_libraries(g1_native_proof PRIVATE bcrypt)
+endif()
 
 # The app targets build against the
 # portable engine + Vulkan backend instead.

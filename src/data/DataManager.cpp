@@ -28,6 +28,7 @@
 #include <stdexcept>
 #include <set>
 #include <unordered_map>
+#include <sstream>
 
 
 namespace dmsg = spirula::i18n::msg::data;
@@ -643,6 +644,10 @@ public:
     std::string data_error() const;
     void        resolve_data_error(bool retry);
 
+    std::function<void()> diagnostic_snapshot();
+    std::string diagnostic_signature() const;
+    void diagnostic_native_resume(uint64_t completed_updates);
+
     int64_t num_train()    const { return (int64_t)_train_indices.size(); }
     int64_t num_val()      const { return (int64_t)_val_indices.size(); }
     bool    has_val()      const { return !_val_indices.empty(); }
@@ -750,6 +755,7 @@ private:
     // ---- Batch sampling state --------------------------------------------
     std::mutex                _sampling_mu;
     std::mt19937_64           _rng;
+    std::mt19937_64           _train_rng;
     std::vector<IndexGroup>   _train_groups;
     std::vector<IndexGroup>   _val_groups;
     GroupSampler              _val_sampler;
@@ -760,6 +766,10 @@ private:
     // build_train_schedule_locked() under _sampling_mu.
     std::vector<StepSpec>     _train_schedule;
     size_t                    _train_sched_cursor = 0;
+
+    struct PrefetchedTrainStep : TrainStep {
+        std::atomic<bool> ready{false};
+    };
 
     // The currently-returned-to-caller data. We hold one slot per kind so the
     // reference returned by next_*_batch()/next_train_step() stays valid until
@@ -774,25 +784,22 @@ private:
         int32_t              ds_index   = 0;   // dataset-global image index
         std::shared_ptr<DecodedBatch>     batch;
         std::shared_ptr<std::atomic<int>> remaining;  // decrement on done
-        // Exactly one of the two publish targets is set. For validation
-        // (single-batch) jobs, `ready_q` receives the finished DecodedBatch.
-        // For training (step) jobs, `step_q` receives the finished TrainStep
-        // (and `step` keeps all its sub-batches alive). The worker that
-        // decrements `remaining` to zero publishes; no separate completer /
-        // scheduler-side wait is involved, so all worker pools stay saturated
-        // while multiple batches/steps are in flight.
+        // Validation publishes on completion; replay training queues shells
+        // first and marks them ready only after every modality completes.
         BoundedQueue<std::shared_ptr<DecodedBatch>>* ready_q = nullptr;
-        std::shared_ptr<TrainStep>                   step;
-        BoundedQueue<std::shared_ptr<TrainStep>>*    step_q  = nullptr;
+        std::shared_ptr<PrefetchedTrainStep>                   step;
+        BoundedQueue<std::shared_ptr<PrefetchedTrainStep>>*    step_q  = nullptr;
     };
 
     bool _disk_started = false;
+    bool _diagnostic_sync = false;
+    std::function<void()> _diagnostic_initial_sampler;
 
     std::unique_ptr<BoundedQueue<DecodeJob>> _q_rgb;
     std::unique_ptr<BoundedQueue<DecodeJob>> _q_mask;
     std::unique_ptr<BoundedQueue<DecodeJob>> _q_depth;
     std::unique_ptr<BoundedQueue<DecodeJob>> _q_normal;
-    std::unique_ptr<BoundedQueue<std::shared_ptr<TrainStep>>>    _q_ready_train;
+    std::unique_ptr<BoundedQueue<std::shared_ptr<PrefetchedTrainStep>>> _q_ready_train;
     std::unique_ptr<BoundedQueue<std::shared_ptr<DecodedBatch>>> _q_ready_val;
 
     std::vector<std::thread> _workers;
@@ -811,7 +818,8 @@ private:
 
     // The objects currently held alive on behalf of the most recent
     // next_*() return value.
-    std::shared_ptr<TrainStep>    _last_train_step_held;
+    std::shared_ptr<PrefetchedTrainStep> _last_train_step_held;
+    bool _train_step_pending = false;
     std::shared_ptr<DecodedBatch> _last_val_held;
 
     // Decrement a job's shared step/batch counter and, when it reaches zero,
@@ -837,6 +845,7 @@ private:
                                  GroupSampler& sampler,
                                  int batch_size);
     void fill_batch_from_cache(DecodedBatch& b);
+    void fill_single_from_disk(int32_t index, DecodedBatch& out);
 
     // ---- Deterministic epoch schedule (training) -------------------------
     // Rebuild _train_schedule for a fresh epoch: shuffle each group, emit full
@@ -844,6 +853,7 @@ private:
     // (non-warp groups only) across resolutions into <=B-image steps. Caller
     // must hold _sampling_mu.
     void build_train_schedule_locked();
+    void skip_train_steps_locked(uint64_t skip);
     // Return the next scheduled step, rebuilding the schedule at epoch
     // boundaries. Thread-safe (locks _sampling_mu).
     StepSpec next_train_step_spec();
@@ -868,7 +878,7 @@ private:
     // Disk-mode: allocate + enqueue decode jobs for a whole training step
     // (one or more sub-batches), publishing the TrainStep when all decode.
     void enqueue_step(const StepSpec& spec,
-                      BoundedQueue<std::shared_ptr<TrainStep>>& step_q);
+                      BoundedQueue<std::shared_ptr<PrefetchedTrainStep>>& step_q);
 };
 
 
@@ -1018,14 +1028,36 @@ DataManagerImpl::DataManagerImpl(
     uint64_t seed = _cfg.seed != 0 ? _cfg.seed
         : (uint64_t)std::chrono::steady_clock::now().time_since_epoch().count();
     _rng.seed(seed);
+    if (_cfg.independent_train_rng && !_cfg.seed)
+        throw std::runtime_error("DataManager: independent training RNG requires a nonzero seed");
+    if (_cfg.initial_train_step && !_cfg.independent_train_rng)
+        throw std::runtime_error("DataManager: training offset requires independent training RNG");
+    if (_cfg.independent_train_rng) _train_rng.seed(seed);
 
     probe_dtypes();
 
     _train_groups = build_index_groups_member(_train_indices);
     _val_groups   = build_index_groups_member(_val_indices);
-    for (auto& g : _train_groups) g.rewind(_rng, /*eval=*/false);
+    auto& train_rng = _cfg.independent_train_rng ? _train_rng : _rng;
+    for (auto& g : _train_groups) g.rewind(train_rng, /*eval=*/false);
     for (auto& g : _val_groups)   g.rewind(_rng, /*eval=*/true);
     _val_sampler   = GroupSampler(_val_groups);
+    _diagnostic_sync = _cfg.diagnostic_sync || spirula::env("B2_CAUSAL_STEP") != nullptr;
+    if (_diagnostic_sync) {
+        _diagnostic_initial_sampler =
+            [this, rng = _rng, train_rng = _train_rng,
+             groups = _train_groups, val_groups = _val_groups,
+             sampler = _val_sampler] {
+                _rng = rng;
+                _train_rng = train_rng;
+                _train_groups = groups;
+                _val_groups = val_groups;
+                _val_sampler = sampler;
+                _next_batch_id.store(0);
+                _cpu_train_step.subs.clear();
+                build_train_schedule_locked();
+            };
+    }
 
     // Build the first epoch's deterministic training schedule (once-per-epoch
     // traversal + cross-group remainder packing). The DISK scheduler thread
@@ -1033,11 +1065,14 @@ DataManagerImpl::DataManagerImpl(
     {
         std::lock_guard<std::mutex> lk(_sampling_mu);
         build_train_schedule_locked();
+        skip_train_steps_locked(_cfg.initial_train_step);
     }
 
+    if (_diagnostic_sync && _cfg.train_batch_size != 1)
+        throw std::runtime_error("B2 causal capture requires native one-input steps");
     if (_cfg.cache_mode == CacheMode::CPU) {
         preload_cpu_cache();
-    } else {
+    } else if (!_diagnostic_sync) {
         start_disk_pipeline();
     }
 }
@@ -1601,10 +1636,11 @@ void DataManagerImpl::build_train_schedule_locked() {
     // images are distributed across resolution groups. B == 1 => one image
     // per step (no packing, no grad accumulator; FPBO path).
     const int B = std::max(1, _cfg.train_batch_size);
+    auto& rng = _cfg.independent_train_rng ? _train_rng : _rng;
 
     // Fresh shuffle of every group for this epoch.
     for (auto& g : _train_groups)
-        std::shuffle(g.indices.begin(), g.indices.end(), _rng);
+        std::shuffle(g.indices.begin(), g.indices.end(), rng);
 
     // Full B-image chunks become their own single-sub-batch (homogeneous)
     // steps. Sub-B remainders are collected for cross-group packing; groups
@@ -1667,7 +1703,7 @@ void DataManagerImpl::build_train_schedule_locked() {
         _train_schedule.push_back(std::move(bin));
 
     // Interleave step order so full-chunk and mixed steps don't cluster.
-    std::shuffle(_train_schedule.begin(), _train_schedule.end(), _rng);
+    std::shuffle(_train_schedule.begin(), _train_schedule.end(), rng);
 }
 
 StepSpec DataManagerImpl::next_train_step_spec() {
@@ -1711,7 +1747,7 @@ void DataManagerImpl::start_disk_pipeline() {
     _q_mask   = std::make_unique<BoundedQueue<DecodeJob>>((size_t)job_cap);
     _q_depth  = std::make_unique<BoundedQueue<DecodeJob>>((size_t)job_cap);
     _q_normal = std::make_unique<BoundedQueue<DecodeJob>>((size_t)job_cap);
-    _q_ready_train = std::make_unique<BoundedQueue<std::shared_ptr<TrainStep>>>((size_t)prefetch);
+    _q_ready_train = std::make_unique<BoundedQueue<std::shared_ptr<PrefetchedTrainStep>>>((size_t)prefetch);
     _q_ready_val   = std::make_unique<BoundedQueue<std::shared_ptr<DecodedBatch>>>((size_t)prefetch);
 
     int n_rgb_workers = std::max(1, _cfg.workers_rgb);
@@ -2010,7 +2046,12 @@ void DataManagerImpl::publish_if_done(DecodeJob& job) {
     if (job.remaining->fetch_sub(1) != 1) return;
     if (job.step) {
         for (auto& sub : job.step->subs) sub->build_views();
-        job.step_q->push(job.step);
+        if (_cfg.independent_train_rng) {
+            job.step->ready.store(true, std::memory_order_release);
+            _fault_cv.notify_all();
+        } else {
+            job.step_q->push(job.step);
+        }
     } else {
         job.batch->build_views();
         job.ready_q->push(job.batch);
@@ -2025,9 +2066,9 @@ void DataManagerImpl::publish_if_done(DecodeJob& job) {
 // zero mid-staging before the RGB jobs are pushed).
 void DataManagerImpl::enqueue_step(
     const StepSpec& spec,
-    BoundedQueue<std::shared_ptr<TrainStep>>& step_q)
+    BoundedQueue<std::shared_ptr<PrefetchedTrainStep>>& step_q)
 {
-    auto stepp = std::make_shared<TrainStep>();
+    auto stepp = std::make_shared<PrefetchedTrainStep>();
     stepp->subs.resize(spec.size());
 
     int per_image = 1;
@@ -2045,6 +2086,8 @@ void DataManagerImpl::enqueue_step(
         stepp->subs[i] = std::make_shared<DecodedBatch>();
         allocate_batch(*stepp->subs[i], _train_groups[spec[i].group], spec[i].picks);
     }
+    // Replay mode queues shells in schedule order, not decode-completion order.
+    if (_cfg.independent_train_rng && !step_q.push(stepp)) return;
 
     auto decrement_absent = [&]() {
         DecodeJob j;
@@ -2100,17 +2143,45 @@ void DataManagerImpl::enqueue_step(
 // CPU vs DISK dispatch — public-facing fetch
 // ===========================================================================
 const TrainStep& DataManagerImpl::next_train_step() {
+    if (_diagnostic_sync && _cfg.cache_mode == CacheMode::DISK) {
+        const StepSpec spec = next_train_step_spec();
+        _cpu_train_step.subs.resize(spec.size());
+        for (size_t i = 0; i < spec.size(); ++i) {
+            if (spec[i].picks.size() != 1)
+                throw std::runtime_error("B2 causal step is not one-input");
+            if (!_cpu_train_step.subs[i])
+                _cpu_train_step.subs[i] = std::make_shared<DecodedBatch>();
+            auto& batch = *_cpu_train_step.subs[i];
+            allocate_batch(batch, _train_groups[spec[i].group], spec[i].picks);
+            fill_single_from_disk(spec[i].picks[0], batch);
+            batch.build_views();
+        }
+        return _cpu_train_step;
+    }
     if (_cfg.cache_mode == CacheMode::CPU) {
         return next_step_cpu();
     }
-    std::shared_ptr<TrainStep> s;
-    for (;;) {
+    std::shared_ptr<PrefetchedTrainStep> s;
+    if (_train_step_pending) s = _last_train_step_held;
+    while (!s) {
         auto r = _q_ready_train->pop_for(s, std::chrono::milliseconds(100));
-        if (r == BoundedQueue<std::shared_ptr<TrainStep>>::Pop::Ok) break;
+        if (r == BoundedQueue<std::shared_ptr<PrefetchedTrainStep>>::Pop::Ok) break;
         std::string err = data_error();
         if (!err.empty()) throw DataDecodeError(err);
-        if (r == BoundedQueue<std::shared_ptr<TrainStep>>::Pop::Closed)
+        if (r == BoundedQueue<std::shared_ptr<PrefetchedTrainStep>>::Pop::Closed)
             throw std::runtime_error("DataManager: train prefetch queue closed");
+    }
+    if (_cfg.independent_train_rng) {
+        _last_train_step_held = s;
+        _train_step_pending = true;
+        std::unique_lock<std::mutex> lk(_fault_mu);
+        while (!s->ready.load(std::memory_order_acquire)) {
+            if (_fault_parked) throw DataDecodeError(_fault_msg);
+            if (_stop.load() || _fault_give_up)
+                throw std::runtime_error("DataManager: train prefetch stopped");
+            _fault_cv.wait_for(lk, std::chrono::milliseconds(100));
+        }
+        _train_step_pending = false;
     }
     _last_train_step_held = s;
     return *_last_train_step_held;
@@ -2144,6 +2215,26 @@ const DecodedBatch* DataManagerImpl::next_val_batch() {
     return _last_val_held.get();
 }
 
+void DataManagerImpl::fill_single_from_disk(int32_t index, DecodedBatch& out) {
+    decode_rgb_into(_image_filenames[index], out.input_height,
+                    out.input_width, out.rgb_dtype, out.rgb_buffer.data(),
+                    turns_of(index), /*decode_threads=*/0);
+    if (!out.mask_buffer.empty()) {
+        const bool synth = !_synth_white_mask.empty() && _synth_white_mask[(size_t)index];
+        if (synth) std::memset(out.mask_buffer.data(), 1, out.mask_buffer.size());
+        else if (!_mask_filenames.empty() && !_mask_filenames[index].empty())
+            decode_mask_into(_mask_filenames[index], out.mask_height, out.mask_width,
+                             _cfg.flip_mask, _cfg.mask_boundary_offset,
+                             out.mask_buffer.data(), turns_of(index));
+    }
+    if (!out.depth_buffer.empty() && !_depth_filenames[index].empty())
+        decode_depth_into(_depth_filenames[index], out.depth_height, out.depth_width,
+                          out.depth_dtype, out.depth_buffer.data(), turns_of(index));
+    if (!out.normal_buffer.empty() && !_normal_filenames[index].empty())
+        decode_normal_into(_normal_filenames[index], out.normal_height,
+                           out.normal_width, out.normal_buffer.data(), turns_of(index));
+}
+
 void DataManagerImpl::fetch_one(int32_t index, DecodedBatch& out) {
     const int64_t N = (int64_t)_image_filenames.size();
     if (index < 0 || (int64_t)index >= N)
@@ -2159,32 +2250,7 @@ void DataManagerImpl::fetch_one(int32_t index, DecodedBatch& out) {
     if (_cfg.cache_mode == CacheMode::CPU) {
         fill_batch_from_cache(out);
     } else {
-        decode_rgb_into(_image_filenames[index], out.input_height,
-                        out.input_width, out.rgb_dtype, out.rgb_buffer.data(),
-                        turns_of(index), /*decode_threads=*/0);
-        if (!out.mask_buffer.empty()) {
-            bool synth = !_synth_white_mask.empty() &&
-                         _synth_white_mask[(size_t)index];
-            if (synth) {
-                std::memset(out.mask_buffer.data(), 1, out.mask_buffer.size());
-            } else if (!_mask_filenames.empty() &&
-                       !_mask_filenames[index].empty()) {
-                decode_mask_into(_mask_filenames[index], out.mask_height,
-                                 out.mask_width, _cfg.flip_mask,
-                                 _cfg.mask_boundary_offset,
-                                 out.mask_buffer.data(), turns_of(index));
-            }
-            // Neither: the row stays zero, which is what the training path
-            // leaves for an image with no mask of its own.
-        }
-        if (!out.depth_buffer.empty() && !_depth_filenames[index].empty())
-            decode_depth_into(_depth_filenames[index], out.depth_height,
-                              out.depth_width, out.depth_dtype,
-                              out.depth_buffer.data(), turns_of(index));
-        if (!out.normal_buffer.empty() && !_normal_filenames[index].empty())
-            decode_normal_into(_normal_filenames[index], out.normal_height,
-                               out.normal_width, out.normal_buffer.data(),
-                               turns_of(index));
+        fill_single_from_disk(index, out);
     }
     out.build_views();
 }
@@ -2233,6 +2299,81 @@ DataManager::DataManager(
 }
 
 DataManager::~DataManager() = default;
+
+std::string DataManagerImpl::diagnostic_signature() const {
+    if (!_diagnostic_sync || _disk_started)
+        throw std::runtime_error("B2 causal sampler is not quiescent");
+    std::ostringstream out;
+    out << _rng << '\n' << _train_rng << '\n' << _train_sched_cursor << '\n'
+        << _next_batch_id.load() << '\n';
+    for (const auto* groups : {&_train_groups, &_val_groups}) {
+        for (const auto& g : *groups) {
+            out << g.cursor << ':';
+            for (int32_t id : g.indices) out << id << ',';
+            out << '\n';
+        }
+    }
+    for (const auto& step : _train_schedule) {
+        for (const auto& sub : step) {
+            out << sub.group << ':';
+            for (int32_t id : sub.picks) out << id << ',';
+            out << ';';
+        }
+        out << '\n';
+    }
+    return out.str();
+}
+
+void DataManagerImpl::skip_train_steps_locked(uint64_t skip) {
+    if (skip && _train_schedule.empty())
+        throw std::runtime_error("DataManager: training offset without training indices");
+    while (skip) {
+        const size_t take = (size_t)std::min<uint64_t>(
+            skip, _train_schedule.size() - _train_sched_cursor);
+        _train_sched_cursor += take;
+        skip -= take;
+        if (skip) build_train_schedule_locked();
+    }
+}
+
+std::function<void()> DataManagerImpl::diagnostic_snapshot() {
+    const auto signature = diagnostic_signature();
+    return [this, signature, rng = _rng, train_rng = _train_rng,
+            train_groups = _train_groups, val_groups = _val_groups,
+            sampler = _val_sampler, schedule = _train_schedule,
+            cursor = _train_sched_cursor, batch_id = _next_batch_id.load()] {
+        _rng = rng;
+        _train_rng = train_rng;
+        _train_groups = train_groups;
+        _val_groups = val_groups;
+        _val_sampler = sampler;
+        _train_schedule = schedule;
+        _train_sched_cursor = cursor;
+        _next_batch_id.store(batch_id);
+        _cpu_train_step.subs.clear();
+        if (diagnostic_signature() != signature)
+            throw std::runtime_error("B2 causal sampler reset inequality");
+    };
+}
+
+std::function<void()> DataManager::diagnostic_snapshot() {
+    return _impl->diagnostic_snapshot();
+}
+
+std::string DataManager::diagnostic_signature() const {
+    return _impl->diagnostic_signature();
+}
+
+void DataManagerImpl::diagnostic_native_resume(uint64_t completed_updates) {
+    if (!_diagnostic_sync || _disk_started || !_cfg.independent_train_rng)
+        throw std::runtime_error("B2 causal native sampler resume requires bound quiescent RNG");
+    _diagnostic_initial_sampler();
+    skip_train_steps_locked(completed_updates);
+}
+
+void DataManager::diagnostic_native_resume(uint64_t completed_updates) {
+    _impl->diagnostic_native_resume(completed_updates);
+}
 
 const TrainStep&    DataManager::next_train_step()         { return _impl->next_train_step(); }
 const DecodedBatch& DataManager::next_train_batch()        { return _impl->next_train_batch(); }

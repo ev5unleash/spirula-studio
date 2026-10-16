@@ -304,15 +304,32 @@ std::string engine_vram_report() {
     add("%-30s %11s %11s %11.2f\n", "  pool + scratch", "", "",
         mib(cap_total + arena.cap_bytes + scratch));
 
-    // The driver's figures place the pool against everything else the process
-    // holds: staging buffers, backend allocations, NN models, GUI surfaces.
     backend::MemoryUsage mem = backend::memory_usage();
     if (mem.has_process)
-        add("%-30s %11s %11s %11.2f\n", "  process (driver)", "", "",
+        add("%-30s %11s %11s %11.2f\n", "  runtime device requested", "", "",
             mib(mem.process_bytes));
     if (mem.has_used && mem.has_total)
         add("%-30s %11s %11s %11.2f / %.2f\n", "  device in use / total", "",
             "", mib(mem.used_bytes), mib(mem.total_bytes));
+#ifdef SS_BACKEND_VULKAN
+    const auto backing = backend::backing_usage();
+    add("owned backing (not added to pool): current=%llu committed_peak=%llu reserved=%llu reservation_peak=%llu limit=%llu failures=%llu\n",
+        (unsigned long long)backing.current, (unsigned long long)backing.peak,
+        (unsigned long long)backing.reserved, (unsigned long long)backing.reservation_peak,
+        (unsigned long long)backing.limit, (unsigned long long)backing.failures);
+    const char* categories[] = {"device", "pinned", "staging", "params"};
+    for (int i = 0; i < 4; ++i)
+        add("  backing %s current=%llu committed_peak=%llu reserved=%llu reservation_peak=%llu\n", categories[i],
+            (unsigned long long)backing.category_current[i],
+            (unsigned long long)backing.category_peak[i],
+            (unsigned long long)backing.category_reserved[i],
+            (unsigned long long)backing.category_reservation_peak[i]);
+    add("host-visible subset current=%llu committed_peak=%llu; sampled local budget=%llu usage=%llu available=%d\n",
+        (unsigned long long)backing.host_visible_current,
+        (unsigned long long)backing.host_visible_peak, (unsigned long long)backing.budget,
+        (unsigned long long)backing.usage, backing.has_budget);
+    backend::backing_report("pool-reconciliation");
+#endif
 
     // Aliased rows own nothing, so rank on whichever of the two is bigger.
     auto weight = [](const auto& r) {

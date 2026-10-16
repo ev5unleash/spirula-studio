@@ -1,6 +1,7 @@
 // Resume.cpp -- see Resume.h.
 
 #include "checkpoint/Resume.h"
+#include "checkpoint/B1Contract.h"
 
 #include "config/TrainConfigJson.h"
 #include "core/CheckpointIO.h"
@@ -39,6 +40,10 @@ TarView open_state_tar(const fs::path& ckpt_dir) {
         throw std::runtime_error("cannot open " + tarpath.string() +
                                  " (not a checkpoint directory)");
     v.members = tar_index(v.in);
+    std::set<std::string> names;
+    for (const auto& m : v.members)
+        if (!names.insert(m.name).second)
+            throw std::runtime_error("duplicate checkpoint member " + m.name);
     for (const auto& m : v.members) {
         if (m.name.size() < 4 ||
             m.name.compare(m.name.size() - 4, 4, ".npy") != 0)
@@ -376,6 +381,7 @@ bool valid_checkpoint(const fs::path& ckpt_dir, bool require_resume = false) {
         const JsonValue json = json_parse(state);
         const JsonValue* step = json.find("step");
         const double raw_step = step ? step->as_double(-1) : -1;
+        if (json.find("b1")) read_b1_contract(ckpt_dir);
         return exact_integer(raw_step, 0, kMaxExactJsonInteger) &&
                has_complete_manifest(v, json) &&
                (!require_resume || has_resume_payload(v, json));
@@ -444,6 +450,7 @@ void check_resumable(const fs::path& ckpt_dir) {
             "Re-run the source training with --save-full-checkpoint 1 so its "
             "checkpoints are resumable; this one is usable for inference and "
             "meshing (splat.ply) only.");
+    if (state.find("b1")) read_b1_contract(ckpt_dir);
 }
 
 

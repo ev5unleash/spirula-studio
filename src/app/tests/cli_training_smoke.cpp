@@ -33,7 +33,9 @@ void require(bool ok, const char* message) {
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     try {
-        require(argc == 2 && fs::is_regular_file(fs::u8path(argv[1])), "exact built executable exists");
+        const bool refresh_fixture = argc == 3 && std::string(argv[2]) == "--refresh-fixture";
+        require((argc == 2 || refresh_fixture) && fs::is_regular_file(fs::u8path(argv[1])),
+                "exact built executable exists");
         const char* selector = spirula::env("TEST_DEVICE");
         require(selector && *selector, "SS_TEST_DEVICE explicitly selects the test GPU");
         std::string device = selector;
@@ -52,15 +54,25 @@ int main(int argc, char** argv) {
         const fs::path dataset = root / "dataset";
         const fs::path outputs = root / "outputs";
         test::write_scene(dataset);
+        if (refresh_fixture) {
+            std::ofstream ply(dataset / "points.ply");
+            ply << "ply\nformat ascii 1.0\nelement vertex 576\nproperty float x\nproperty float y\n"
+                   "property float z\nproperty uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n";
+            for (int y = 0; y < 24; ++y)
+                for (int x = 0; x < 24; ++x)
+                    ply << (x - 11.5) * 0.025 << ' ' << (y - 11.5) * 0.025 << ' '
+                        << 2.0 + 0.01 * ((x + y) % 3) << " 128 160 192\n";
+            require((bool)ply, "576-row refresh source points written");
+        }
         const std::string exe = fs::absolute(fs::u8path(argv[1])).u8string();
         auto args = [&](int steps) {
             return std::vector<std::string>{"--data", dataset.u8string(), "--data-format", "nerfstudio",
                 "--output-dir-prefix", outputs.u8string(), "--num-iterations", std::to_string(steps),
-                "--steps-per-save", "5", "--save-full-checkpoint", "1", "--save-only-latest-checkpoint", "0",
-                "--disable-viewer", "1", "--keep-viewer-alive", "0", "--sh-degree", "0",
-                "--cap-max", "256", "--eval-mode", "all", "--refine-start-iter", "100000"};
+                "--steps-per-save", refresh_fixture ? "4" : "5", "--save-full-checkpoint", "1", "--save-only-latest-checkpoint", "0",
+                "--disable-viewer", "1", "--keep-viewer-alive", "0", "--sh-degree", refresh_fixture ? "3" : "0",
+                "--cap-max", refresh_fixture ? "576" : "256", "--eval-mode", "all", "--refine-start-iter", "100000"};
         };
-        auto direct_args = args(12);
+        auto direct_args = args(refresh_fixture ? 64 : 12);
         direct_args.insert(direct_args.end(), {"--output-dir-name", "direct", "--device", device});
         app::proc::ProcessOptions process;
         process.argv = {exe, "train"};
@@ -79,7 +91,18 @@ int main(int argc, char** argv) {
         require(completed.outcome == app::proc::ProcessOutcome::Success && completed.exit_code == 0,
                 "real CLI training completes");
         const int direct_step = checkpoint_step(outputs / "direct");
-        require(direct_step == 12, "full checkpoint records completed direct training step");
+        require(direct_step == (refresh_fixture ? 64 : 12), "full checkpoint records completed direct training step");
+        if (refresh_fixture) {
+            const auto source = outputs / "direct" / "step-000000004.ckpt";
+            ckpt::check_resumable(source);
+            require(ckpt::read_state_json(source).get_double("cur_num_splats", -1) == 576,
+                    "refresh source preserves 576 original rows with a 64-row codec tail");
+            const auto views = root / "views.txt";
+            { std::ofstream manifest(views); manifest << "0\n1\n0\n1\n0\n1\n"; }
+            std::printf("B1_REFRESH_FIXTURE source=%s views=%s horizon=64 source_step=4 rows=576\n",
+                        fs::absolute(source).u8string().c_str(), fs::absolute(views).u8string().c_str());
+            return 0;
+        }
 
         sched::JobScheduler scheduler((root / "queue").u8string(), exe);
         auto submit = [&](int steps, const std::string& resume) {

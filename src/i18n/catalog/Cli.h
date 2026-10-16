@@ -643,6 +643,21 @@ SS_MSG(error_line,
     RU("ошибка: {0}"),
     TR("hata: {0}"));
 
+SS_MSG(b1_view_policy_help,
+    EN("Immutable training views: partitioned (default) or full. Resume accepts no overrides."),
+    JA("固定の学習ビュー: partitioned（既定）または full。再開時の上書きはできません。"),
+    ZH_HANS("固定训练视图：partitioned（默认）或 full。恢复时不允许覆盖。"),
+    ZH_HANT("固定訓練視圖：partitioned（預設）或 full。恢復時不允許覆寫。"),
+    KO("고정 학습 뷰: partitioned(기본값) 또는 full. 재개 시 덮어쓸 수 없습니다."),
+    DE("Unveränderliche Trainingsansichten: partitioned (Standard) oder full. Beim Fortsetzen sind keine Änderungen erlaubt."),
+    FR("Vues d'entraînement immuables : partitioned (par défaut) ou full. Aucune modification à la reprise."),
+    ES("Vistas de entrenamiento inmutables: partitioned (predeterminado) o full. No se permiten cambios al reanudar."),
+    PT("Vistas de treino imutáveis: partitioned (padrão) ou full. Não são permitidas alterações ao retomar."),
+    IT("Viste di addestramento immutabili: partitioned (predefinito) o full. Nessuna modifica alla ripresa."),
+    NL("Vaste trainingsbeelden: partitioned (standaard) of full. Hervatten staat geen wijzigingen toe."),
+    RU("Неизменяемые обучающие виды: partitioned (по умолчанию) или full. При возобновлении изменения запрещены."),
+    TR("Değişmez eğitim görünümleri: partitioned (varsayılan) veya full. Sürdürmede değişiklik yapılamaz."));
+
 
 // ===========================================================================
 // `spirula sam` -- what a run says around its own work

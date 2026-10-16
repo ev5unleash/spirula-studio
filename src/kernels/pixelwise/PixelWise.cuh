@@ -591,7 +591,7 @@ void ppisp_backward(
     std::string param_type,
     TorchTensorView cam_indices,        // [B] int32, or null -> identity
     DeviceTensor3D<float3> v_in_image,  // [B, H, W, 3]
-    TorchTensorView v_ppisp_params      // [N_cam or B, PPISP_NUM_PARAMS] (must be pre-zeroed)
+    TorchTensorView v_ppisp_params      // Pre-zeroed [N_cam or B, P]; Vulkan only: address 0 requests RGB-only backward.
 );
 
 

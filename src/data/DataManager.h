@@ -33,6 +33,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <functional>
 #include <vector>
 
 
@@ -71,6 +72,12 @@ struct DataManagerConfig {
     // RNG seed for group sampling and shuffle. 0 lets the implementation pick
     // a nondeterministic value (steady_clock).
     uint64_t seed = 0;
+
+    // Replay whole optimizer steps before preload/prefetch. Requires a fixed
+    // nonzero seed and independent training RNG; validation never advances it.
+    bool independent_train_rng = false;
+    uint64_t initial_train_step = 0;
+    bool diagnostic_sync = false;
 
     // Worker count per modality pool (DISK mode only). Defaults to a small
     // fixed number; tune up for fast disks / many CPU cores.
@@ -377,6 +384,10 @@ public:
 
     // Most render passes one input image costs: 1 unless faces differ in size.
     int max_face_passes() const;
+
+    std::function<void()> diagnostic_snapshot();
+    std::string diagnostic_signature() const;
+    void diagnostic_native_resume(uint64_t completed_updates);
 
 private:
     std::unique_ptr<DataManagerImpl> _impl;

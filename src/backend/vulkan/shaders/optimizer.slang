@@ -393,16 +393,22 @@ void float_max(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
     if (idx < p.n) p.dst[idx] = max(p.dst[idx], p.src[idx]);
 }
 
-struct IncI32Params {  // 16 bytes: pushed directly
+struct IncI32Params {  // 32 bytes: pushed directly
     int* data;
+    uint* owned_blocks;
     uint n;
     uint wgs_per_row;
+    uint has_owned_blocks;
+    uint _pad0;
 };
 
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void increment_i32(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
                    uniform IncI32Params p) {
-    uint idx = (wg.y * p.wgs_per_row + wg.x) * 256 + tid;
-    if (idx < p.n) p.data[idx] += 1;
+    uint block_id = wg.y * p.wgs_per_row + wg.x;
+    uint idx = block_id * 256 + tid;
+    if (idx < p.n &&
+        (p.has_owned_blocks == 0 || p.owned_blocks[block_id] != 0))
+        p.data[idx] += 1;
 }

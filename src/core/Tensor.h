@@ -327,6 +327,35 @@ public:
         return { _arena.cap, _arena.want, n };
     }
 
+    // Opt-in diagnostics: unlike last-requested sizes, arena slices only live
+    // in their allocating epoch. Private fallback allocations remain resident.
+    struct ResidencyRow {
+        std::string name;
+        VramCategory category;
+        size_t requested_bytes, live_bytes, allocated_bytes;
+        bool arena;
+    };
+    std::vector<ResidencyRow> residency() const {
+        std::lock_guard<std::mutex> lock(_mu);
+        std::vector<ResidencyRow> rows;
+        auto add = [&](const Slot& s, const std::string& name, VramCategory cat,
+                       PoolPhase phase) {
+            if (!s.ptr && !s.cap_bytes && !s.used_bytes) return;
+            const bool live = s.ptr && (phase == PoolPhase::None ||
+                !_alias_enabled() || s.epoch == _epoch);
+            rows.push_back({name, cat, s.used_bytes, live ? s.used_bytes : 0,
+                            s.cap_bytes, !s.owns});
+        };
+        for (uint32_t i = 0; i < _slots.size(); ++i) {
+            const auto slot = pool_key_slot(i);
+            add(_slots[i], std::string(slot_name(slot)) + sub_suffix(pool_key_sub(i)),
+                slot_category(slot), slot_phase(slot));
+        }
+        for (const auto& kv : _dyn)
+            add(kv.second.slot, kv.first, kv.second.cat, kv.second.phase);
+        return rows;
+    }
+
     // Return a pointer to at least `n` elements of type T for the given key.
     // Reallocates only when current capacity is exceeded.
     template<typename T>
@@ -602,10 +631,11 @@ public:
 };
 
 
-// Open a pool phase; the arena's slices from the previous one die here.
-// Called by the launcher that owns a phase, not by the engine layer -- see
-// POOL_ALIAS_TABLE in core/PoolSlots.h.
+// Called outside the allocator mutex before alias invalidation, so diagnostics
+// can observe the previous epoch without deadlocking residency queries.
+inline void (*pool_phase_observer)(PoolPhase) = nullptr;
 inline void pool_begin_phase(PoolPhase p) {
+    if (pool_phase_observer) pool_phase_observer(p);
     DevicePool::global().begin_phase(p);
 }
 

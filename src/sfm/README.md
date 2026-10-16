@@ -163,6 +163,20 @@ once, and `--ba-real cpu --ba-real-coarse cpu` (Spirula Studio: "Bundle
 adjustment on the CPU", under Advanced) skips the failed GPU attempt next time
 — worth setting on a card that resets once, since it resets again.
 
+The dense **observation-Schur** assembly path submits at most 8,192 observations
+(64 workgroups of 128) per fenced dispatch. `Push.u1` supplies the absolute
+observation offset; the last partial workgroup still checks the total count.
+The shared helper consumes and clears the pending command-buffer prefix before
+submitting chunks, and callers record later consumers in a fresh buffer.
+This bounds that assembly dispatch, not every GPU stage or total mapping time.
+See [the BA implementation notes](ba/README.md#bounded-observation-schur-dispatch).
+
+CPU and GPU camera rotation share an analytic exact-zero angle-axis branch
+before the square root and a half-angle Rodrigues form for nonzero rotations.
+This preserves finite zero-rotation derivatives without a normalization epsilon.
+DF BA shaders compile at O0 with the existing no-contraction post-pass; other
+variants remain O2. These numerical safeguards do not change scalar selection.
+
 Two devices deserve naming:
 
 - **Intel UHD 750 (Gen12, RPL-S desktop)** has *none* of the three: no fp64, no
@@ -254,7 +268,8 @@ it can still be turned on if the Vulkan SDK is present). Shaders compile at
 build time and are embedded, so nothing needs to sit next to the binary.
 
 The bundle-adjustment kernels are compiled once per (Real, Loss) pair — nine
-blobs at the default. Trim the matrix while iterating:
+blobs at the default, including DF on Windows. Only DF BA uses Slang O0;
+float/double BA and other SfM shaders remain O2. Trim the matrix while iterating:
 
 ```bash
 cmake -B build -DSS_SFM_REALS=df -DSS_SFM_LOSSES=trivial
@@ -691,6 +706,7 @@ PASS/FAIL and returns 0/1 — the same convention as `src/backend/tests/`.
 | `sfm_map_test` | synthetic reconstruction end to end, incl. assembly/audit/split | yes |
 | `sfm_rig_test` | rig bundle adjustment, GPU against host; a synthetic two-lens rig through the mapper and the merger | yes |
 | `sfm_ba_cpu_test` | host bundle adjustment against the written-out normal equations, rigs included | no |
+| `sfm_bounded_schur_test --device uuid:<supported-non-NVIDIA-UUID>` | actual DF DenseObs assembly, partial tails, rejected-step restore and cold/reused solver parity against CPU; refuses CPU fallback | yes |
 | `sfm_cholesky_test` | dense GPU Cholesky vs a CPU reference | yes |
 | `sfm_geometry_test` | F, H, E, P3P, triangulation, RANSAC, SVD/eigen kernels | no |
 | `sfm_merge_test` | Sim(3) algebra, model alignment, track splicing, fold detection | no |

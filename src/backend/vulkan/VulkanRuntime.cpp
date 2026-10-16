@@ -22,6 +22,11 @@
 #include <optional>
 #include <string>
 #include <vector>
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 #include "core/Env.h"
 
 namespace backend {
@@ -45,6 +50,128 @@ std::mutex g_alloc_mutex;
 std::map<uint64_t, Allocation> g_device_allocs;  // key: device address
 std::map<uint64_t, Allocation> g_host_allocs;    // key: mapped host address
 
+
+struct BackingLedger {
+    std::mutex mutex;
+    BackingUsage stats;
+    uint64_t heap_current[VK_MAX_MEMORY_HEAPS] = {};
+    uint64_t heap_reserved[VK_MAX_MEMORY_HEAPS] = {};
+    bool initialized = false;
+    bool configuration_failed = false;
+    uint64_t reported_peak = 0;
+    bool reserve(uint64_t bytes, uint32_t heap, BackingCategory category = BackingCategory::Device) {
+        if (bytes > UINT64_MAX - stats.current - stats.reserved ||
+            (stats.limit && (stats.current + stats.reserved > stats.limit ||
+             bytes > stats.limit - stats.current - stats.reserved))) {
+            ++stats.failures;
+            return false;
+        }
+        stats.reserved += bytes;
+        heap_reserved[heap] += bytes;
+        stats.reservation_peak = std::max(stats.reservation_peak, stats.current + stats.reserved);
+        const int cat = static_cast<int>(category);
+        stats.category_reserved[cat] += bytes;
+        stats.category_reservation_peak[cat] = std::max(stats.category_reservation_peak[cat],
+            stats.category_current[cat] + stats.category_reserved[cat]);
+        return true;
+    }
+    void rollback(uint64_t bytes, uint32_t heap, BackingCategory category = BackingCategory::Device) {
+        stats.reserved -= bytes;
+        heap_reserved[heap] -= bytes;
+        stats.category_reserved[static_cast<int>(category)] -= bytes;
+    }
+};
+BackingLedger g_backing;
+constexpr uint64_t kDriverMargin = uint64_t{1} << 30;
+
+void initialize_backing() {
+    if (g_backing.initialized) {
+        if (g_backing.configuration_failed)
+            throw std::runtime_error("invalid SS_WORKER_DEVICE_LIMIT_BYTES");
+        return;
+    }
+    g_backing.initialized = true;
+    g_backing.configuration_failed = true;
+    if (const char* value = spirula::env("WORKER_DEVICE_LIMIT_BYTES")) {
+        std::string text(value);
+        if (text.empty() || text.find_first_not_of("0123456789") != std::string::npos)
+            throw std::runtime_error("SS_WORKER_DEVICE_LIMIT_BYTES must be positive bytes");
+        g_backing.stats.limit = std::stoull(text);
+        if (!g_backing.stats.limit)
+            throw std::runtime_error("SS_WORKER_DEVICE_LIMIT_BYTES must be positive bytes");
+    }
+    g_backing.configuration_failed = false;
+}
+
+bool reserve_backing(Allocation& a, uint32_t type) {
+    std::lock_guard<std::mutex> lock(g_backing.mutex);
+    initialize_backing();
+    Context& ctx = Context::get();
+    VkPhysicalDeviceMemoryBudgetPropertiesEXT budget{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+    VkPhysicalDeviceMemoryProperties2 props{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2};
+    const auto& memory = ctx.memory_properties();
+    if (g_backing.stats.limit && ctx.caps().memory_budget) {
+        props.pNext = &budget;
+        vkGetPhysicalDeviceMemoryProperties2(ctx.physical(), &props);
+    }
+    a.heap = memory.memoryTypes[type].heapIndex;
+    a.host_visible = (memory.memoryTypes[type].propertyFlags &
+                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0;
+    auto& s = g_backing.stats;
+    s.has_budget = ctx.caps().memory_budget;
+    s.budget = budget.heapBudget[a.heap];
+    s.usage = budget.heapUsage[a.heap];
+    bool accepted = g_backing.reserve(a.backing_bytes, a.heap, a.category);
+    if (accepted && s.limit) {
+        const uint64_t occupied = std::max(s.usage, g_backing.heap_current[a.heap]);
+        const uint64_t pending = g_backing.heap_reserved[a.heap];
+        if (!s.has_budget || occupied > s.budget ||
+            pending > s.budget - occupied ||
+            kDriverMargin > s.budget - occupied - pending) {
+            g_backing.rollback(a.backing_bytes, a.heap, a.category);
+            ++s.failures;
+            accepted = false;
+        }
+    }
+    if (!accepted) {
+        ++s.category_failures[static_cast<int>(a.category)];
+        char text[384];
+        std::snprintf(text, sizeof text,
+            "worker backing refused before vkAllocateMemory: request=%llu current=%llu reserved=%llu limit=%llu heap=%u budget=%llu usage=%llu margin=%llu",
+            (unsigned long long)a.backing_bytes, (unsigned long long)s.current,
+            (unsigned long long)s.reserved, (unsigned long long)s.limit, a.heap,
+            (unsigned long long)s.budget, (unsigned long long)s.usage,
+            (unsigned long long)kDriverMargin);
+        set_error(text, VK_SUCCESS);
+        std::fprintf(stderr, "[worker-backing] %s\n", text);
+    } else {
+        ++s.allocation_calls;
+    }
+    return accepted;
+}
+
+void finish_backing(const Allocation& a, bool success) {
+    std::lock_guard<std::mutex> lock(g_backing.mutex);
+    g_backing.rollback(a.backing_bytes, a.heap, a.category);
+    auto& s = g_backing.stats;
+    if (!success) {
+        ++s.failures;
+        ++s.category_failures[static_cast<int>(a.category)];
+        return;
+    }
+    s.current += a.backing_bytes;
+    s.peak = std::max(s.peak, s.current);
+    const int cat = static_cast<int>(a.category);
+    s.category_current[cat] += a.backing_bytes;
+    s.category_peak[cat] = std::max(s.category_peak[cat], s.category_current[cat]);
+    g_backing.heap_current[a.heap] += a.backing_bytes;
+    if (a.host_visible) {
+        s.host_visible_current += a.backing_bytes;
+        s.host_visible_peak = std::max(s.host_visible_peak, s.host_visible_current);
+    }
+}
 bool lookup(const std::map<uint64_t, Allocation>& m, uint64_t addr,
             Allocation* alloc, VkDeviceSize* offset) {
     auto it = m.upper_bound(addr);
@@ -59,10 +186,14 @@ bool lookup(const std::map<uint64_t, Allocation>& m, uint64_t addr,
 // Creates buffer + dedicated memory. `host_visible` selects the pinned pool
 // path (persistently mapped, no device address).
 bool create_allocation(VkDeviceSize bytes, bool host_visible,
-                       Allocation* out) {
+                       Allocation* out, BackingCategory category = BackingCategory::Device) {
     Context& ctx = Context::get();
     if (!ctx.ok()) return false;
     ctx.set_shutdown_hook(&runtime_shutdown);
+    {
+        std::lock_guard<std::mutex> lock(g_backing.mutex);
+        initialize_backing();
+    }
 
     VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     bci.size = bytes;
@@ -116,17 +247,26 @@ bool create_allocation(VkDeviceSize bytes, bool host_visible,
     mai.allocationSize = req.size;
     mai.memoryTypeIndex = type;
 
+    a.backing_bytes = req.size;
+    a.category = category;
+    if (!reserve_backing(a, type)) {
+        vkDestroyBuffer(ctx.device(), a.buffer, nullptr);
+        backend::backing_report("refused-before-allocation");
+        backend::throw_out_of_memory(bytes, "worker backing cap/headroom");
+    }
     r = vkAllocateMemory(ctx.device(), &mai, nullptr, &a.memory);
     if (r != VK_SUCCESS) {
         set_error("vkAllocateMemory failed", r);
         vkDestroyBuffer(ctx.device(), a.buffer, nullptr);
+        finish_backing(a, false);
         return false;
     }
     r = vkBindBufferMemory(ctx.device(), a.buffer, a.memory, 0);
     if (r != VK_SUCCESS) {
         set_error("vkBindBufferMemory failed", r);
-        vkFreeMemory(ctx.device(), a.memory, nullptr);
         vkDestroyBuffer(ctx.device(), a.buffer, nullptr);
+        vkFreeMemory(ctx.device(), a.memory, nullptr);
+        finish_backing(a, false);
         return false;
     }
     a.size = bytes;
@@ -137,8 +277,9 @@ bool create_allocation(VkDeviceSize bytes, bool host_visible,
     a.device_addr = vkGetBufferDeviceAddress(ctx.device(), &bdai);
     if (a.device_addr == 0) {
         set_error("vkGetBufferDeviceAddress returned 0", VK_SUCCESS);
-        vkFreeMemory(ctx.device(), a.memory, nullptr);
         vkDestroyBuffer(ctx.device(), a.buffer, nullptr);
+        vkFreeMemory(ctx.device(), a.memory, nullptr);
+        finish_backing(a, false);
         return false;
     }
 
@@ -147,8 +288,9 @@ bool create_allocation(VkDeviceSize bytes, bool host_visible,
                         &a.mapped);
         if (r != VK_SUCCESS) {
             set_error("vkMapMemory failed", r);
-            vkFreeMemory(ctx.device(), a.memory, nullptr);
             vkDestroyBuffer(ctx.device(), a.buffer, nullptr);
+            vkFreeMemory(ctx.device(), a.memory, nullptr);
+            finish_backing(a, false);
             return false;
         }
         a.base = (uint64_t)a.mapped;
@@ -156,6 +298,18 @@ bool create_allocation(VkDeviceSize bytes, bool host_visible,
         a.base = a.device_addr;
     }
     *out = a;
+    finish_backing(a, true);
+    bool report = false;
+    {
+        std::lock_guard<std::mutex> lock(g_backing.mutex);
+        if (g_backing.stats.limit &&
+            (g_backing.reported_peak == 0 ||
+             g_backing.stats.reservation_peak - g_backing.reported_peak >= (uint64_t{64} << 20))) {
+            g_backing.reported_peak = g_backing.stats.reservation_peak;
+            report = true;
+        }
+    }
+    if (report) backend::backing_report("allocation-high-water");
     return true;
 }
 
@@ -164,6 +318,12 @@ void destroy_allocation(const Allocation& a) {
     if (a.mapped) vkUnmapMemory(ctx.device(), a.memory);
     vkDestroyBuffer(ctx.device(), a.buffer, nullptr);
     vkFreeMemory(ctx.device(), a.memory, nullptr);
+    std::lock_guard<std::mutex> lock(g_backing.mutex);
+    auto& s = g_backing.stats;
+    s.current -= a.backing_bytes;
+    s.category_current[static_cast<int>(a.category)] -= a.backing_bytes;
+    g_backing.heap_current[a.heap] -= a.backing_bytes;
+    if (a.host_visible) s.host_visible_current -= a.backing_bytes;
 }
 
 // ---------------------------------------------------------------------------
@@ -231,7 +391,7 @@ VkDeviceSize staging_capacity() {
 bool staging_init() {
     if (g_staging.buffer != VK_NULL_HANDLE) return true;
     return create_allocation(staging_capacity(), /*host_visible=*/true,
-                             &g_staging);
+                             &g_staging, BackingCategory::Staging);
 }
 
 }  // namespace
@@ -388,7 +548,7 @@ bool params_alloc(uint32_t bytes, uint64_t* device_addr, void** mapped) {
     std::lock_guard<std::mutex> lock(g_params_mutex);
     if (g_params_ring.buffer == VK_NULL_HANDLE) {
         if (!create_allocation(kParamsRingSize, /*host_visible=*/true,
-                               &g_params_ring))
+                               &g_params_ring, BackingCategory::Params))
             return false;
     }
     VkDeviceSize rounded = (bytes + 63u) / 64u * 64u;
@@ -424,11 +584,86 @@ bool record_and_wait(Fn&& fn) {
 
 }  // namespace
 
+bool backing_cap_smoke() {
+    BackingLedger ledger;
+    ledger.stats.limit = 1024;
+    if (!ledger.reserve(768, 0) || ledger.reserve(512, 0)) return false;
+    ledger.rollback(768, 0);
+    if (!ledger.reserve(1024, 0)) return false;
+    ledger.rollback(1024, 0);
+    ledger.stats.current = ledger.stats.peak = ledger.stats.category_current[0] = 512;
+    ledger.stats.reservation_peak = ledger.stats.category_reservation_peak[0] = 512;
+    if (!ledger.reserve(512, 0)) return false;
+    ledger.stats.current = ledger.stats.category_current[0] = 0;
+    ledger.rollback(512, 0);
+    return ledger.stats.reserved == 0 && ledger.stats.failures == 1 &&
+           ledger.stats.reservation_peak == 1024 &&
+           ledger.stats.category_reservation_peak[0] == 1024 &&
+           ledger.stats.peak == 512 &&
+           ledger.stats.category_reserved[0] == 0;
+}
+
 }  // namespace vk
 
 // ===========================================================================
 // backend:: public API
 // ===========================================================================
+
+BackingUsage backing_usage() {
+    auto& ctx = vk::Context::get();
+    std::lock_guard<std::mutex> lock(vk::g_backing.mutex);
+    vk::initialize_backing();
+    BackingUsage stats = vk::g_backing.stats;
+    stats.budget = stats.usage = 0;
+    stats.has_budget = ctx.ok() && ctx.caps().memory_budget;
+    if (stats.has_budget) {
+        VkPhysicalDeviceMemoryBudgetPropertiesEXT budget{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+        VkPhysicalDeviceMemoryProperties2 props{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2};
+        props.pNext = &budget;
+        vkGetPhysicalDeviceMemoryProperties2(ctx.physical(), &props);
+        for (uint32_t i = 0; i < props.memoryProperties.memoryHeapCount; ++i) {
+            if (!(props.memoryProperties.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT))
+                continue;
+            stats.budget += budget.heapBudget[i];
+            stats.usage += budget.heapUsage[i];
+        }
+    }
+    return stats;
+}
+
+void backing_report(const char* lifecycle) {
+    {
+        std::lock_guard<std::mutex> lock(vk::g_backing.mutex);
+        if (vk::g_backing.configuration_failed) return;
+    }
+    const auto s = backing_usage();
+    if (!s.limit) return;
+#ifdef _WIN32
+    const int pid = _getpid();
+#else
+    const int pid = static_cast<int>(getpid());
+#endif
+    std::fprintf(stderr,
+        "[worker-backing] lifecycle=%s pid=%d device=%s name=%s limit=%llu current=%llu committed_peak=%llu reserved=%llu reservation_peak=%llu failures=%llu allocation_calls=%llu host_visible_current=%llu host_visible_committed_peak=%llu local_budget=%llu local_usage=%llu has_budget=%d margin=%llu\n",
+        lifecycle, pid, device_current_selector().c_str(), vk::Context::get().device_name().c_str(),
+        (unsigned long long)s.limit, (unsigned long long)s.current,
+        (unsigned long long)s.peak, (unsigned long long)s.reserved,
+        (unsigned long long)s.reservation_peak,
+        (unsigned long long)s.failures, (unsigned long long)s.allocation_calls,
+        (unsigned long long)s.host_visible_current, (unsigned long long)s.host_visible_peak,
+        (unsigned long long)s.budget, (unsigned long long)s.usage, s.has_budget,
+        (unsigned long long)vk::kDriverMargin);
+    const char* names[] = {"device", "pinned", "staging", "params"};
+    for (int i = 0; i < 4; ++i)
+        std::fprintf(stderr, "[worker-backing] category=%s current=%llu committed_peak=%llu reserved=%llu reservation_peak=%llu failures=%llu\n",
+            names[i], (unsigned long long)s.category_current[i],
+            (unsigned long long)s.category_peak[i],
+            (unsigned long long)s.category_reserved[i],
+            (unsigned long long)s.category_reservation_peak[i],
+            (unsigned long long)s.category_failures[i]);
+}
 
 namespace {
 
@@ -467,17 +702,21 @@ void device_free(void* ptr) {
         a = it->second;
         vk::g_device_allocs.erase(it);
     }
-    vk::g_device_bytes.fetch_sub(a.size, std::memory_order_relaxed);
     // Contract (BackendRuntime.h): all in-flight work completes first.
-    vk::Context::get().wait(vk::flush_all_streams());
+    if (!vk::Context::get().wait(vk::flush_all_streams())) {
+        std::lock_guard<std::mutex> lock(vk::g_alloc_mutex);
+        vk::g_device_allocs[a.base] = a;
+        return;
+    }
     vk::destroy_allocation(a);
+    vk::g_device_bytes.fetch_sub(a.size, std::memory_order_relaxed);
 }
 
 void* host_malloc_pinned(size_t bytes) {
     if (bytes == 0) return nullptr;
     size_t rounded = (bytes + kAllocRound - 1) / kAllocRound * kAllocRound;
     vk::Allocation a;
-    if (!vk::create_allocation(rounded, /*host_visible=*/true, &a))
+    if (!vk::create_allocation(rounded, /*host_visible=*/true, &a, BackingCategory::Pinned))
         return nullptr;
     {
         std::lock_guard<std::mutex> lock(vk::g_alloc_mutex);
@@ -500,7 +739,11 @@ void host_free_pinned(void* ptr) {
         a = it->second;
         vk::g_host_allocs.erase(it);
     }
-    vk::Context::get().wait(vk::flush_all_streams());
+    if (!vk::Context::get().wait(vk::flush_all_streams())) {
+        std::lock_guard<std::mutex> lock(vk::g_alloc_mutex);
+        vk::g_host_allocs[a.base] = a;
+        return;
+    }
     vk::destroy_allocation(a);
 }
 
@@ -1083,6 +1326,8 @@ void pipelines_shutdown();  // VulkanPipelines.cpp
 void runtime_shutdown() {
     Context& ctx = Context::get();  // called from within ~Context's body;
     VkDevice dev = ctx.device();    // the device is still alive here
+    try { backend::backing_report("runtime-shutdown-before-free"); }
+    catch (...) { std::fprintf(stderr, "[worker-backing] shutdown report unavailable\n"); }
 
     gpu_ts_report_by_entry();  // per-kernel GPU breakdown (SS_PROFILE)
     pipelines_shutdown();

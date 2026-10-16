@@ -105,6 +105,27 @@ grows.
   completes first) by flushing every stream and waiting the queue timeline
   before destroying.
 
+`SS_WORKER_DEVICE_LIMIT_BYTES` enables pre-allocation admission in the actual
+training runtime. B1 owner workers bind at most **24 GiB**; direct `train` runs
+opt in explicitly. The ledger reserves `VkMemoryRequirements::size` before
+`vkAllocateMemory` and charges device, pinned-host, pageable-staging and params
+backing once, including host-visible allocations on non-device-local heaps.
+Pool slots, scratch and alias-arena views are attribution, not additional charges.
+Reservations survive until safe backing release, and failed allocations roll back.
+
+Capped allocation also requires a supported worker-local budget query and
+**1 GiB** headroom on the selected heap, using the larger of reported usage and
+accounted backing plus pending reservations. Refusal throws through the native
+worker failure path; it cannot publish group completion. `[worker-backing]`
+reports PID/device, categories, committed bytes and conservative
+`reservation_peak`; neither that bound nor sampled driver usage is a physical
+VRAM-peak guarantee. Separate NN/SfM/video devices are outside this ordinary
+training-worker ledger.
+
+`vk_runtime_smoke --backing-cap` exercises actual allocation refusal, concurrent
+reservations, staging/params, overlap, pinned storage and reuse.
+`--invalid-backing-cap` exercises clean failure/destructor cleanup.
+
 ## Streams, submission, synchronization
 
 One compute queue. `backend::Stream` = pointer to a per-stream command-batch
@@ -681,6 +702,12 @@ the engine level.
     are loose-channel. The normal family's axis-angle backward is a
     hand-written Rodrigues-form gradient upstream (NOT autodiff of its
     forward), so it is hand-mirrored term by term and stays tight.
+  - **Frozen PPISP RGB backward** shares the joint backward image pipeline:
+    both use three specialization axes and the same 88-byte parameter ABI.
+    A null `v_ppisp_params` pointer uniformly skips parameter filtering,
+    reduction, barriers and atomics at runtime; canonical RGB VJP and stores
+    remain unchanged. Regularization retains its three specialization axes.
+    This does not imply compiled parameter-adjoint elimination or a speedup.
   - **backward_v1 grid-grad kernels** keep CUDA's logical 8x8 block
     geometry / mult_x-mult_y tile decomposition exactly (the per-thread
     pixel-range partition determines the writeback structure), but run as

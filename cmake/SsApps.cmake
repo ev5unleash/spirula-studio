@@ -98,7 +98,7 @@ ss_embed_file(
     ${SS_ROOT}/reference/scripts/mask.py
     ${CMAKE_BINARY_DIR}/app_generated/mask_py.h
     MaskPy)
-list(APPEND SS_TOOL_SOURCES ${SS_SRC}/app/cli/main.cpp)
+list(APPEND SS_TOOL_SOURCES ${SS_SRC}/app/cli/main.cpp ${SS_SRC}/app/cli/b1_group_main.cpp)
 list(APPEND SS_TOOL_DEFS SS_TOOL_TRAIN=1)
 
 # ---- scheduler worker: one phase per process ----

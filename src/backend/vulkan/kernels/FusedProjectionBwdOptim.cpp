@@ -8,6 +8,32 @@
 #include <kernels/optim/FusedProjectionBwdOptim.cuh>
 
 #include "backend/vulkan/kernels/KernelCommon.h"
+#include "backend/vulkan/kernels/B1Ownership.h"
+
+#include <atomic>
+
+namespace vkk {
+namespace {
+std::atomic<const uint32_t*> g_b1_owned_blocks{nullptr};
+thread_local FpboGradientLaunch g_fpbo_gradient_launch{};
+}
+
+void b1_set_owned_blocks(const uint32_t* device_ptr) {
+    g_b1_owned_blocks.store(device_ptr);
+}
+
+const uint32_t* b1_owned_blocks() {
+    return g_b1_owned_blocks.load();
+}
+
+void fpbo_set_gradient_launch(FpboGradientLaunch launch) {
+    g_fpbo_gradient_launch = launch;
+}
+
+FpboGradientLaunch fpbo_gradient_launch() {
+    return g_fpbo_gradient_launch;
+}
+}  // namespace vkk
 
 namespace {
 
@@ -25,7 +51,8 @@ struct FpboParams {
         nq_opacities_packed, nq_dc_packed;
     uint64_t nq_means_bounds, nq_quats_bounds, nq_scales_bounds,
         nq_opacities_bounds, nq_dc_bounds;
-    uint64_t radii, densify_score, steps;
+    uint64_t radii, densify_score, steps, owned_blocks;
+    uint64_t grad_means, grad_quats, grad_scales, grad_opacities, grad_dc, grad_sh;
     float lr_means, lr_quats, lr_scales, lr_opacs, lr_features_dc,
         lr_features_sh;
     float max_gauss_ratio, scale_regularization_weight;
@@ -35,14 +62,14 @@ struct FpboParams {
     float max_screen_size, max_screen_size_penalty;
     float eps_tr;
     int32_t scalar_step;
-    uint32_t has_steps, has_densify_score;
+    uint32_t has_steps, has_densify_score, has_owned_blocks, gradient_mode;
     uint32_t C, N;
     uint32_t width, height;
     uint32_t wgs_per_row;
     uint32_t num_sh_buffer;
     uint32_t _pad0;
 };
-static_assert(sizeof(FpboParams) == 47 * 8 + 18 * 4 + 10 * 4,
+static_assert(sizeof(FpboParams) == 552,
               "params layout must match the slang struct");
 
 using vkk::or_fallback;
@@ -81,6 +108,12 @@ void launch_fpbo_vk(
     const float max_screen_size, const float max_screen_size_penalty,
     bool use_scale_agnostic_mean, bool color_trust_linear, float eps_tr,
     std::variant<int32_t, TorchTensorView> step, int quantization_level) {
+    const auto grad = vkk::fpbo_gradient_launch();
+    if (grad.mode != vkk::FpboGradientMode::Internal) {
+        if (eval3d || antialiased || !grad.means || !grad.quats ||
+            !grad.scales || !grad.opacities || !grad.dc || !grad.sh)
+            throw std::runtime_error("FPBO gradient seam requires 3dgs and six buffers");
+    }
     if (N == 0)
         return;
     if (quantization_level < 0 || quantization_level > 1)
@@ -105,10 +138,12 @@ void launch_fpbo_vk(
     int sh_degree = std::min(buf_sh_deg, max_sh_degree);
 
     const uint32_t C = (uint32_t)std::get<2>(viewmats)[0];
-    const bool packed = (camera_ids.data_ptr() && gaussian_ids.data_ptr());
+    const bool packed = (camera_ids.data_ptr() && gaussian_ids.data_ptr()) ||
+        (grad.mode != vkk::FpboGradientMode::Internal &&
+         camera_ids.size() == 0 && gaussian_ids.size() == 0);
 
     vkk::PackedCameraRanges ranges;
-    if (packed)
+    if (packed && grad.mode != vkk::FpboGradientMode::External)
         ranges = vkk::build_packed_camera_ranges(gaussian_ids, N);
 
     const int32_t scalar_step =
@@ -117,6 +152,7 @@ void launch_fpbo_vk(
         std::get_if<TorchTensorView>(&step)
             ? std::get<0>(std::get<TorchTensorView>(step))
             : 0;
+    const uint32_t* owned_blocks = vkk::b1_owned_blocks();
 
     const bool level1 = quantization_level == 1;
     if (level1 && sh_degree > 0 &&
@@ -145,7 +181,7 @@ void launch_fpbo_vk(
         (uint64_t)(packed ? ranges.camera_id_bounds.data_ptr() : nullptr));
     p.camera_ids = or_fallback((uint64_t)(packed ? camera_ids.data_ptr()
                                                  : nullptr));
-    p.aabb = (uint64_t)aabb.data_ptr();
+    p.aabb = or_fallback((uint64_t)aabb.data_ptr());
     if (eval3d) {
         Vanilla3DGUT<0>::ScreenBuffer vsb(
             const_cast<std::vector<DeviceTensorFloatND>&>(v_splats_screen));
@@ -196,6 +232,13 @@ void launch_fpbo_vk(
     p.radii = or_fallback(radii.data_ptr());
     p.densify_score = or_fallback(densify_score.data_ptr());
     p.steps = or_fallback(steps_ptr);
+    p.owned_blocks = or_fallback((uint64_t)owned_blocks);
+    p.grad_means = or_fallback((uint64_t)grad.means);
+    p.grad_quats = or_fallback((uint64_t)grad.quats);
+    p.grad_scales = or_fallback((uint64_t)grad.scales);
+    p.grad_opacities = or_fallback((uint64_t)grad.opacities);
+    p.grad_dc = or_fallback((uint64_t)grad.dc);
+    p.grad_sh = or_fallback((uint64_t)grad.sh);
     p.lr_means = lr_means;
     p.lr_quats = lr_quats;
     p.lr_scales = lr_scales;
@@ -219,6 +262,9 @@ void launch_fpbo_vk(
     p.scalar_step = scalar_step;
     p.has_steps = steps_ptr ? 1u : 0u;
     p.has_densify_score = densify_score.data_ptr() ? 1u : 0u;
+    p.has_owned_blocks =
+        owned_blocks && grad.mode != vkk::FpboGradientMode::Capture ? 1u : 0u;
+    p.gradient_mode = static_cast<uint32_t>(grad.mode);
     p.num_sh_buffer = num_sh_buffer;
     p.C = C;
     p.N = (uint32_t)N;

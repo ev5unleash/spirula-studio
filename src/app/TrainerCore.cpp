@@ -1,10 +1,13 @@
 // TrainerCore.cpp -- see TrainerCore.h.
 
 #include "app/TrainerCore.h"
+#include "app/B1Group.h"
 #include "data/SceneTransform.h"
 #include "app/EvalMetrics.h"
 #include "checkpoint/Adapt.h"
 #include "checkpoint/Resume.h"
+#include "checkpoint/B1Contract.h"
+#include "checkpoint/SplatPly.h"
 #include "config/TrainConfigJson.h"
 #include "core/ColorSpace.h"
 #include "core/ExrImage.h"
@@ -14,6 +17,9 @@
 #include "data/Knn.h"
 #include "sfm/core/Exif.h"
 #include "core/Env.h"
+#include "engine/EngineDiagnostic.h"
+#include "engine/EngineState.h"
+#include "data/DataManager.h"
 
 
 #include "external/stb_image_write.h"
@@ -30,6 +36,12 @@
 #include <random>
 #include <stdexcept>
 #include <thread>
+
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -50,6 +62,15 @@ static std::string lfmt(const spirula::i18n::Msg& m,
 }
 
 namespace spirula {
+
+static int b1_owner_from_env() {
+    const char* value = spirula::env("B1_OWNER");
+    if (!value) return -1;
+    if (std::strcmp(value, "0") == 0) return 0;
+    if (std::strcmp(value, "1") == 0) return 1;
+    if (std::strcmp(value, "all") == 0) return 2;
+    throw std::runtime_error("SS_B1_OWNER must be 0, 1, or all");
+}
 
 static void remove_tree(const fs::path& path) {
     fs::remove_all(path);
@@ -575,6 +596,11 @@ std::string train_config_unsupported(const TrainConfig& c) {
 void TrainerSession::check_config() {
     if (std::string what = train_config_unsupported(cfg); !what.empty())
         throw std::runtime_error(what);
+    if (b1_owner_from_env() >= 0 && cfg.color_shift_reg_weight != 0.0f)
+        throw std::runtime_error(
+            "B1 mode does not support nonzero color_shift_reg_weight");
+    if (b1_owner_from_env() >= 0 && !cfg.save_full_checkpoint)
+        throw std::runtime_error("B1 requires full native checkpoints");
     if (cfg.validation_fraction > 0)
         log(lmsg::warn_validation_unported.get());
     if (cfg.orientation_method != "up" || cfg.center_method != "poses")
@@ -603,6 +629,61 @@ void TrainerSession::load_dataset() {
     pcfg.metashape_ply           = cfg.metashape_ply;
     pcfg.metashape_psx           = cfg.metashape_psx;
     ds = parse_dataset(cfg.data, pcfg, cfg.data_format);
+    const int b1_owner = b1_owner_from_env();
+    if (b1_owner >= 0) {
+        b1_full_train_indices = ds.train_indices;
+        std::vector<bool> training((size_t)ds.num_cameras, false);
+        for (int32_t i : b1_full_train_indices) {
+            if (i < 0 || i >= ds.num_cameras || training[(size_t)i])
+                throw std::runtime_error("B1 parser training coverage invalid");
+            training[(size_t)i] = true;
+        }
+        for (int32_t i : ds.val_indices)
+            if (i < 0 || i >= ds.num_cameras || training[(size_t)i])
+                throw std::runtime_error("B1 held-out camera leaked into training coverage");
+        const char* source = spirula::env("B1_SOURCE");
+        const char* views = spirula::env("B1_VIEWS");
+        const char* stop = spirula::env("B1_STOP_AT_STEP");
+        int64_t target = 0;
+        if (stop) {
+            size_t parsed = 0;
+            target = std::stoll(stop, &parsed);
+            if (parsed != std::strlen(stop))
+                throw std::runtime_error("SS_B1_STOP_AT_STEP is invalid");
+        }
+        b1_view_policy = app::b1_worker_view_policy(
+            b1_owner, source && *source ? source : cfg.resume,
+            views ? views : "", target);
+    }
+    if (b1_owner == 0 || b1_owner == 1) {
+        const char* manifest = spirula::env("B1_VIEWS");
+        if (!manifest || !*manifest)
+            throw std::runtime_error("SS_B1_VIEWS is required for two-block training");
+        b1_views_sha256 = ckpt::b1_file_hash(manifest);
+        std::ifstream input(manifest);
+        if (!input) throw std::runtime_error("cannot open SS_B1_VIEWS manifest");
+        std::vector<int> owners((size_t)ds.num_cameras);
+        for (int& owner : owners)
+            if (!(input >> owner) || (owner != 0 && owner != 1))
+                throw std::runtime_error("SS_B1_VIEWS must hold one 0/1 per training image");
+        std::string extra;
+        if (input >> extra)
+            throw std::runtime_error("SS_B1_VIEWS contains extra image rows");
+        if (ckpt::b1_file_hash(manifest) != b1_views_sha256)
+            throw std::runtime_error("B1 views changed while reading assignment");
+        if (b1_view_policy == "partitioned") {
+            std::vector<int32_t> selected;
+            for (int32_t i : ds.train_indices)
+                if (owners[(size_t)i] == b1_owner) selected.push_back(i);
+            if (selected.empty()) throw std::runtime_error("B1 block has no training images");
+            ds.train_indices = std::move(selected);
+        } else if (ds.train_indices != b1_full_train_indices) {
+            throw std::runtime_error("B1 full policy lost parser training coverage");
+        }
+        std::printf("B1 owner=%d view_policy=%s selected_images=%zu total_images=%lld\n",
+                    b1_owner, b1_view_policy.c_str(), ds.train_indices.size(),
+                    (long long)ds.num_cameras);
+    }
     if (ds.center_mode != "none") {
         char xyz[96];
         std::snprintf(xyz, sizeof xyz, "%.12g, %.12g, %.12g",
@@ -845,7 +926,7 @@ void TrainerSession::setup_engine() {
     // ---- DataManager ---------------------------------------------------
     const int64_t N = ds.num_cameras;
     int64_t num_val = (int64_t)ds.val_indices.size();
-    int64_t num_train = N - num_val;
+    int64_t num_train = (int64_t)ds.train_indices.size();
     // Batch-size policy.
     double n_batch = std::max((double)num_train / std::max(cfg.max_batch_per_epoch, 1), 1.0);
     int train_bs = std::max(1, (int)(n_batch + 0.5));
@@ -854,6 +935,15 @@ void TrainerSession::setup_engine() {
         val_bs = std::max(1, (int)std::ceil(n_batch * (double)num_val / (double)num_train));
 
     DataManagerConfig dm;
+    dm.diagnostic_sync = diagnostic_sync_sampler;
+    if (b1_owner_from_env() >= 0) {
+        const auto r = ckpt::resolve_checkpoint(cfg.resume);
+        const auto contract = ckpt::read_b1_contract(r.ckpt_dir);
+        dm.seed = ckpt::b1_sampler_seed;
+        dm.independent_train_rng = true;
+        dm.initial_train_step = contract
+            ? (uint64_t)(contract->completed_step - contract->source_step) : 0;
+    }
     dm.cache_mode  = (cfg.cache_images == "disk") ? CacheMode::DISK : CacheMode::CPU;
     // A split needs a mask even when none is on disk: the synthesized
     // all-white one becomes the post-split FOV mask (0 past the lens),
@@ -959,15 +1049,47 @@ void TrainerSession::setup_engine() {
     // built: the world must already be allocated at max_num_splats and every
     // appearance channel the checkpoint carries must already exist as a
     // restore target, which is what everything above establishes.
-    if (!cfg.resume.empty()) restore_checkpoint();
+    const int b1_owner = b1_owner_from_env();
+    if (b1_owner >= 0 && cfg.resume.empty())
+        throw std::runtime_error("SS_B1_OWNER requires a full checkpoint resume");
+    fs::path b1_source;
+    if (!cfg.resume.empty()) b1_source = restore_checkpoint();
+    engine_b1_configure(b1_owner, b1_source.string(), start_step);
+    if (b1_owner >= 0) {
+        const char* original = spirula::env("B1_SOURCE");
+        const auto marked = ckpt::read_b1_contract(b1_source);
+        if (marked && (!original || !*original))
+            throw std::runtime_error("B1 owner resume requires SS_B1_SOURCE original checkpoint");
+        const char* views = spirula::env("B1_VIEWS");
+        if (b1_owner != 2 &&
+            (!views || ckpt::b1_file_hash(views) != b1_views_sha256))
+            throw std::runtime_error("B1 views changed after dataset assignment");
+        engine_b1_bind_contract(cfg, views ? views : "", ds.train_indices,
+                               original ? original : b1_source.string(),
+                               b1_view_policy, b1_full_train_indices);
+    }
+#ifdef SS_BACKEND_VULKAN
+    backend::backing_report("trainer_setup_complete");
+#endif
 }
 
 // Restore engine state from cfg.resume, adapting the checkpoint's buffers on
 // the host first when its layout differs from the one just built (fewer
 // splats, different SH degree, bilagrid/PPISP added or dropped).
-void TrainerSession::restore_checkpoint() {
+std::string TrainerSession::restore_checkpoint() {
     ckpt::ResolvedCheckpoint r = ckpt::resolve_checkpoint(cfg.resume);
     ckpt::check_resumable(r.ckpt_dir);
+    const auto b1_contract = ckpt::read_b1_contract(r.ckpt_dir);
+    const int b1_owner = b1_owner_from_env();
+    if (b1_contract &&
+        (b1_owner != b1_contract->owner || ckpt::b1_config_hash(cfg) != b1_contract->config_sha256))
+        throw std::runtime_error("B1 owner checkpoint cannot resume ordinary/changed training");
+    if (b1_owner >= 0 && !b1_contract) {
+        auto config_path = r.ckpt_dir / "config.json";
+        if (!fs::is_regular_file(config_path)) config_path = r.run_dir / "config.json";
+        if (ckpt::b1_config_hash(cfg) != ckpt::b1_config_hash(ckpt::config_from_json(config_path)))
+            throw std::runtime_error("B1 must preserve original source numerical/data configuration");
+    }
 
     // The target is what the engine ACTUALLY holds, not what the config asks
     // for: a depth/normal grid also needs the dataset to carry those maps,
@@ -978,7 +1100,8 @@ void TrainerSession::restore_checkpoint() {
     target.num_images     = (int)post.n_post;
     target.background_sh        = cfg.background_mode == "sh";
     target.background_sh_degree = cfg.background_sh_degree;
-    const OptimConfig target_optim = build_step_config(cfg, st, 0).optim;
+    const OptimConfig target_optim =
+        engine_resolve_managed_step_config(build_step_config(cfg, st, 0)).optim;
     target.sh_optim_bits = target_optim.sh_optim_bits;
     target.sh_value_bits = target_optim.sh_value_bits;
     target.non_sh_optim_bits = target_optim.non_sh_optim_bits;
@@ -1008,6 +1131,8 @@ void TrainerSession::restore_checkpoint() {
     {
         JsonValue state = ckpt::read_state_json(r.ckpt_dir);
         if (ckpt::needs_adapt(state, target)) {
+            if (b1_owner >= 0 || b1_contract)
+                throw std::runtime_error("B1 native owner/source layout adaptation is forbidden");
             tmp = out_dir / ".resume_adapt";
             log(lmsg::ckpt_adapting.get());
             adapted = ckpt::adapt_checkpoint(r.ckpt_dir, target, tmp);
@@ -1016,7 +1141,13 @@ void TrainerSession::restore_checkpoint() {
     }
 
     try {
+#ifdef SS_BACKEND_VULKAN
+        backend::backing_report("before_checkpoint_load");
+#endif
         start_step = engine_load_checkpoint(load_from.string());
+#ifdef SS_BACKEND_VULKAN
+        backend::backing_report("after_checkpoint_load");
+#endif
     } catch (const std::exception& e) {
         if (adapted) remove_tree(tmp);
         throw std::runtime_error(
@@ -1025,23 +1156,36 @@ void TrainerSession::restore_checkpoint() {
     }
     if (adapted) remove_tree(tmp);
     log(lfmt(lmsg::resumed_from, {r.ckpt_dir.string(), (long long)start_step}));
+    return r.ckpt_dir.string();
 }
 
 void TrainerSession::save_checkpoint(int step) {
     char name[32];
     std::snprintf(name, sizeof name, "step-%09d.ckpt", step);
     const fs::path ckpt = out_dir / name;
+    if (b1_owner_from_env() >= 0 && fs::exists(ckpt))
+        throw std::runtime_error("B1 checkpoint step already published in this output");
 
     auto validate = [&](const fs::path& dir) {
         const fs::path splat = dir / "splat.ply";
         const fs::path state = dir / "state.tar";
         const fs::path config = dir / "config.json";
+        const int b1_owner = b1_owner_from_env();
         if (!fs::is_regular_file(splat) || fs::file_size(splat) == 0)
             throw std::runtime_error("checkpoint splat.ply missing or empty");
         if (!fs::is_regular_file(state) || fs::file_size(state) == 0)
             throw std::runtime_error("checkpoint state.tar missing or empty");
         if (!fs::is_regular_file(config) || fs::file_size(config) == 0)
             throw std::runtime_error("checkpoint config.json missing or empty");
+        if (b1_owner == 0 || b1_owner == 1) {
+            if (!fs::is_regular_file(dir / "b1-owned-blocks.bin") ||
+                fs::file_size(dir / "b1-owned-blocks.bin") == 0 ||
+                !fs::is_regular_file(dir / "b1-owned-ids.bin") ||
+                fs::file_size(dir / "b1-owned-ids.bin") == 0 ||
+                !fs::is_regular_file(dir / "b1-excluded-ids.bin") ||
+                fs::file_size(dir / "b1-excluded-ids.bin") == 0)
+                throw std::runtime_error("B1 checkpoint sidecars missing or empty");
+        }
         const JsonValue state_json = ckpt::read_state_json(dir);
         if (cfg.save_full_checkpoint) ckpt::check_resumable(dir);
         const JsonValue* state_step = state_json.find("step");
@@ -1084,9 +1228,16 @@ void TrainerSession::save_checkpoint(int step) {
 
         try {
             const OptimConfig checkpoint_optim =
-                build_step_config(cfg, st, step).optim;
+                engine_resolve_managed_step_config(
+                    build_step_config(cfg, st, step)).optim;
+#ifdef SS_BACKEND_VULKAN
+            backend::backing_report("before_checkpoint_save");
+#endif
             engine_save_checkpoint(staging.string(), cfg.save_full_checkpoint,
                                    step, &checkpoint_optim);
+#ifdef SS_BACKEND_VULKAN
+            backend::backing_report("after_checkpoint_save");
+#endif
             save_config_json(cfg, staging, preset);
             validate(staging);
 
@@ -1219,6 +1370,150 @@ double TrainerSession::eta_seconds() const {
     return std::max(0, cfg.num_iterations - step) * avg;
 }
 
+void TrainerSession::run_causal_diagnostic(int completed_step) {
+    const int owner = b1_owner_from_env();
+#ifdef _WIN32
+    const int diagnostic_pid = _getpid();
+#else
+    const int diagnostic_pid = getpid();
+#endif
+    const RunState run_state = st;
+    const int original_start = start_step;
+    const std::string original_resume = cfg.resume;
+    const bool original_diverged = _diverged_loss_reported;
+    const std::string config_hash = ckpt::b1_config_hash(cfg);
+    const fs::path root = out_dir / "causal-diagnostic";
+    if (!fs::create_directory(root))
+        throw std::runtime_error("B2 causal diagnostic destination already exists");
+    std::ofstream output(root / "comparison.jsonl", std::ios::binary);
+    if (!output) throw std::runtime_error("B2 causal diagnostic output cannot open");
+    engine_b1_verify_context();
+    const auto baseline = engine_diagnostic_capture(true);
+    engine_diagnostic_verify_start(baseline);
+    if (spirula::env("B2_CAUSAL_SELF_CHECK")) {
+        engine_diagnostic_self_check(baseline);
+        output << "{\"type\":\"diagnostic_snapshot_regression\",\"host_mutation_detected\":true,"
+                  "\"device_mutation_detected\":true,\"independent_restore_exact\":true}\n";
+    }
+    {
+        std::ofstream host(root / "S-host-state.txt", std::ios::binary);
+        host << baseline.host_state;
+        if (!host) throw std::runtime_error("B2 causal baseline host evidence failed");
+    }
+    size_t snapshot_bytes = 0;
+    for (const auto& field : baseline.fields) {
+        snapshot_bytes += field.bytes.size();
+        output << "{\"type\":\"diagnostic_inventory\",\"field\":\"" << field.name
+               << "\",\"bytes\":" << field.bytes.size() << ",\"dtype\":" << int(field.dtype)
+               << ",\"serialized\":" << (field.serialized ? "true" : "false") << "}\n";
+    }
+    if (snapshot_bytes > (size_t(1) << 30))
+        throw std::runtime_error("B2 causal six-snapshot workspace exceeds host admission");
+    output << "{\"type\":\"diagnostic_boundary\",\"pid\":" << diagnostic_pid << ",\"owner\":" << owner
+           << ",\"completed_step\":" << completed_step << ",\"horizon\":" << cfg.num_iterations
+           << ",\"config_sha256\":\"" << config_hash << "\",\"sampler_state_bytes\":"
+           << engine().dm->diagnostic_signature().size()
+           << ",\"snapshot_bytes\":" << snapshot_bytes
+           << ",\"no_save_arms\":3,\"native_unordered\":true,\"timing_input_replay\":true,"
+              "\"synchronous_native_decode\":true}\n";
+    output.flush();
+    std::vector<EngineDiagnosticSnapshot> references;
+    bool accepted = true;
+    for (const std::string arm : {"A", "B", "C1", "C2"}) {
+        if (stop_requested.load())
+            throw std::runtime_error("B2 causal diagnostic interrupted before all arms");
+        if (arm != "A") engine_diagnostic_restore(baseline);
+        st = run_state;
+        start_step = original_start;
+        cfg.resume = original_resume;
+        _diverged_loss_reported = original_diverged;
+        cur_step.store(completed_step);
+        engine_diagnostic_verify_start(baseline);
+        if (ckpt::b1_config_hash(cfg) != config_hash)
+            throw std::runtime_error("B2 causal native settings changed before arm");
+        output << "{\"type\":\"diagnostic_start\",\"arm\":\"" << arm
+               << "\",\"exact\":true,\"host_sha256\":\"" << baseline.host_signature << "\"}\n";
+        if (arm == "B") {
+            save_checkpoint(completed_step);
+            char name[32];
+            std::snprintf(name, sizeof name, "step-%09d.ckpt", completed_step);
+            cfg.resume = (out_dir / name).string();
+            const auto marked = ckpt::read_b1_contract(cfg.resume);
+            if (!marked || marked->owner != owner || marked->completed_step != completed_step ||
+                marked->config_sha256 != config_hash ||
+                marked->source_state_sha256 != engine().b1.contract->source_state_sha256 ||
+                marked->mask_sha256 != engine().b1.contract->mask_sha256)
+                throw std::runtime_error("B2 causal native intervention owner binding changed");
+            const auto checkpoint = restore_checkpoint();
+            if (start_step != completed_step)
+                throw std::runtime_error("B2 causal native intervention loaded wrong boundary");
+            engine_b1_configure(owner, checkpoint, completed_step);
+            const char* original = spirula::env("B1_SOURCE");
+            const char* views = spirula::env("B1_VIEWS");
+            if (!original || !*original || !views || !*views)
+                throw std::runtime_error("B2 causal intervention requires original source and views");
+            engine_b1_bind_contract(cfg, views, ds.train_indices, original,
+                                    b1_view_policy, b1_full_train_indices);
+            engine().dm->diagnostic_native_resume(
+                static_cast<uint64_t>(completed_step - marked->source_step));
+            const auto loaded = engine_diagnostic_capture(false);
+            {
+                std::ofstream host(root / "B-native-load-host-state.txt", std::ios::binary);
+                host << loaded.host_state;
+                if (!host) throw std::runtime_error("B2 causal loaded host evidence failed");
+            }
+            accepted = engine_diagnostic_compare(baseline, baseline, loaded, output, arm, 0, root) && accepted;
+        } else {
+            const auto immediate = engine_diagnostic_capture(false);
+            accepted = engine_diagnostic_compare(baseline, baseline, immediate, output, arm, 0, root) && accepted;
+        }
+        engine_diagnostic_begin_arm(arm);
+        size_t probe = 0;
+        for (int updates = 1; updates <= 64; ++updates) {
+            if (stop_requested.load())
+                throw std::runtime_error("B2 causal diagnostic interrupted during arm");
+            train_step(completed_step + updates - 1);
+            cur_step.store(completed_step + updates);
+            backend::device_synchronize();
+            if (const char* error = backend::last_error()) throw std::runtime_error(error);
+            engine_diagnostic_step_state(completed_step + updates);
+            output << "{\"type\":\"diagnostic_step\",\"arm\":\"" << arm
+                   << "\",\"updates\":" << updates << ",\"absolute_step\":"
+                   << completed_step + updates << ",\"host_sha256\":\""
+                   << engine_diagnostic_host_signature() << "\",\"config_sha256\":\""
+                   << ckpt::b1_config_hash(cfg) << "\"}\n";
+            if (updates == 1 || updates == 8 || updates == 64) {
+                auto actual = engine_diagnostic_capture(false);
+                if (arm == "A") {
+                    accepted = engine_diagnostic_compare(baseline, actual, actual, output, arm, updates, root) && accepted;
+                    references.push_back(std::move(actual));
+                } else {
+                    accepted = engine_diagnostic_compare(baseline, references.at(probe), actual,
+                                                         output, arm, updates, root) && accepted;
+                }
+                ++probe;
+                output.flush();
+            }
+        }
+        engine_diagnostic_end_arm();
+        engine_b1_verify_context();
+    }
+    engine_diagnostic_restore(baseline);
+    st = run_state;
+    start_step = original_start;
+    cfg.resume = original_resume;
+    _diverged_loss_reported = original_diverged;
+    cur_step.store(completed_step);
+    output << "{\"type\":\"diagnostic_complete\",\"accepted\":" << (accepted ? "true" : "false")
+           << ",\"completed\":true,\"recovery_qualified\":false,"
+              "\"no_save_arms\":3,\"save_load_arms\":1,\"restored_S_exact\":true}\n";
+    output.close();
+    if (!output) throw std::runtime_error("B2 causal diagnostic output failed");
+#ifdef SS_BACKEND_VULKAN
+    backend::backing_report("causal_diagnostic_complete");
+#endif
+}
+
 void TrainerSession::train(const TrainerCallbacks& cb) {
     {
         std::lock_guard<std::mutex> lk(_time_mutex);
@@ -1228,8 +1523,37 @@ void TrainerSession::train(const TrainerCallbacks& cb) {
     }
     cur_step = start_step;
 
+    int causal_step = -1;
+    if (const char* value = spirula::env("B2_CAUSAL_STEP")) {
+        size_t parsed = 0;
+        causal_step = std::stoi(value, &parsed);
+        if (parsed != std::strlen(value) || causal_step <= start_step ||
+            causal_step + 64 >= cfg.num_iterations || !cfg.save_full_checkpoint ||
+            !spirula::env_on("WORKER_CONTROL") ||
+            (b1_owner_from_env() != 0 && b1_owner_from_env() != 1))
+            throw std::runtime_error("SS_B2_CAUSAL_STEP requires a marked controlled owner and 64 native continuation updates");
+    }
+
+    int b1_stop_at = -1;
+    if (b1_owner_from_env() >= 0) {
+        if (const char* value = spirula::env("B1_STOP_AT_STEP")) {
+            size_t parsed = 0;
+            b1_stop_at = std::stoi(value, &parsed);
+            if (parsed != std::strlen(value) || b1_stop_at < start_step ||
+                b1_stop_at >= cfg.num_iterations)
+                throw std::runtime_error("SS_B1_STOP_AT_STEP is outside the resumed schedule");
+        }
+    }
+    const int64_t refresh_cadence = app::b1_refresh_cadence();
+    if (refresh_cadence && (causal_step >= 0 || !cfg.save_full_checkpoint))
+        throw std::runtime_error("B1 live refresh requires native full checkpoints without causal intervention");
+
     int step = start_step;
     for (; step < cfg.num_iterations; step++) {
+        if (b1_stop_at >= 0 && step >= b1_stop_at) {
+            save_on_stop.store(true);
+            stop_requested.store(true);
+        }
         // Pause gate + render-fairness yield: give viewer render workers an
         // uncontended window to take the engine mutex.
         if (paused.load() && !stop_requested.load()) {
@@ -1250,10 +1574,51 @@ void TrainerSession::train(const TrainerCallbacks& cb) {
         std::string data_error;
         {
             std::lock_guard<std::mutex> lk(engine_mutex);
-            if (step > 0 && cfg.steps_per_save > 0 && step % cfg.steps_per_save == 0)
+            if (!refresh_cadence && step > 0 && cfg.steps_per_save > 0 && step % cfg.steps_per_save == 0)
                 save_checkpoint(step);
             try {
                 losses = train_step(step);
+                if (refresh_cadence &&
+                    (step + 1 - engine().b1.contract->source_step) % refresh_cadence == 0) {
+                    const auto& contract = *engine().b1.contract;
+                    const bool released = app::b1_refresh_boundary(
+                        step + 1, contract.refresh_generation, contract.mask_sha256,
+                        contract.refresh_commit_sha256,
+                        [](const fs::path& path, int64_t boundary) {
+                            return engine_b1_export_refresh(path.string(), boundary);
+                        },
+                        [](const fs::path& path, int64_t boundary, const std::string& hash) {
+                            engine_b1_install_refresh(path.string(), boundary, hash);
+                        },
+                        [](int64_t boundary, const std::string& left,
+                           const std::string& right, const std::string& commit) {
+                            engine_b1_commit_refresh(boundary, left, right, commit);
+                        },
+                        [this](int64_t boundary) {
+                            save_checkpoint((int)boundary);
+                            char name[32];
+                            std::snprintf(name, sizeof name, "step-%09d.ckpt", (int)boundary);
+                            return fs::absolute(out_dir / name);
+                        },
+                        [this]() { return stop_requested.load(); });
+                    if (!released) {
+                        // Preserve STOP/CANCEL intent; live-context final saves
+                        // remain suppressed and recovery uses the committed pair.
+                        stop_requested.store(true);
+                    }
+                }
+                if (step + 1 == causal_step) {
+                    run_causal_diagnostic(step + 1);
+                    cur_step.store(step + 1);
+                    save_on_stop.store(true);
+                    stop_requested.store(true);
+                    {
+                        std::lock_guard<std::mutex> time_lock(_time_mutex);
+                        _end_time = std::chrono::steady_clock::now();
+                    }
+                    training_time_s = elapsed_seconds();
+                    return;
+                }
             } catch (const DataDecodeError& e) {
                 data_error = e.what();
             }
@@ -1307,8 +1672,13 @@ void TrainerSession::train(const TrainerCallbacks& cb) {
         engine_vram_mb = (double)(cap + engine_get_scratch_bytes()) / (1024.0 * 1024.0);
     }
     engine_profile_capture_vram();
+    if (!refresh_cadence || engine().b1.refresh_pending_boundary == -1)
+        engine_b1_verify_context();
+#ifdef SS_BACKEND_VULKAN
+    backend::backing_report(stop_requested.load() ? "trainer_stopped" : "trainer_completed");
+#endif
 
-    if (save_on_stop.load()) {
+    if (save_on_stop.load() && !refresh_cadence) {
         std::lock_guard<std::mutex> lk(engine_mutex);
         save_checkpoint(step);
         log(lfmt(lmsg::checkpoint_saved, {fs::absolute(out_dir).string()}));
@@ -1400,12 +1770,42 @@ std::vector<uint8_t> to_png_bytes(const std::vector<float>& rgb) {
 
 }  // namespace
 
-void TrainerSession::eval() {
-    // eval_mode "all" trains on every frame, so nothing is held out.
-    if (cfg.eval_mode == "all") return;
+void TrainerSession::eval_ply(const std::string& path) {
+    if (cfg.resume.empty() || b1_owner_from_env() >= 0)
+        throw std::runtime_error("B1 merged evaluation requires a source checkpoint without B1 ownership");
+    ckpt::validate_b1_appearance(path, ckpt::resolve_checkpoint(cfg.resume).ckpt_dir);
+    SplatCloud cloud = read_splat_ply(path);
+    if (cloud.num <= 0 || cloud.sh_degree != cfg.sh_degree)
+        throw std::runtime_error("B1 merged PLY has no splats or mismatched SH degree");
+    auto tv = [](std::vector<float>& data, std::vector<int64_t> shape) -> TorchTensorView {
+        return {(uint64_t)(uintptr_t)data.data(), (uint32_t)sizeof(float), std::move(shape)};
+    };
+    engine_scene_set_data_3dgs(0, cloud.num,
+        tv(cloud.means, {cloud.num, 3}), tv(cloud.quats, {cloud.num, 4}),
+        tv(cloud.scales, {cloud.num, 3}), tv(cloud.opacities, {cloud.num, 1}),
+        tv(cloud.features_dc, {cloud.num, 3}),
+        tv(cloud.features_sh, {cloud.num, cloud.dim_sh() - 1, 3}));
+    const ColorResolution color = resolve_color(cfg);
+    auto matrix = [](const Mat3f& m) { return std::vector<float>(m.begin(), m.end()); };
+    engine_scene_set_color_space(0, color.splat_on(), (int)color.splat_transfer,
+                                 color.splat_linear,
+                                 color.splat_on() ? matrix(gamut_to_rec709(color.splat_gamut))
+                                                  : std::vector<float>{});
+    engine_scene_activate(0);
+    engine_init_color_space(
+        color.splat_on(), (int)color.splat_transfer, color.splat_linear,
+        color.splat_on() ? matrix(gamut_to_rec709(color.splat_gamut)) : std::vector<float>{},
+        color.image_on(), (int)color.image_transfer, color.image_linear,
+        color.image_on() ? matrix(gamut_to_rec709(color.image_gamut)) : std::vector<float>{});
+    eval();
+}
 
-    // Re-parse for the eval side of the split. The parser computes the split
-    // over all frames, so this is the exact complement of what training saw.
+void TrainerSession::eval() {
+    const bool m0_train_trace = spirula::env_on("M0_VISIBILITY_TRAIN") &&
+                                spirula::env_on("M0_VISIBILITY");
+    if (cfg.eval_mode == "all" && !m0_train_trace) return;
+
+    // The parser's evaluation split is the complement of its training split.
     DatasetParserConfig pcfg;
     pcfg.recon_dir            = cfg.colmap_recon_dir;
     pcfg.image_dir            = cfg.image_dir;
@@ -1425,7 +1825,7 @@ void TrainerSession::eval() {
     pcfg.metashape_xml           = cfg.metashape_xml;
     pcfg.metashape_ply           = cfg.metashape_ply;
     pcfg.metashape_psx           = cfg.metashape_psx;
-    pcfg.split                   = "eval";
+    pcfg.split                   = m0_train_trace ? "train" : "eval";
 
     ParsedDataset eds = parse_dataset(cfg.data, pcfg, cfg.data_format);
     if (eds.num_cameras == 0) {
@@ -1512,6 +1912,13 @@ void TrainerSession::eval() {
 
     std::deque<ViewJob> queue;
     std::vector<ViewScore> scores;
+    int64_t selected_eval_image = -1;
+    if (const char* value = spirula::env("B1_EVAL_IMAGE")) {
+        size_t parsed = 0;
+        selected_eval_image = std::stoll(value, &parsed);
+        if (parsed != std::strlen(value) || selected_eval_image < 0)
+            throw std::runtime_error("SS_B1_EVAL_IMAGE must be a nonnegative index");
+    }
     std::mutex qmu, smu;
     std::condition_variable qcv, spacecv;
     bool producing = true;
@@ -1535,7 +1942,8 @@ void TrainerSession::eval() {
             if ((size_t)j.index >= scores.size()) scores.resize((size_t)j.index + 1);
             scores[(size_t)j.index] = s;
         }
-        if (cfg.save_eval_images) {
+        if (cfg.save_eval_images &&
+            (selected_eval_image < 0 || j.index == selected_eval_image)) {
             char nm[64];
             auto png = [&](const char* kind, const std::vector<float>& img) {
                 std::snprintf(nm, sizeof nm, "eval-%s-%05d.png", kind,
@@ -1589,8 +1997,11 @@ void TrainerSession::eval() {
         std::vector<float> gt, render;
         {
             std::lock_guard<std::mutex> lk(engine_mutex);
-            int n_view = engine_eval_forward(cfg.primitive, sh_deg, cfg.packed);
+            int n_view = engine_eval_forward(
+                cfg.primitive, sh_deg, cfg.packed,
+                (m0_train_trace || spirula::env("B1_EVAL_PLY")) ? (int)i : -1);
             if (n_view == 0) break;
+            if (m0_train_trace) continue;
             auto shape = engine_get_render_rgb_shape();
             B = std::get<0>(shape); H = std::get<1>(shape);
             W = std::get<2>(shape); Cc = std::get<3>(shape);

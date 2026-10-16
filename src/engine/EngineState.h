@@ -6,6 +6,7 @@
 // bilagrid_rgb/depth/normal, ppisp). The singleton lives in EngineState.cpp.
 
 #include "core/Tensor.h"
+#include "checkpoint/B1Contract.h"
 
 #include "kernels/background/BackgroundSphericalHarmonics.cuh"
 #include "kernels/bilagrid/BilagridUtils.cuh"
@@ -281,6 +282,16 @@ struct SplatOptim {
     bool   skip_grad_zero = false;     // _alloc_grad_buffers skips zeroing
     float  grad_scale     = 1.0f;      // multiplied into v_* inside optim
     bool   zero_grad_in_optim = false; // optim zeroes v_* after consuming
+};
+
+struct EngineB1State {
+    int owner = -1;
+    uint64_t source_id = 0;
+    DeviceVector<uint32_t> owned_blocks;
+    std::string frozen_hash;
+    int64_t refresh_pending_boundary = -1;
+    std::string refresh_export_sha256, refresh_installed_sha256;
+    std::optional<ckpt::B1Contract> contract;
 };
 
 // One bilagrid channel (RGB / depth / normal).
@@ -602,6 +613,7 @@ struct EngineState {
     GTData         gt;
     SplatGrad      grad;
     SplatOptim     optim;
+    EngineB1State  b1;
 
     BilagridRGB    bilagrid_rgb;
     BilagridDepth  bilagrid_depth;

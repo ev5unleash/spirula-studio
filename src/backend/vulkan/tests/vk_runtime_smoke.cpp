@@ -5,6 +5,7 @@
 // error channel. Run on each available device via SS_VK_DEVICE.
 
 #include "backend/api/BackendRuntime.h"
+#include "backend/vulkan/VulkanInternal.h"
 #include "core/SourcePath.h"
 
 #include <cstdint>
@@ -12,6 +13,9 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <atomic>
+#include <thread>
+#include <cstdlib>
 
 static int g_failures = 0;
 
@@ -33,8 +37,97 @@ static int g_failures = 0;
         }                                                                 \
     } while (0)
 
-int main() {
+int main(int argc, char** argv) {
     using namespace backend;
+    if (argc == 2 && std::strcmp(argv[1], "--invalid-backing-cap") == 0) {
+#ifdef _WIN32
+        _putenv_s("SS_WORKER_DEVICE_LIMIT_BYTES", "invalid");
+#else
+        setenv("SS_WORKER_DEVICE_LIMIT_BYTES", "invalid", 1);
+#endif
+        CHECK(vk::stream_impl(kDefaultStream) != nullptr);
+        bool invalid_rejected = false;
+        try { device_free(device_malloc(16)); }
+        catch (const std::runtime_error& e) {
+            invalid_rejected = std::string(e.what()).find("must be positive bytes") != std::string::npos;
+        }
+        CHECK(invalid_rejected);
+        backing_report("invalid-configuration-cleanup");
+        std::printf("vk_runtime_smoke invalid cap: %s\n", g_failures ? "FAILED" : "PASSED");
+        return g_failures ? 1 : 0;
+    }
+    if (argc == 2 && std::strcmp(argv[1], "--backing-cap") == 0) {
+#ifdef _WIN32
+        _putenv_s("SS_WORKER_DEVICE_LIMIT_BYTES", "1048576");
+#else
+        setenv("SS_WORKER_DEVICE_LIMIT_BYTES", "1048576", 1);
+#endif
+        CHECK(vk::backing_cap_smoke());
+        void* first = device_malloc(768 << 10);
+        CHECK(first != nullptr);
+        const auto single = backing_usage();
+        void* overlap = device_malloc(128 << 10);
+        CHECK(overlap != nullptr);
+        const auto overlapping = backing_usage();
+        CHECK(overlapping.current > single.current);
+        CHECK(overlapping.reservation_peak >= overlapping.current);
+        CHECK(overlapping.category_reservation_peak[0] >= overlapping.current);
+        device_free(overlap);
+        const auto before = backing_usage();
+        bool cap_refused = false;
+        try { device_free(device_malloc(512 << 10)); }
+        catch (const std::runtime_error& e) {
+            cap_refused = std::string(e.what()).find("refused before vkAllocateMemory") != std::string::npos;
+        }
+        CHECK(cap_refused);
+        const auto refused = backing_usage();
+        CHECK(refused.current == before.current && refused.reserved == 0);
+        CHECK(refused.allocation_calls == before.allocation_calls);
+        CHECK(refused.failures == before.failures + 1);
+        uint8_t pageable[16] = {};
+        bool staging_refused = false;
+        try { memcpy_sync(first, pageable, sizeof pageable, MemcpyKind::HostToDevice); }
+        catch (const std::runtime_error&) { staging_refused = true; }
+        CHECK(staging_refused);
+        uint64_t address = 0;
+        void* mapped = nullptr;
+        bool params_refused = false;
+        try { vk::params_alloc(16, &address, &mapped); }
+        catch (const std::runtime_error&) { params_refused = true; }
+        CHECK(params_refused);
+        const auto rings_refused = backing_usage();
+        CHECK(rings_refused.current == before.current && rings_refused.reserved == 0);
+        CHECK(rings_refused.allocation_calls == before.allocation_calls);
+        CHECK(rings_refused.category_failures[2] == 1 && rings_refused.category_failures[3] == 1);
+        device_free(first);
+        CHECK(backing_usage().current == 0);
+        std::atomic<int> ready{0};
+        std::atomic<int> concurrent_refusals{0};
+        void* results[2] = {};
+        auto allocate = [&](int i) {
+            ready.fetch_add(1);
+            while (ready.load() != 2) std::this_thread::yield();
+            try { results[i] = device_malloc(768 << 10); }
+            catch (const std::runtime_error&) { concurrent_refusals.fetch_add(1); }
+        };
+        std::thread a(allocate, 0), b(allocate, 1);
+        a.join(); b.join();
+        CHECK((results[0] != nullptr) != (results[1] != nullptr));
+        CHECK(backing_usage().current <= 1048576);
+        CHECK(backing_usage().reserved == 0);
+        CHECK(concurrent_refusals.load() == 1);
+        device_free(results[0]); device_free(results[1]);
+        void* again = host_malloc_pinned(768 << 10);
+        CHECK(again != nullptr);
+        CHECK(backing_usage().category_current[1] != 0);
+        host_free_pinned(again);
+        const auto final = backing_usage();
+        CHECK(final.current == 0 && final.reserved == 0 && final.peak <= final.limit);
+        CHECK(final.reservation_peak <= final.limit && final.reservation_peak >= overlapping.current);
+        backing_report("bounded-cap-smoke");
+        std::printf("vk_runtime_smoke cap: %s\n", g_failures ? "FAILED" : "PASSED");
+        return g_failures ? 1 : 0;
+    }
     CHECK(!device_select_identity("9999"));
     const std::string detail = device_selection_error();
     CHECK(!detail.empty());

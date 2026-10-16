@@ -573,6 +573,17 @@ int spirula_train_main(int argc, char** argv) {
         session.setup_engine();
         if (worker_control && session.stop_requested.load())
             return session.save_on_stop.load() ? 42 : 43;
+        if (const char* merged = spirula::env("B1_EVAL_PLY")) {
+            session.eval_ply(merged);
+            return 0;
+        }
+        if (spirula::env_on("M0_VISIBILITY") &&
+            spirula::env_on("M0_VISIBILITY_TRAIN")) {
+            if (cfg.resume.empty())
+                throw std::runtime_error("M0 visibility trace requires a source checkpoint");
+            session.eval();
+            return 0;
+        }
 
         // ---- Web viewer ------------------------------------------------------
         ViewerServer viewer;
@@ -614,7 +625,8 @@ int spirula_train_main(int argc, char** argv) {
         // A worker asks for cooperative stop by writing STOP\n to our stdin
         // (see app/cli/worker_main.cpp). Distinguish that from finishing so
         // the parent can tell "complete" from "stopped early, saved".
-        const bool stopped = worker_control && session.stop_requested.load();
+        const bool stopped = session.stop_requested.load() &&
+            (worker_control || spirula::env("B1_STOP_AT_STEP") != nullptr);
         if (!stopped) {
             // Held-out eval replaces DataManager, so it belongs only to a
             // completed run.

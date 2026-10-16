@@ -13,12 +13,14 @@
 #include "engine/EngineState.h"
 
 #include "core/CheckpointIO.h"
+#include "checkpoint/Resume.h"
 #include "external/npy.hpp"
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -28,6 +30,13 @@
 namespace {
 
 namespace fs = std::filesystem;
+
+static void _ckpt_write_le(std::ostream& out, uint64_t value, size_t bytes) {
+    char raw[8];
+    for (size_t i = 0; i < bytes; ++i)
+        raw[i] = (char)(value >> (8 * i));
+    out.write(raw, (std::streamsize)bytes);
+}
 
 static void _ckpt_mkdir(const fs::path& p) {
     std::error_code ec;
@@ -85,6 +94,11 @@ static std::string _build_state_json(
     j << "  \"quant_block_size\": 256,\n";
     j << "  \"quant_eps\": 1e-15,\n";
     j << "  \"step\": " << step << ",\n";
+    if (s.b1.owner >= 0) {
+        if (!full || !s.b1.contract)
+            throw std::runtime_error("B1 requires a bound full native checkpoint");
+        j << "  \"b1\": " << ckpt::serialize_b1_contract(*s.b1.contract) << ",\n";
+    }
     j << "  \"primitive\": \"" << s.primitive << "\",\n";
     j << "  \"cur_num_splats\": " << s.cur_num_splats << ",\n";
     j << "  \"max_num_splats\": " << s.max_num_splats << ",\n";
@@ -183,6 +197,9 @@ void engine_save_checkpoint(
     const OptimConfig* intended_optim
 ) {
     EngineState& s = engine();
+    if (s.b1.contract && s.b1.contract->version == 3 &&
+        (s.b1.refresh_pending_boundary != -1 || step != s.b1.contract->refresh_generation))
+        throw std::runtime_error("B1 live checkpoint requires an installed generation boundary");
     if (full_dump) {
         if (intended_optim && s.optim.initialized) {
             if (s.optim.sh_optim_bits != intended_optim->sh_optim_bits ||
@@ -221,6 +238,36 @@ void engine_save_checkpoint(
 
     const int64_t N = s.cur_num_splats;
     const int K = s.num_sh;
+
+    const int b1_owner = s.b1.owner;
+    std::vector<uint32_t> h_b1_owned_blocks;
+    if (b1_owner < -1 || b1_owner > 2)
+        throw std::runtime_error("engine_save_checkpoint: invalid B1 owner");
+    if (b1_owner >= 0) {
+        if (!s.b1.source_id || step < 0)
+            throw std::runtime_error("engine_save_checkpoint: missing B1 source identity");
+        if (N < 0 || N > std::numeric_limits<int64_t>::max() - 255 ||
+            N > (int64_t)std::numeric_limits<uint32_t>::max())
+            throw std::runtime_error("engine_save_checkpoint: invalid B1 mask bounds");
+        const uint64_t block_count = (uint64_t)(N + 255) / 256;
+        if (block_count > std::numeric_limits<size_t>::max() / sizeof(uint32_t) ||
+            s.b1.owned_blocks.size() != (int64_t)block_count ||
+            (block_count != 0 && s.b1.owned_blocks.data_ptr() == nullptr))
+            throw std::runtime_error("engine_save_checkpoint: invalid B1 mask bounds");
+        h_b1_owned_blocks.resize((size_t)block_count);
+        if (block_count != 0) {
+            backend::memcpy_sync(
+                h_b1_owned_blocks.data(), s.b1.owned_blocks.data_ptr(),
+                h_b1_owned_blocks.size() * sizeof(uint32_t),
+                backend::MemcpyKind::DeviceToHost);
+            if (const char* error = backend::last_error())
+                throw std::runtime_error(
+                    std::string("engine_save_checkpoint: B1 mask copy failed: ") + error);
+        }
+        for (uint32_t value : h_b1_owned_blocks)
+            if (value > 1)
+                throw std::runtime_error("engine_save_checkpoint: invalid B1 mask value");
+    }
 
     // --- D->H copy world splat tensors at s.cur_num_splats ---
     auto h_means        = _ckpt_d2h<float3>(s.world.means.data_ptr(),        (size_t)N);
@@ -344,6 +391,11 @@ void engine_save_checkpoint(
         if (std::max(std::max(sc.x, sc.y), sc.z) <= SCALE_MIN) {
             keep[i] = 0; deadscale_dropped++; continue;
         }
+        if (b1_owner >= 0 && b1_owner != 2 &&
+            h_b1_owned_blocks[(size_t)(i / 256)] == 0) {
+            keep[i] = 0;
+            continue;
+        }
         kept++;
     }
 
@@ -409,6 +461,67 @@ void engine_save_checkpoint(
             throw std::runtime_error("Failed to close PLY: " + ply_path.string());
     }
 
+    if (b1_owner >= 0) {
+        const uint32_t block_count = (uint32_t)h_b1_owned_blocks.size();
+        const fs::path blocks_path = out_root / "b1-owned-blocks.bin";
+        std::ofstream blocks(blocks_path, std::ios::binary | std::ios::trunc);
+        if (!blocks)
+            throw std::runtime_error("Failed to open B1 block sidecar: " +
+                                     blocks_path.string());
+        _ckpt_write_le(blocks, (uint64_t)N, sizeof(uint64_t));
+        _ckpt_write_le(blocks, s.b1.source_id, sizeof(uint64_t));
+        _ckpt_write_le(blocks, (uint64_t)step, sizeof(uint64_t));
+        _ckpt_write_le(blocks, block_count, sizeof(uint32_t));
+        _ckpt_write_le(blocks, (uint32_t)b1_owner, sizeof(uint32_t));
+        for (uint32_t value : h_b1_owned_blocks)
+            _ckpt_write_le(blocks, value, sizeof(uint32_t));
+        blocks.close();
+        if (!blocks)
+            throw std::runtime_error("Failed to close B1 block sidecar: " +
+                                     blocks_path.string());
+
+        const fs::path ids_path = out_root / "b1-owned-ids.bin";
+        std::ofstream ids(ids_path, std::ios::binary | std::ios::trunc);
+        if (!ids)
+            throw std::runtime_error("Failed to open B1 ID sidecar: " +
+                                     ids_path.string());
+        _ckpt_write_le(ids, (uint64_t)kept, sizeof(uint64_t));
+        for (int64_t i = 0; i < N; ++i)
+            if (keep[(size_t)i])
+                _ckpt_write_le(ids, (uint32_t)i, sizeof(uint32_t));
+        ids.close();
+        if (!ids)
+            throw std::runtime_error("Failed to close B1 ID sidecar: " +
+                                     ids_path.string());
+
+        uint64_t excluded_count = 0;
+        for (int64_t i = 0; i < N; ++i)
+            if ((b1_owner == 2 || h_b1_owned_blocks[(size_t)(i / 256)] != 0) &&
+                !keep[(size_t)i]) ++excluded_count;
+        const fs::path excluded_path = out_root / "b1-excluded-ids.bin";
+        std::ofstream excluded(excluded_path, std::ios::binary | std::ios::trunc);
+        if (!excluded)
+            throw std::runtime_error("Failed to open B1 exclusion sidecar: " +
+                                     excluded_path.string());
+        _ckpt_write_le(excluded, excluded_count, sizeof(uint64_t));
+        for (int64_t i = 0; i < N; ++i)
+            if ((b1_owner == 2 || h_b1_owned_blocks[(size_t)(i / 256)] != 0) &&
+                !keep[(size_t)i])
+                _ckpt_write_le(excluded, (uint32_t)i, sizeof(uint32_t));
+        excluded.close();
+        if (!excluded)
+            throw std::runtime_error("Failed to close B1 exclusion sidecar: " +
+                                     excluded_path.string());
+    }
+    if (b1_owner >= 0) {
+        if (!full_dump || !s.b1.contract)
+            throw std::runtime_error("B1 requires full native checkpoints");
+        engine_b1_verify_context();
+        s.b1.contract->completed_step = step;
+        ckpt::bind_b1_sidecars(*s.b1.contract, out_root);
+        s.b1.contract->ply_sha256 = ckpt::b1_file_hash(out_root / "splat.ply");
+    }
+
     // --- state.tar: metadata-driven resume payload (see file header) ---------
     // Which buffers to serialize: Always (base) or Always+Resume (full resume).
     const SaveClass save_min = full_dump ? SaveClass::Resume : SaveClass::Always;
@@ -437,6 +550,9 @@ void engine_save_checkpoint(
     if (!tar)
         throw std::runtime_error("Failed to close state.tar: "
                                  + (out_root / "state.tar").string());
+    if (b1_owner >= 0 &&
+        ckpt::b1_shared_hash(out_root) != s.b1.contract->frozen_shared_sha256)
+        throw std::runtime_error("B1 shared appearance changed during training");
 }
 
 
@@ -457,6 +573,8 @@ void engine_save_checkpoint(
 // Returns the saved training `step`.
 int engine_load_checkpoint(std::string input_dir) {
     EngineState& s = engine();
+    const auto b1_contract = ckpt::read_b1_contract(input_dir);
+    if (b1_contract) s.b1.contract = b1_contract;
 
     fs::path tarpath = fs::path(input_dir) / "state.tar";
     std::ifstream in(tarpath.string(), std::ios::binary);

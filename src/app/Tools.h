@@ -50,6 +50,7 @@ inline std::string help_text(const char* text, const char* written_as) {
 // symlink named spirula-sfm behaves as `spirula sfm` (which is how the separate
 // executables of earlier releases keep working).
 constexpr const char* kToolTrain = "train";
+constexpr const char* kToolTrainBlocks = "train-blocks";
 constexpr const char* kToolMesh  = "mesh";
 constexpr const char* kToolSfm   = "sfm";
 constexpr const char* kToolSam   = "sam";
@@ -63,6 +64,7 @@ constexpr const char* kToolWorker = "worker";
 
 #ifdef SS_TOOL_TRAIN
 int spirula_train_main(int argc, char** argv);
+int spirula_train_blocks_main(int argc, char** argv);
 #endif
 #ifdef SS_TOOL_MESH
 int spirula_mesh_main(int argc, char** argv);

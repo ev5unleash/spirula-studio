@@ -22,14 +22,8 @@ set(SS_SFM_SHADERS ${SS_SFM_SRC}/shaders)
 # ---------------------------------------------------------------------------
 # Shader variant matrix
 # ---------------------------------------------------------------------------
-# One BA blob per cached (Real, Loss) pair (src/sfm/README.md). slangc aborts
-# on every ba_df_* variant under Windows (docs/build.md), so no df default there.
-if(WIN32)
-    set(_sfm_reals_default "float;double")
-else()
-    set(_sfm_reals_default "float;double;df")
-endif()
-set(SS_SFM_REALS "${_sfm_reals_default}" CACHE STRING
+# One BA blob per cached (Real, Loss) pair (src/sfm/README.md).
+set(SS_SFM_REALS "float;double;df" CACHE STRING
     "SfM bundle-adjustment scalar configurations to compile")
 set(SS_SFM_LOSSES "trivial;huber;cauchy" CACHE STRING
     "SfM bundle-adjustment robust losses to compile")
@@ -80,9 +74,12 @@ foreach(real ${SS_SFM_REALS})
             # and some drivers then contract float expressions, destroying the
             # error-free transforms the emulated double-float type is built on.
             set(_raw ${_sfm_spirv_dir}/${_name}.raw.spv)
+            set(_df_slang_args ${_sfm_slang_args})
+            list(REMOVE_ITEM _df_slang_args -O2)
+            list(APPEND _df_slang_args -O0)
             add_custom_command(OUTPUT ${_out}
                 COMMAND ${SS_SFM_SLANGC} ${SS_SFM_SHADERS}/ba/ba.slang
-                        -o ${_raw} ${_sfm_slang_args} ${_rdef} ${_ldef}
+                        -o ${_raw} ${_df_slang_args} ${_rdef} ${_ldef}
                 COMMAND ${SS_SFM_SPIRV_TOOL} nocontract ${_raw} ${_out}
                 DEPENDS ${_sfm_ba_deps} ${SS_SFM_SPIRV_TOOL}
                 COMMENT "SPIR-V ${_name} (+NoContraction)"

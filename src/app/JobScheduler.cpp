@@ -448,12 +448,16 @@ bool path_claims_conflict(const PathClaim& aa, const PathClaim& bb) {
     return ancestor(a, b) || ancestor(b, a);
 }
 
-JobScheduler::JobScheduler(std::string config_dir, std::string exe_path)
+JobScheduler::JobScheduler(std::string config_dir, std::string exe_path,
+                           std::string admission_lock_dir)
     : _config_dir(std::move(config_dir)), _exe_path(std::move(exe_path)) {
     _state_path = (fs::u8path(_config_dir) / "job-state.json").u8string();
-    _lock_path = (fs::u8path(_config_dir) / "job-state.lock").u8string();
+    _lock_path = (fs::u8path(admission_lock_dir.empty() ? _config_dir : admission_lock_dir) /
+                  "job-state.lock").u8string();
     std::error_code ec;
     fs::create_directories(fs::u8path(_config_dir), ec);
+    if (!admission_lock_dir.empty())
+        fs::create_directories(fs::u8path(admission_lock_dir), ec);
     acquire_state_lock();
     _dispatcher = std::thread([this] { dispatcher_main(); });
 }
@@ -695,7 +699,16 @@ std::string JobScheduler::submit(const WorkflowSubmitOpts& o) {
     j->path_claims = o.path_claims;
     for (Phase& phase : j->phases) {
         if (phase.phase == "train") {
-            set_arg_value(phase.args, "--output-dir-name", j->job_id);
+            if (phase.output.empty()) {
+                set_arg_value(phase.args, "--output-dir-name", j->job_id);
+            } else {
+                fs::path output = fs::u8path(phase.output);
+                if (output.is_relative()) output = fs::u8path(j->work_dir) / output;
+                output = output.lexically_normal();
+                if (output.filename().empty()) return {};
+                set_arg_value(phase.args, "--output-dir-prefix", output.parent_path().u8string());
+                set_arg_value(phase.args, "--output-dir-name", output.filename().u8string());
+            }
             if (phase.output.empty()) {
                 const std::string prefix = arg_value(phase.args, "--output-dir-prefix");
                 const std::string name = arg_value(phase.args, "--output-dir-name");
@@ -1437,7 +1450,10 @@ void JobScheduler::shutdown() {
                           std::chrono::milliseconds(grace_ms);
     for (;;) { bool done = true; for (const auto& a : live) done = done && a->finished.load(); if (done || std::chrono::steady_clock::now() >= deadline) break; std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
     for (auto& a : live) if (!a->finished.load()) a->cancel.store(true);
-    for (auto& a : live) if (a->thread.joinable()) a->thread.join();
+    for (auto& a : live) {
+        if (a->thread.joinable()) a->thread.join();
+        a->path_leases.clear();
+    }
     std::lock_guard<std::mutex> lk(_mu); save_locked();
 }
 
