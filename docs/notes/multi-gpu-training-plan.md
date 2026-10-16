@@ -63,9 +63,9 @@ win.
   was copied to durable share storage and all 4,443 files verified before
   deleting the Temp copy. Originals and corpus remain read-only. The private
   handoff beside the corpus records paths; never commit them.
-- **Blocker:** no reconstruction of that corpus. GPU DF bundle adjustment
-  reached 878 registered images in 3,600 s; CPU BA reached 1,416 in 1,200 s;
-  both were killed by the deadline with empty output.
+- **Reconstruction:** the approved 1,104-view ordinal subset completed with
+  CPU BA in both phases. Its sole component (`sparse/0`) contains **1,083
+  registered images (98.10%)** and 286,599 points; mean reprojection 1.258 px.
 - **Machine:** two AMD Radeon AI PRO R9700, 16 threads, no COLMAP. Check free
   space afresh; run outputs belong on the share.
 
@@ -159,6 +159,11 @@ Output: `<NET>\ds-1104\sparse\0`. The registration count that matters is
 the component training will use, not the sum over disconnected models. If
 fewer than ~95% of 1,104 register in it, read the log before changing
 anything.
+
+Observed step 1 (native build at `428793fd`): extract 1,104 images /
+4,415,107 features; match 16,591 verified pairs / 1,917,071 inliers;
+map exit 0, sole component 1,083/1,104 images, 286,599 points.
+Logs: `<NET>\logs\step1-{extract,match,map}.log`. No deadline or killed run.
 
 ### 2. Native source checkpoint at step 10,000
 
