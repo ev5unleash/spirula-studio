@@ -1,4 +1,161 @@
-# Kitchen split-GPU performance comparison — 2026-09-29
+# Split-GPU training comparison
+
+**Outcome: closed (2026-10-16).** On the full-resolution original-derived
+subset, both tested B2 schedules were faster than ordinary native but failed
+the frozen six-metric, named-view quality rule over three repeats. Median
+complete wall was 2,614.295 s native, 1,323.576 s B2 frozen, and 1,624.831 s
+B2 refresh 1,000, with non-overlapping observed ranges. B2 frozen failed
+3 aggregate and 197 per-view metric checks; refresh failed 8 and 351.
+Native remains the default. No finalist recovery run was warranted;
+durability, large-scene capacity and production release remain unqualified.
+
+## 2026-10-16 original-derived subset — closed
+
+### Dataset, endpoint and timing
+
+The approved selection is every fourth **sorted position**, not identical
+source-frame numbers, from each of four full-resolution camera folders:
+1,104 hardlinks from the protected 4,416-image corpus. CPU bundle adjustment
+in both mapping phases produced one component with 1,083 registered images
+(98.10%), 286,599 points and 1.258 px mean reprojection error. No rig or
+manifest was added. The shared full step-10,000 source has 1,000,000 splats,
+horizon 30,000, and a fraction split of 975 training / 108 held-out images.
+Every scored endpoint is step 20,000; all 108 named views are unsplit.
+
+Hardware: two AMD Radeon AI PRO R9700 Vulkan devices, driver 32.0.31036.15;
+Slang 2026.12.0.1, native Windows Release build. Training and evaluation
+used build commit `ce9ab00e`; source generation used `c1fcd4c0`.
+The native stop launcher holds an open stdin pipe and preserves the 30,000
+horizon. Its later stop-save is not the scored endpoint.
+
+Complete wall includes process launch, source load, training, every save and
+refresh, merge and readback, through output publication/process completion.
+B2's merge decodes its staged PLY before publication. Evaluation is outside
+the boundary for every arm, with B1/worker-control variables cleared first.
+Native evaluation resumes its exact endpoint with a separate zero-update
+invocation; this does not shorten the timed training horizon.
+
+### Scorecard
+
+PSNR columns are medians of run means. The frozen single-GPU arm is a
+one-run causal control, **not** the quality or timing baseline.
+
+| Arm | Repeats | Complete wall median [min, max], s | Raw PSNR, dB | CC PSNR, dB | Quality | Disposition |
+|---|---:|---:|---:|---:|---|---|
+| Ordinary native | 3 | 2614.295 [2605.292, 2616.196] | 18.953360 | 20.641679 | Defines envelope | Default |
+| All-owned frozen control | 1 | 1337.949 [1337.949, 1337.949] | 19.118900 | 20.775652 | Causal control only | Not a candidate |
+| B2 frozen, full views | 3 | 1323.576 [1316.037, 1335.371] | 19.027596 | 20.634828 | **FAIL** | **closed** |
+| B2 refresh 1000, full views | 3 | 1624.831 [1619.963, 1785.884] | 18.920056 | 20.387788 | **FAIL** | **closed** |
+
+Both B2 arms passed the timing rule: median wall reductions were
+49.371585% frozen and 37.848210% refresh, and each candidate's slowest run
+was faster than native's fastest. No additional overlap batch was needed.
+These are timing improvements, **not comparable-quality speedups**. The
+single-GPU frozen control also took 1,337.949 s, so the reduction against
+ordinary native must not be attributed solely to the second GPU.
+
+### Frozen quality envelope
+
+The envelope uses only these three fresh native repeats. L1 is lower-better;
+PSNR and SSIM are higher-better, raw and colour-corrected. Each candidate's
+median of three run means and median of three run medians must be no worse
+than the corresponding least favourable native run. Each named view's
+candidate median must also be no worse than that view's worst native repeat.
+No tolerance or cross-metric compensation was applied. Displayed numbers are
+rounded; decisions use the unrounded summaries of the published arrays.
+
+**Median of run means:**
+
+| Metric | Least favourable native run mean | B2 frozen | B2 refresh 1000 |
+|---|---:|---:|---:|
+| psnr | 18.951683333 | 19.027596296 pass | 18.920056481 **FAIL** |
+| ssim | 0.776084593 | 0.778322944 pass | 0.775538991 **FAIL** |
+| l1 | 0.075006032 | 0.074205247 pass | 0.075778852 **FAIL** |
+| cc_psnr | 20.639723148 | 20.634827778 **FAIL** | 20.387787963 **FAIL** |
+| cc_ssim | 0.691217824 | 0.695938324 pass | 0.689002963 **FAIL** |
+| cc_l1 | 0.057869132 | 0.058530465 **FAIL** | 0.061867908 **FAIL** |
+
+**Median of run medians:**
+
+| Metric | Least favourable native run median | B2 frozen | B2 refresh 1000 |
+|---|---:|---:|---:|
+| psnr | 18.653250000 | 18.930300000 pass | 18.764800000 pass |
+| ssim | 0.775769500 | 0.784847000 pass | 0.782202000 pass |
+| l1 | 0.070881600 | 0.069016500 pass | 0.069077400 pass |
+| cc_psnr | 20.648800000 | 20.690500000 pass | 20.456400000 **FAIL** |
+| cc_ssim | 0.693908000 | 0.699016000 pass | 0.697166000 pass |
+| cc_l1 | 0.053947850 | 0.055324800 **FAIL** | 0.059361300 **FAIL** |
+
+**Named-view failures, out of 108 per metric:**
+
+| Metric | B2 frozen | B2 refresh 1000 |
+|---|---:|---:|
+| psnr | 24 | 45 |
+| ssim | 18 | 43 |
+| l1 | 31 | 57 |
+| cc_psnr | 40 | 72 |
+| cc_ssim | 27 | 47 |
+| cc_l1 | 57 | 87 |
+| Total failed view-metric checks / 648 | 197 | 351 |
+| Distinct views with any failure / 108 | 69 | 96 |
+
+Together with the 3 / 8 aggregate failures, these are 200 / 359 failed
+checks per candidate. All **1,320 checks**, including every one of the
+**559 failures**, are retained in `<NET>\runs\quality-checks.csv`, with
+candidate value, native envelope, delta, metric, scope and named view.
+Independent recomputation from the nine metric files reproduced the counts
+and verified 108 identical unique identities and 5,832 finite metric values.
+
+### Decision, retained evidence and cleanup
+
+Pilot decision-table row 2 matched for both B2 arms: their raw PSNR was
+within 0.3 dB of native and wall was lower. Both therefore received two more
+unchanged repeats alongside native. Neither passed final quality, so the
+tested schedules are **closed**, not selected or experimental wins. No new
+cadence, reconciliation stage, solver or candidate was introduced.
+Step 6 is not applicable: there is no finalist that passed both rules.
+This does not clear the known longer recovery failure or establish durability.
+
+`<NET>` is the private durable directory recorded outside git. Evidence is
+the ordinary logs, outputs and commits, not a new custody/approval regime:
+
+- Source: `runs\native-src\step-000010000.ckpt`; named membership:
+  `logs\step2-split.log`.
+- Native: `runs\native-{1,2,3}` and each `-eval` output.
+- Causal control: `runs\frozen-1` and `frozen-1-eval`.
+- B2 frozen: `runs\b2-ctl-{1,2,3}`; evaluations use each `-eval`, except
+  repeat 3's confirmed evaluation is `b2-ctl-3-eval-confirm`.
+- B2 refresh: `runs\b2-ref-1`, `b2-ref-2-retry`, `b2-ref-3` and their
+  `-eval` outputs. Logs are `logs\step3-*.log` / `step4-*.log`.
+- The original `runs\b2-ref-2` failed step-18,000 staging PLY writes;
+  both workers exited 1 and the group exited 2 after 1,284.611717 s.
+  Share free space fell from 30.383 GiB at launch to 0.517 GiB afterward;
+  the space loss is unattributed. Last committed generation 17,000 and all
+  failure logs/results remain. It was not timed as a successful repeat.
+  After capacity restoration, the replacement ran fresh from step 10,000.
+- Frozen repeat 3's timed group completed before the controller was
+  interrupted. Its untimed evaluation was repeated to observe exit 0;
+  the timed training result and configuration were unchanged.
+
+Validation included `build_develop.bat -DSS_BACKEND=vulkan`, **17/17
+headless tests**, and real AMD named-view smokes in CPU/disk image-cache
+modes (8 faces / 48 finite values each). The Windows nested-helper test
+now cancels after `READY`; the checkpoint stop launcher and indexed,
+named evaluator are committed and exercised by this campaign.
+No NVIDIA/CUDA validation was performed.
+
+Phase A cleanup is complete: source preservation and corpus relocation were
+verified, retired artifacts and the unused staging benchmark were removed,
+and the last five delete-pending old executables (135,333,888 logical bytes)
+vanished after scoped server handle release. No further unused source
+scaffold was established. `EngineDiagnostic*`, `ObservationSchurDispatch.h`
+and `g1_native_proof.cpp` retain live build/runtime or manual-test consumers
+and remain. The native default, protected originals and corpus are unchanged.
+
+## Historical record — not current execution authority
+
+Everything below is historical. Its admission, custody, budget and approval
+wording does not govern the completed campaign or override the live plan.
 
 Status: **B2 was performance-selected for both cold and valid reused-preparation
 fixed-topology/appearance kitchen work on two AMD R9700 Vulkan devices.

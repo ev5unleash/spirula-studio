@@ -286,6 +286,13 @@ one-paragraph summary at the top of
 [the comparison note](multi-gpu-training-comparison-20260929.md). Delete
 scaffolding and diagnostics that nothing uses. Commit.
 
+Completed: the comparison note records **closed**, both three-repeat timing
+ranges, all six aggregate thresholds and named-view failure counts, with the
+complete 1,320-check CSV retained alongside outputs. The cleanup review found
+no additional unused source scaffold: the named diagnostics retain real
+build/runtime or manual-test consumers. Final headless CTest passed 17/17
+in 13.47 s; no Spirula processes remain running.
+
 ### 6. Recovery check — finalist only, untimed
 
 Only if step 4 produced a candidate that passed both rules. The A5 recovery
