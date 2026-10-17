@@ -13,6 +13,13 @@
 #include <core/Tensor.h>
 #include <core/Env.h>
 
+#if defined(SS_BACKEND_VULKAN)
+#include "backend/vulkan/kernels/PpispBackward.h"
+#include "backend/vulkan/kernels/ImageStrip.h"
+#include "kernels/optim/Optimizer.cuh"
+#include "kernels/bilagrid/BilagridBindings.h"
+#endif
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -131,11 +138,297 @@ static void nullable_rgb_parity(const TypeInfo* types) {
         for (auto* p : allocations) backend::device_free(p);
     }
 }
+
+static double strip_difference(const std::vector<float>& reference,
+                               const std::vector<float>& actual,
+                               const char* label) {
+    double max_abs = 0, error2 = 0, reference2 = 0;
+    for (size_t i = 0; i < reference.size(); ++i) {
+        if (!std::isfinite(reference[i]) || !std::isfinite(actual[i]))
+            throw std::runtime_error(std::string(label) + ": non-finite value");
+        const double error = double(actual[i]) - reference[i];
+        max_abs = std::max(max_abs, std::abs(error));
+        error2 += error * error;
+        reference2 += double(reference[i]) * reference[i];
+    }
+    if (reference2 == 0 && error2 != 0)
+        throw std::runtime_error(std::string(label) + ": expected exact zero array");
+    const double relative_l2 = std::sqrt(error2 / std::max(reference2, 1e-30));
+    std::printf("  %s maxabs=%.9g relRMS=%.9g\n", label, max_abs,relative_l2);
+    if (max_abs > 1e-6 || relative_l2 > 1e-3)
+        throw std::runtime_error(std::string(label) + ": gradient mismatch");
+    return max_abs;
+}
+
+static void strip_ppisp_parity(const TypeInfo* types) {
+    using namespace backend::vk;
+    const char* reduction = spirula::env("PPISP_REDUCTION");
+    if (reduction && std::strcmp(reduction, "native") != 0)
+        throw std::runtime_error("ppisp strip fixture needs SS_PPISP_REDUCTION=native");
+    Rng r(261017u);
+    constexpr int B = 3, H = 67, W = 29, cut = 32;
+    for (int t = 0; t < 6; ++t) for (bool indexed : {false, true}) {
+        const int N = indexed ? 5 : B, P = types[t].n_params;
+        auto image = r.vec(B * H * W * 3, -0.05f, 1.2f);
+        auto params = r.vec(N * P, -0.08f, 0.08f);
+        auto cot = r.vec(image.size(), -0.05f/(B*H*W), 0.05f/(B*H*W));
+        for (size_t i = 0; i < cot.size(); ++i)
+            if ((i / 3) % 5 == 0 || i % 7 == 0) cot[i] = 0;
+        std::vector<float> intr = {80,80,14,33,80,80,13,32,80,80,15,31};
+        std::vector<int> indices = {4,1,4};
+        std::vector<void*> allocations;
+        auto keep = [&](auto* p) { allocations.push_back(p); return p; };
+        try {
+            set_image_strip({});
+            auto* im = keep(upload(image)); auto* pa = keep(upload(params));
+            auto* in = keep(upload(intr)); auto* ca = indexed ? keep(upload(indices)) : nullptr;
+            auto* co = keep(upload(cot));
+            auto* rgb = keep(alloc_zero<float>(image.size()));
+            auto* grad = keep(alloc_zero<float>(params.size()));
+            const auto cameras = indexed ? ttv(ca,{B}) : ttv_null();
+            const size_t count = ppisp_backward_staged_scratch_floats(B,H,W,types[t].name);
+            auto* scratch = keep(alloc_zero<float>(count));
+            auto backward = [&](bool staged) {
+                backend::memset_sync(grad,0,params.size()*sizeof(float));
+                if (staged)
+                    ppisp_backward_staged(dt3(im,B,H,W),ttv(pa,{N,P}),ttv(in,{B,4}),
+                        W,H,dt3(co,B,H,W),types[t].name,cameras,dt3(rgb,B,H,W),
+                        ttv(grad,{N,P}),scratch,count);
+                else
+                    ppisp_backward(dt3(im,B,H,W),ttv(pa,{N,P}),ttv(in,{B,4}),
+                        W,H,dt3(co,B,H,W),types[t].name,cameras,dt3(rgb,B,H,W),
+                        ttv(grad,{N,P}));
+                std::vector<float> g;
+                readback_f(g,grad,params.size());
+                return g;
+            };
+            auto forward = [&] {
+                ppisp_forward(dt3(im,B,H,W),ttv(pa,{N,P}),ttv(in,{B,4}),W,H,
+                    types[t].name,cameras,dt3(rgb,B,H,W));
+            };
+            forward();
+            std::vector<float> full_forward;
+            readback_f(full_forward,rgb,image.size());
+            auto native = backward(false);
+            std::vector<float> native_rgb;
+            readback_f(native_rgb,rgb,image.size());
+            auto repeat = backward(false);
+            auto full = backward(true);
+            std::vector<float> full_rgb;
+            readback_f(full_rgb,rgb,image.size());
+            if (std::memcmp(native_rgb.data(),full_rgb.data(),image.size()*sizeof(float)))
+                throw std::runtime_error("staged PPISP RGB differs from native");
+            std::vector<float> combined(params.size(),0);
+            for (int role = 0; role < 3; ++role) {
+                const uint32_t begin = role == 0 ? 0 : cut;
+                const uint32_t end = role == 1 ? H : cut;
+                set_image_strip({H,begin,end,5,{}});
+                forward();
+                std::vector<float> strip_forward;
+                readback_f(strip_forward,rgb,image.size());
+                const auto rows = image_strip_rows(H);
+                for (int b = 0; b < B; ++b)
+                    for (uint32_t y = rows.work_begin; y < rows.work_end; ++y)
+                        for (int x = 0; x < W * 3; ++x) {
+                            const size_t i = (b * H + y) * W * 3 + x;
+                            if (strip_forward[i] != full_forward[i])
+                                throw std::runtime_error("strip PPISP forward differs");
+                        }
+                auto partial = backward(true);
+                if (role == 2 && std::any_of(partial.begin(),partial.end(),
+                                             [](float v) { return v != 0; }))
+                    throw std::runtime_error("empty PPISP strip gradient is not exact zero");
+                for (size_t i = 0; i < combined.size(); ++i) combined[i] += partial[i];
+                std::vector<float> strip_rgb;
+                readback_f(strip_rgb,rgb,image.size());
+                for (size_t i = 0; i < image.size(); ++i) {
+                    const uint32_t y = uint32_t(i / (W * 3)) % H;
+                    const float expected = y >= begin && y < end ? native_rgb[i] : 0;
+                    if (strip_rgb[i] != expected)
+                        throw std::runtime_error("strip PPISP owned RGB differs");
+                }
+            }
+            set_image_strip({});
+            std::printf("PPISP strip layout=%s indexed=%d\n",types[t].name,int(indexed));
+            strip_difference(native,repeat,"native-repeat");
+            strip_difference(native,full,"native-staged");
+            strip_difference(full,combined,"staged-combined");
+            auto* update_full = keep(upload(params));
+            auto* update_strips = keep(upload(params));
+            auto* accum_full = keep(upload(std::vector<float>(params.size(),0.01f)));
+            auto* accum_strips = keep(upload(std::vector<float>(params.size(),0.01f)));
+            auto* gradient_full = keep(upload(native));
+            auto* gradient_strips = keep(upload(combined));
+            fused_adagrad_step(ttv(update_full,{N*P,1}),ttv(gradient_full,{N*P,1}),
+                               ttv(accum_full,{N*P,1}),0.001f);
+            fused_adagrad_step(ttv(update_strips,{N*P,1}),ttv(gradient_strips,{N*P,1}),
+                               ttv(accum_strips,{N*P,1}),0.001f);
+            std::vector<float> a,b;
+            readback_f(a,update_full,params.size());
+            readback_f(b,update_strips,params.size());
+            strip_difference(a,b,"native-combined-adagrad");
+            a.clear(); b.clear();
+            readback_f(a,accum_full,params.size());
+            readback_f(b,accum_strips,params.size());
+            strip_difference(a,b,"native-combined-adagrad-accum");
+            backend::memset_sync(co,0,image.size()*sizeof(float));
+            const auto zero_grad = backward(true);
+            if (std::any_of(zero_grad.begin(),zero_grad.end(),[](float v) { return v != 0; }))
+                throw std::runtime_error("zero PPISP cotangent produced nonzero gradient");
+            a.clear();
+            readback_f(a,rgb,image.size());
+            if (std::any_of(a.begin(),a.end(),[](float v) { return v != 0; }))
+                throw std::runtime_error("zero PPISP cotangent produced nonzero RGB");
+            if (const char* error = backend::last_error()) throw std::runtime_error(error);
+        } catch (...) {
+            set_image_strip({});
+            for (auto* p : allocations) backend::device_free(p);
+            throw;
+        }
+        for (auto* p : allocations) backend::device_free(p);
+    }
+}
+
+static void strip_bilagrid_parity() {
+    using namespace backend::vk;
+    Rng r(261018u);
+    constexpr int B = 3, N = 5, H = 67, W = 29, cut = 32;
+    constexpr int L = 8, Hg = 16, Wg = 16, P = 9;
+    constexpr size_t pixels = B * H * W * 3;
+    constexpr size_t cells = N * L * Hg * Wg * P;
+    constexpr size_t grad_cells = B * L * Hg * Wg * P;
+    for (bool quantized : {false,true}) for (int arm = 0; arm < 3; ++arm) {
+        std::vector<void*> allocations;
+        auto keep = [&](auto* p) { allocations.push_back(p); return p; };
+        try {
+            set_image_strip({});
+            auto* image = keep(upload(r.vec(pixels,0.01f,0.9f)));
+            auto* params = keep(upload(r.vec(N*P,-0.03f,0.03f)));
+            auto* intr = keep(upload(std::vector<float>{80,80,14,33,80,80,13,32,80,80,15,31}));
+            auto* cams = keep(upload(std::vector<int>{4,1,4}));
+            auto* grid = keep(upload(r.vec(cells,-0.03f,0.03f)));
+            auto* q16 = keep(alloc_zero<uint16_t>(cells));
+            auto* bounds = keep(alloc_zero<float2>((cells+255)/256));
+            bilagrid_encode_q16_launch(grid,q16,bounds,cells,backend::kDefaultStream);
+            const BilagridReader reader = quantized
+                ? BilagridReader::from_q16(q16,bounds) : BilagridReader(grid);
+            auto cot = r.vec(pixels,-0.05f/(B*H*W),0.05f/(B*H*W));
+            for (size_t i = 0; i < pixels; ++i)
+                if ((i/3)%5 == 0 || i%7 == 0) cot[i] = 0;
+            auto* vout = keep(upload(cot));
+            auto* pre = keep(alloc_zero<float>(pixels));
+            auto* post = keep(alloc_zero<float>(pixels));
+            auto* rgb = keep(alloc_zero<float>(pixels));
+            auto* pg = keep(alloc_zero<float>(N*P));
+            auto* bg = keep(alloc_zero<float>(grad_cells));
+            const size_t count = ppisp_backward_staged_scratch_floats(B,H,W,"no_crf_no_vig");
+            auto* scratch = keep(alloc_zero<float>(count));
+            auto forward = [&] {
+                ppisp_forward(dt3(image,B,H,W),ttv(params,{N,P}),ttv(intr,{B,4}),W,H,
+                    "no_crf_no_vig",ttv(cams,{B}),dt3(pre,B,H,W));
+                bilagrid_ppisp_uniform_sample_forward(reader,pre,post,B,L,Hg,Wg,H,W,
+                    backend::kDefaultStream,cams);
+            };
+            auto backward = [&](bool staged) {
+                backend::memset_sync(bg,0,grad_cells*sizeof(float));
+                backend::memset_sync(pg,0,N*P*sizeof(float));
+                if (arm == 2)
+                    bilagrid_ppisp_uniform_sample_backward_v2(reader,pre,vout,bg,rgb,
+                        B,L,Hg,Wg,H,W,backend::kDefaultStream,cams);
+                else
+                    bilagrid_ppisp_uniform_sample_backward_v1(reader,pre,vout,bg,rgb,
+                        B,L,Hg,Wg,H,W,arm == 0 ? 5 : 1,backend::kDefaultStream,cams);
+                if (staged)
+                    ppisp_backward_staged(dt3(image,B,H,W),ttv(params,{N,P}),ttv(intr,{B,4}),
+                        W,H,dt3(rgb,B,H,W),"no_crf_no_vig",ttv(cams,{B}),
+                        dt3(rgb,B,H,W),ttv(pg,{N,P}),scratch,count);
+                else
+                    ppisp_backward(dt3(image,B,H,W),ttv(params,{N,P}),ttv(intr,{B,4}),
+                        W,H,dt3(rgb,B,H,W),"no_crf_no_vig",ttv(cams,{B}),
+                        dt3(rgb,B,H,W),ttv(pg,{N,P}));
+                std::vector<float> gradients;
+                readback_f(gradients,pg,N*P);
+                readback_f(gradients,bg,grad_cells);
+                return gradients;
+            };
+            forward();
+            std::vector<float> native_forward;
+            readback_f(native_forward,post,pixels);
+            auto native = backward(false);
+            std::vector<float> native_rgb;
+            readback_f(native_rgb,rgb,pixels);
+            auto repeat = backward(false);
+            auto full = backward(true);
+            std::vector<float> combined(full.size(),0);
+            for (int role = 0; role < 3; ++role) {
+                const uint32_t begin = role == 0 ? 0 : cut;
+                const uint32_t end = role == 1 ? H : cut;
+                set_image_strip({H,begin,end,5,{}});
+                forward();
+                std::vector<float> strip_forward;
+                readback_f(strip_forward,post,pixels);
+                const auto rows = image_strip_rows(H);
+                for (size_t i = 0; i < pixels; ++i) {
+                    const uint32_t y = uint32_t(i/(W*3))%H;
+                    if (y >= rows.work_begin && y < rows.work_end &&
+                        strip_forward[i] != native_forward[i])
+                        throw std::runtime_error("early PPISP/bilagrid strip forward differs");
+                }
+                auto partial = backward(true);
+                if (role == 2 && std::any_of(partial.begin(),partial.end(),
+                                             [](float v) { return v != 0; }))
+                    throw std::runtime_error("empty bilagrid strip gradient is not exact zero");
+                for (size_t i = 0; i < full.size(); ++i) combined[i] += partial[i];
+                std::vector<float> strip_rgb;
+                readback_f(strip_rgb,rgb,pixels);
+                for (size_t i = 0; i < pixels; ++i) {
+                    const uint32_t y = uint32_t(i/(W*3))%H;
+                    const float expected = y >= begin && y < end ? native_rgb[i] : 0;
+                    if (strip_rgb[i] != expected)
+                        throw std::runtime_error("early PPISP/bilagrid owned RGB differs");
+                }
+            }
+            set_image_strip({});
+            std::printf("early PPISP/bilagrid strip quantized=%d arm=%d\n",int(quantized),arm);
+            auto compare = [&](const auto& a, const auto& b, const char* label) {
+                std::printf("  %s\n",label);
+                strip_difference(std::vector<float>(a.begin(),a.begin()+N*P),
+                    std::vector<float>(b.begin(),b.begin()+N*P),"ppisp");
+                strip_difference(std::vector<float>(a.begin()+N*P,a.end()),
+                    std::vector<float>(b.begin()+N*P,b.end()),"bilagrid");
+            };
+            compare(native,repeat,"native-repeat");
+            compare(native,full,"native-staged");
+            compare(full,combined,"staged-combined");
+            if (const char* error = backend::last_error()) throw std::runtime_error(error);
+        } catch (...) {
+            set_image_strip({});
+            for (auto* p : allocations) backend::device_free(p);
+            throw;
+        }
+        for (auto* p : allocations) backend::device_free(p);
+    }
+}
 #endif
 int main(int argc, char** argv) {
+#if defined(SS_BACKEND_VULKAN)
+    if (argc == 2 && std::strcmp(argv[1], "strip") == 0) {
+        const TypeInfo types[] = {
+            {"original",36,0}, {"rqs",39,0}, {"no_crf",24,0},
+            {"no_crf_clamp",24,0}, {"no_crf_no_vig",9,0},
+            {"no_crf_no_vig_clamp",9,0}};
+        try { strip_ppisp_parity(types); strip_bilagrid_parity(); }
+        catch (const std::exception& e) {
+            std::fprintf(stderr,"ppisp strip: %s\n",e.what());
+            return 1;
+        }
+        std::printf("ppisp strip: PASSED\n");
+        return 0;
+    }
+#endif
     if (argc != 3 ||
         (std::strcmp(argv[1], "dump") && std::strcmp(argv[1], "compare"))) {
-        std::fprintf(stderr, "usage: %s dump|compare <ref.bin>\n", argv[0]);
+        std::fprintf(stderr, "usage: %s strip | dump|compare <ref.bin>\n", argv[0]);
         return 2;
     }
     const bool dumping = std::strcmp(argv[1], "dump") == 0;

@@ -45,6 +45,9 @@ void engine_diagnostic_begin_arm(const std::string& arm);
 void engine_diagnostic_end_arm();
 void engine_diagnostic_timing(double& seconds);
 void engine_diagnostic_input(const TrainStep&, int step);
+// Private provider runs before managed input fetch; returned inputs remain borrowed.
+void engine_diagnostic_replay_step(std::function<const TrainStep*()>);
+const TrainStep* engine_diagnostic_replay_step();
 void engine_diagnostic_step_state(int step, bool common = false,
                                  const EngineDiagnosticSnapshot* role = nullptr);
 

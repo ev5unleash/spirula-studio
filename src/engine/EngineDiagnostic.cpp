@@ -26,6 +26,7 @@ bool mask_probe_all_owned = false;
 bool mask_probe_capture_data = false;
 EngineDiagnosticPpisp ppisp_probe;
 const TrainStep* ppisp_input = nullptr;
+std::function<const TrainStep*()> replay_step;
 
 std::string host_digest(const std::string& text, int scope) {
     spirula::Sha256 sha;
@@ -80,6 +81,8 @@ void engine_diagnostic_ppisp_probe(EngineDiagnosticPpisp probe) {
 }
 const EngineDiagnosticPpisp& engine_diagnostic_ppisp_probe() { return ppisp_probe; }
 const TrainStep* engine_diagnostic_ppisp_input() { return ppisp_input; }
+void engine_diagnostic_replay_step(std::function<const TrainStep*()> input) { replay_step = std::move(input); }
+const TrainStep* engine_diagnostic_replay_step() { return replay_step ? replay_step() : nullptr; }
 
 std::string engine_diagnostic_host_state() {
     const auto& s = engine();

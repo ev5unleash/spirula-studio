@@ -39,6 +39,8 @@ src/data/*.cpp
 src/data/parsers/*.cpp
 src/app/webviewer/*.cpp
 src/app/TrainerCore.cpp
+src/app/ImageStripExecutor.cpp
+src/app/AppPaths.cpp
 src/app/EvalMetrics.cpp
 src/app/OutputLease.cpp
 src/app/Subprocess.cpp
@@ -60,6 +62,8 @@ src/data/*.cpp
 src/data/parsers/*.cpp
 src/app/webviewer/*.cpp
 src/app/TrainerCore.cpp
+src/app/ImageStripExecutor.cpp
+src/app/AppPaths.cpp
 src/app/EvalMetrics.cpp
 src/app/OutputLease.cpp
 src/app/Subprocess.cpp

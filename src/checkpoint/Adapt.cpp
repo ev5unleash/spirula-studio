@@ -1,17 +1,23 @@
 // Adapt.cpp -- see Adapt.h.
 
 #include "checkpoint/Adapt.h"
+#include "checkpoint/Resume.h"
 
 #include "core/CheckpointIO.h"
 #include "core/Tensor.h"
+#include "data/JsonWrite.h"
+#include "kernels/pixelwise/PixelWise.cuh"
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
+#include <locale>
 #include <map>
 #include <limits>
 #include <numeric>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -64,6 +70,21 @@ Buffer from_bytes(const std::vector<uint8_t>& v) {
     return make_buffer("|u1", v.data(), v.size());
 }
 
+Buffer read_npy_buffer(std::istream& in, const NpyInfo& info) {
+    if (info.data_bytes > std::numeric_limits<size_t>::max() ||
+        info.data_bytes > (uint64_t)std::numeric_limits<std::streamsize>::max())
+        throw std::runtime_error("checkpoint array is too large for host I/O");
+    Buffer b;
+    b.descr = info.descr;
+    b.bytes.resize((size_t)info.data_bytes);
+    in.clear();
+    in.seekg((std::streamoff)info.data_offset, std::ios::beg);
+    if (!b.bytes.empty())
+        in.read(b.bytes.data(), (std::streamsize)b.bytes.size());
+    if (!in) throw std::runtime_error("cannot read checkpoint array");
+    return b;
+}
+
 std::map<std::string, Buffer> read_tar_npy(const fs::path& ckpt_dir) {
     std::ifstream in((ckpt_dir / "state.tar").string(), std::ios::binary);
     if (!in) throw std::runtime_error("cannot open " +
@@ -73,13 +94,8 @@ std::map<std::string, Buffer> read_tar_npy(const fs::path& ckpt_dir) {
         if (m.name.size() < 4 ||
             m.name.compare(m.name.size() - 4, 4, ".npy") != 0) continue;
         NpyInfo info = npy_locate(in, m.data_offset, m.size);
-        Buffer b;
-        b.descr = info.descr;
-        b.bytes.resize((size_t)info.data_bytes);
-        in.clear();
-        in.seekg((std::streamoff)info.data_offset, std::ios::beg);
-        in.read(b.bytes.data(), (std::streamsize)info.data_bytes);
-        out.emplace(m.name.substr(0, m.name.size() - 4), std::move(b));
+        out.emplace(m.name.substr(0, m.name.size() - 4),
+                    read_npy_buffer(in, info));
     }
     return out;
 }
@@ -500,12 +516,889 @@ const std::optional<std::array<int, 3>>& target_grid(const TargetLayout& t,
         "this run.");
 }
 
+void update_require(bool condition, const std::string& message) {
+    if (!condition)
+        throw std::runtime_error("native checkpoint update comparison: " + message);
+}
+
+void validate_update_json(const JsonValue& value) {
+    if (value.type == JsonValue::Type::Number)
+        update_require(std::isfinite(value.num), "nonfinite metadata number");
+    if (value.is_object()) {
+        std::set<std::string> keys;
+        for (const auto& entry : value.obj) {
+            update_require(keys.insert(entry.first).second,
+                           "duplicate metadata key " + entry.first);
+            validate_update_json(entry.second);
+        }
+    }
+    for (const auto& item : value.arr) validate_update_json(item);
+}
+
+bool same_update_json(const JsonValue& a, const JsonValue& b) {
+    if (a.type != b.type) return false;
+    if (a.type == JsonValue::Type::Number) return a.num == b.num;
+    if (a.type == JsonValue::Type::String) return a.str == b.str;
+    if (a.type == JsonValue::Type::Bool) return a.b == b.b;
+    if (a.arr.size() != b.arr.size() || a.obj.size() != b.obj.size()) return false;
+    for (size_t i = 0; i < a.arr.size(); ++i)
+        if (!same_update_json(a.arr[i], b.arr[i])) return false;
+    for (const auto& entry : a.obj) {
+        const JsonValue* other = b.find(entry.first);
+        if (!other || !same_update_json(entry.second, *other)) return false;
+    }
+    return true;
+}
+
+const JsonValue& update_object(const JsonValue& state, const char* key) {
+    const JsonValue* object = state.find(key);
+    update_require(object && object->is_object(),
+                   "missing/invalid metadata object " + std::string(key));
+    return *object;
+}
+
+struct NativeUpdateArchive {
+    fs::path directory;
+    JsonValue state;
+    std::ifstream in;
+    std::map<std::string, NpyInfo> arrays;
+    int step = 0, horizon = 0, capacity = 0, current = 0, num_sh = 0;
+    int sh_optim_bits = 0, sh_value_bits = 0, non_sh_optim_bits = 0;
+    bool row_clocks = false;
+
+    explicit NativeUpdateArchive(const fs::path& path) {
+        const auto resolved = resolve_checkpoint(path);
+        directory = resolved.ckpt_dir;
+        check_resumable(directory);
+        state = read_state_json(directory);
+        validate_update_json(state);
+        const auto config = json_parse_file((resolved.run_dir / "config.json").string());
+        update_require(config.is_object(), "config.json must be an object");
+        const JsonValue* iterations = config.find("num_iterations");
+        update_require(iterations && iterations->type == JsonValue::Type::Number,
+                       "config.json must explicitly record num_iterations");
+        update_require(std::count_if(config.obj.begin(), config.obj.end(),
+                       [](const auto& entry) { return entry.first == "num_iterations"; }) == 1,
+                       "duplicate num_iterations in config.json");
+        horizon = checked_state_int(config, "num_iterations", 1, INT32_MAX);
+        update_require(checked_state_int(state, "format_version", 2, 2) == 2 &&
+                       checked_state_int(state, "full_resume", 1, 1) == 1 &&
+                       state.find("primitive") &&
+                       state.find("primitive")->as_string() == "3dgs" &&
+                       checked_state_int(state, "packed", 1, 1) == 1 &&
+                       checked_state_int(state, "use_fused_proj_bwd_optim", 1, 1) == 1,
+                       "requires full native format-2 packed 3dgs FPBO state");
+        update_require(!state.find("b1"), "B1-owned checkpoints are not native state");
+        update_require(state.find("quant_codec") &&
+                       state.find("quant_codec")->as_string() == "joint_u_log_sqrt_g2_v1" &&
+                       checked_state_int(state, "quant_block_size", 256, 256) == 256 &&
+                       state.get_double("quant_eps", 0) == 1e-15,
+                       "unsupported native quantization codec metadata");
+        step = checked_state_int(state, "step", 0, horizon);
+        capacity = checked_state_int(state, "max_num_splats", 1, INT32_MAX);
+        current = checked_state_int(state, "cur_num_splats", 0, capacity);
+        num_sh = checked_state_int(state, "num_sh", 0, 15);
+        update_require(num_sh == 0 || num_sh == 3 || num_sh == 8 || num_sh == 15,
+                       "unsupported 3dgs SH allocation");
+        checked_state_int(state, "sh_degree", 0, INT32_MAX);
+        sh_optim_bits = checked_state_int(state, "sh_optim_bits", 4, 32);
+        sh_value_bits = checked_state_int(state, "sh_value_bits", 8, 32);
+        non_sh_optim_bits = checked_state_int(state, "non_sh_optim_bits", 16, 32);
+        update_require((sh_optim_bits == 4 || sh_optim_bits == 8 || sh_optim_bits == 32) &&
+                       (sh_value_bits == 8 || sh_value_bits == 16 || sh_value_bits == 32) &&
+                       (non_sh_optim_bits == 16 || non_sh_optim_bits == 32),
+                       "unsupported FPBO storage widths");
+        row_clocks = checked_state_int(state, "use_per_splat_bias_correction", 0, 1) == 1;
+        const auto& camera = update_object(state, "camera");
+        checked_state_int(camera, "num", 1, INT32_MAX);
+        checked_state_int(camera, "width", 1, INT32_MAX);
+        checked_state_int(camera, "height", 1, INT32_MAX);
+        update_require(camera.find("model") &&
+                       camera.find("model")->type == JsonValue::Type::String,
+                       "invalid camera model metadata");
+        for (const char* which : {"rgb", "depth", "normal"}) {
+            const std::string key = std::string("bilagrid_") + which;
+            checked_state_int(update_object(state, key.c_str()), "enabled", 0, 1);
+            bilagrid_state(state, which);
+        }
+        const auto& ppisp = update_object(state, "ppisp");
+        if (checked_state_int(ppisp, "enabled", 0, 1)) {
+            const auto* type = ppisp.find("param_type");
+            update_require(type && type->type == JsonValue::Type::String,
+                           "invalid PPISP param_type");
+            update_require(checked_state_int(ppisp, "num_params", 1, INT32_MAX) ==
+                           ppisp_param_spec(type->str).num_params,
+                           "PPISP parameter width disagrees with native layout");
+            checked_state_int(ppisp, "use_adagrad", 0, 1);
+        }
+        const auto& background = update_object(state, "background_sh");
+        if (checked_state_int(background, "enabled", 0, 1))
+            checked_state_int(background, "degree", 0, 4);
+
+        in.open(directory / "state.tar", std::ios::binary);
+        update_require(bool(in), "cannot open state.tar");
+        for (const auto& member : tar_index(in)) {
+            if (member.name == "state.json") continue;
+            update_require(ends_with(member.name, ".npy"),
+                           "unhandled archive member " + member.name);
+            const std::string name = member.name.substr(0, member.name.size() - 4);
+            update_require(arrays.emplace(name, npy_locate(in, member.data_offset,
+                                                           member.size)).second,
+                           "duplicate array " + name);
+        }
+    }
+};
+
+template<class T> T update_load(const Buffer& buffer, int64_t index) {
+    T value;
+    std::memcpy(&value, buffer.bytes.data() + (size_t)index * sizeof(T), sizeof(T));
+    return value;
+}
+
+// 0 finite, 1 NaN, 2 +Inf, 3 -Inf; metadata and codec bounds never use this exemption.
+int update_value_class(float value) {
+    uint32_t bits;
+    std::memcpy(&bits, &value, sizeof(bits));
+    if ((bits & 0x7f800000u) != 0x7f800000u) return 0;
+    if (bits & 0x007fffffu) return 1;
+    return bits >> 31 ? 3 : 2;
+}
+
+enum class UpdateCodec { Float, Linear, Adam, Log };
+
+struct NativeUpdateField {
+    std::string name, slot, role;
+    int64_t rows = 0, channels = 0, storage_cells = 0, bounds_stride = 0;
+    UpdateCodec codec = UpdateCodec::Float;
+    int bits = 32, allocated_bytes_per_cell = 4;
+    bool gaussian = false, sh_fpbo = false;
+
+    int64_t cells() const { return rows * channels; }
+    bool adam() const { return codec == UpdateCodec::Adam; }
+};
+
+struct NativeUpdateRows {
+    std::array<std::vector<uint8_t>, 4> status;
+    std::vector<uint8_t> cohort;
+    uint64_t cohort_rows = 0;
+};
+
+const char* const kUpdateStates[] = {"source", "nativeA", "strip", "nativeB"};
+
+struct UpdateSampleMetric {
+    uint64_t finite = 0, nan = 0, positive_inf = 0, negative_inf = 0;
+    uint64_t original_inactive_world_nan = 0, outside_prefix_nonfinite = 0;
+    uint64_t endpoint_inactive_mean_nan = 0;
+    uint64_t unexpected_nonfinite = 0;
+
+    void add(float value, bool original_nan, bool endpoint_inactive_mean, bool outside_prefix) {
+        const int kind = update_value_class(value);
+        if (!kind) { ++finite; return; }
+        nan += kind == 1;
+        positive_inf += kind == 2;
+        negative_inf += kind == 3;
+        if (kind == 1 && original_nan) ++original_inactive_world_nan;
+        else if (outside_prefix) ++outside_prefix_nonfinite;
+        else if (kind == 1 && endpoint_inactive_mean) ++endpoint_inactive_mean_nan;
+        else ++unexpected_nonfinite;
+    }
+
+    void emit(std::ostream& out) const {
+        out << "{\"finite\":" << finite << ",\"nan\":" << nan
+            << ",\"positive_inf\":" << positive_inf << ",\"negative_inf\":" << negative_inf
+            << ",\"original_inactive_world_nan\":" << original_inactive_world_nan
+            << ",\"endpoint_inactive_mean_nan\":" << endpoint_inactive_mean_nan
+            << ",\"outside_prefix_nonfinite\":" << outside_prefix_nonfinite
+            << ",\"unexpected_nonfinite\":" << unexpected_nonfinite << '}';
+    }
+};
+
+const char* update_norm_class(uint64_t count, double reference_sq, double error_sq) {
+    if (!count) return "no_finite_cells";
+    if (reference_sq != 0) return "nonzero_reference";
+    return error_sq == 0 ? "zero_reference_zero_error" : "zero_reference_nonzero_error";
+}
+
+void emit_update_ratio(std::ostream& out, uint64_t count,
+                       double numerator, double denominator) {
+    if (!count || denominator == 0) out << "null";
+    else out << std::sqrt(numerator / denominator);
+}
+
+struct UpdateDeltaMetric {
+    uint64_t finite = 0, nonfinite = 0, zero = 0;
+    uint64_t nan_pattern_changes = 0, nonfinite_class_changes = 0;
+    double sumsq = 0, maxabs = 0;
+
+    void add(float source, float endpoint) {
+        const int a = update_value_class(source), b = update_value_class(endpoint);
+        nan_pattern_changes += (a == 1) != (b == 1);
+        nonfinite_class_changes += a != b;
+        if (a || b) {
+            ++nonfinite;
+            return;
+        }
+        const double delta = double(endpoint) - double(source);
+        ++finite;
+        zero += delta == 0;
+        sumsq += delta * delta;
+        maxabs = std::max(maxabs, std::abs(delta));
+    }
+
+    void emit(std::ostream& out) const {
+        out << "{\"finite_cells\":" << finite << ",\"nonfinite_cells\":" << nonfinite
+            << ",\"zero_update_cells\":" << zero << ",\"changed_cells\":" << finite - zero
+            << ",\"nan_pattern_changed_cells\":" << nan_pattern_changes
+            << ",\"nonfinite_class_changed_cells\":" << nonfinite_class_changes
+            << ",\"l2\":" << std::sqrt(sumsq) << ",\"maxabs\":" << maxabs
+            << ",\"class\":" << json_quote(!finite ? "no_finite_cells" :
+                                         sumsq == 0 ? "zero_update" : "nonzero_update") << '}';
+    }
+};
+
+struct UpdatePairMetric {
+    uint64_t finite = 0, nonfinite = 0, matching_nonfinite_class = 0;
+    uint64_t update_finite = 0, update_nonfinite = 0;
+    double maxabs = 0, error_sq = 0, reference_sq = 0;
+    double update_error_sq = 0, update_reference_sq = 0;
+    int64_t worst_index = -1, first_nonfinite_index = -1;
+
+    void add(float source, float reference, float candidate, int64_t index) {
+        const int a = update_value_class(reference), b = update_value_class(candidate);
+        if (a || b) {
+            ++nonfinite;
+            matching_nonfinite_class += a != 0 && a == b;
+            if (first_nonfinite_index < 0) first_nonfinite_index = index;
+        } else {
+            ++finite;
+            const double error = double(candidate) - double(reference);
+            if (worst_index < 0 || std::abs(error) > maxabs) {
+                maxabs = std::abs(error);
+                worst_index = index;
+            }
+            error_sq += error * error;
+            reference_sq += double(reference) * double(reference);
+        }
+        if (a || b || update_value_class(source)) {
+            ++update_nonfinite;
+        } else {
+            ++update_finite;
+            const double update = double(reference) - double(source);
+            const double error = double(candidate) - double(reference);
+            update_error_sq += error * error;
+            update_reference_sq += update * update;
+        }
+    }
+
+    void emit(std::ostream& out) const {
+        out << "{\"finite_endpoint_pairs\":" << finite << ",\"nonfinite_endpoint_pairs\":" << nonfinite
+            << ",\"matching_nonfinite_class_pairs\":" << matching_nonfinite_class
+            << ",\"endpoint_value_class\":"
+            << json_quote(nonfinite ? "nonfinite_present" : finite ? "finite" : "empty")
+            << ",\"maxabs\":" << maxabs << ",\"endpoint_rel_rms\":";
+        emit_update_ratio(out, finite, error_sq, reference_sq);
+        out << ",\"endpoint_normalization_class\":"
+            << json_quote(update_norm_class(finite, reference_sq, error_sq))
+            << ",\"endpoint_error_l2\":" << std::sqrt(error_sq)
+            << ",\"finite_update_triples\":" << update_finite
+            << ",\"nonfinite_update_triples\":" << update_nonfinite
+            << ",\"update_value_class\":"
+            << json_quote(update_nonfinite ? "nonfinite_present" : update_finite ? "finite" : "empty")
+            << ",\"native_update_l2\":" << std::sqrt(update_reference_sq)
+            << ",\"update_error_l2\":" << std::sqrt(update_error_sq)
+            << ",\"update_normalized_error\":";
+        emit_update_ratio(out, update_finite, update_error_sq, update_reference_sq);
+        out << ",\"update_normalization_class\":"
+            << json_quote(update_norm_class(update_finite, update_reference_sq, update_error_sq))
+            << ",\"worst_flat_index\":" << worst_index
+            << ",\"first_nonfinite_flat_index\":" << first_nonfinite_index << '}';
+    }
+};
+
+struct NativeUpdateMetric {
+    uint64_t cells = 0;
+    std::array<UpdateSampleMetric, 4> samples;
+    std::array<UpdateDeltaMetric, 3> updates;
+    std::array<UpdatePairMetric, 2> pairs;
+
+    void add(const std::array<float, 4>& values, int64_t index,
+             const std::array<uint8_t, 4>& status, bool world, bool means) {
+        ++cells;
+        const bool original_world_nan = world && (status[0] & 7) == 7 &&
+                                        update_value_class(values[0]) == 1;
+        for (size_t i = 0; i < 4; ++i) {
+            const bool original_nan = original_world_nan &&
+                (status[i] & 7) == (status[0] & 7);
+            const bool endpoint_inactive_mean = i != 0 && means && (status[i] & 7) == 7;
+            samples[i].add(values[i], original_nan, endpoint_inactive_mean, (status[i] & 16) != 0);
+            if (i) updates[i - 1].add(values[0], values[i]);
+        }
+        pairs[0].add(values[0], values[1], values[2], index);
+        pairs[1].add(values[0], values[1], values[3], index);
+    }
+
+    void emit(std::ostream& out, const NativeUpdateField& field,
+              const std::string& name, const char* scope) const {
+        out << "{\"type\":\"field\",\"field\":" << json_quote(name)
+            << ",\"role\":" << json_quote(field.role) << ",\"scope\":" << json_quote(scope)
+            << ",\"logical_rows\":" << field.rows << ",\"components_per_row\":" << field.channels
+            << ",\"cells\":" << cells << ",\"samples\":{";
+        for (size_t i = 0; i < 4; ++i) {
+            out << (i ? "," : "") << json_quote(kUpdateStates[i]) << ':';
+            samples[i].emit(out);
+        }
+        out << "},\"source_updates\":{";
+        for (size_t i = 0; i < 3; ++i) {
+            out << (i ? "," : "") << json_quote(kUpdateStates[i + 1]) << ':';
+            updates[i].emit(out);
+        }
+        out << "},\"nativeA_vs_strip\":";
+        pairs[0].emit(out);
+        out << ",\"nativeA_vs_nativeB\":";
+        pairs[1].emit(out);
+        out << "}\n";
+    }
+};
+
+std::vector<NativeUpdateField> native_update_fields(const NativeUpdateArchive& archive) {
+    std::vector<NativeUpdateField> fields;
+    auto plain = [&](const std::string& name, const std::string& slot,
+                     const char* role, int64_t rows, int64_t channels, bool gaussian = false) {
+        NativeUpdateField field;
+        field.name = name; field.slot = slot; field.role = role;
+        field.rows = rows; field.channels = channels;
+        field.storage_cells = field.cells(); field.gaussian = gaussian;
+        fields.push_back(std::move(field));
+    };
+    auto quantized = [&](const std::string& name, const std::string& slot,
+                         const char* role, int64_t rows, int64_t channels,
+                         UpdateCodec codec, int bits, int allocated_bytes,
+                         bool gaussian = false, bool sh = false) {
+        NativeUpdateField field;
+        field.name = name; field.slot = slot; field.role = role;
+        field.rows = rows; field.channels = channels;
+        field.codec = codec; field.bits = bits;
+        field.allocated_bytes_per_cell = allocated_bytes;
+        field.gaussian = gaussian; field.sh_fpbo = sh;
+        field.storage_cells = sh ? sh_fpbo_cells(rows, (uint32_t)archive.num_sh) : field.cells();
+        field.bounds_stride = sh ? sh_quant_addr((uint32_t)archive.num_sh, 0).bounds_stride
+            : gaussian ? kBlock * channels : kBlock;
+        fields.push_back(std::move(field));
+    };
+    const int64_t n = archive.capacity;
+    for (const char* attribute : {"means", "quats", "scales", "opacities", "features_dc"}) {
+        const int channels = kAttrCh.at(attribute);
+        plain(std::string("world.") + attribute, std::string("world.") + attribute,
+              "gaussian_parameter", n, channels, true);
+        const std::string name = std::string("optim.") + attribute;
+        if (archive.non_sh_optim_bits == 32) {
+            for (const char* moment : {"g1", "g2"})
+                plain(name + "." + moment, std::string("eng.") + moment + "_" + attribute,
+                      "gaussian_adam", n, channels, true);
+        } else {
+            const std::string slot = std::string("eng.") + attribute + "_qfpbo";
+            const auto classification = classify(slot, archive.sh_optim_bits);
+            update_require(classification && classification->adam && classification->fpbo,
+                           "unsupported Gaussian optimizer slot " + slot);
+            quantized(name, slot, "gaussian_adam", n, classification->cpp,
+                      UpdateCodec::Adam, classification->bits,
+                      QuantizedAdamState<16>::kBytesPerCell, true);
+        }
+    }
+    if (archive.num_sh) {
+        const int64_t channels = 3 * archive.num_sh;
+        if (archive.sh_value_bits == 32) {
+            plain("world.features_sh", "world.features_sh", "gaussian_parameter", n, channels, true);
+        } else {
+            const std::string slot = "eng.world.sh_vq" + std::to_string(archive.sh_value_bits) + "_fpbo";
+            const auto classification = classify(slot, archive.sh_optim_bits);
+            update_require(classification && classification->is_sh && classification->fpbo,
+                           "unsupported SH parameter slot " + slot);
+            quantized("world.features_sh", slot, "gaussian_parameter", n, channels,
+                      UpdateCodec::Linear, classification->bits, classification->bits / 8, true, true);
+        }
+        if (archive.sh_optim_bits == 32) {
+            for (const char* moment : {"g1", "g2"})
+                plain(std::string("optim.features_sh.") + moment,
+                      std::string("eng.") + moment + "_features_sh",
+                      "gaussian_adam", n, channels, true);
+        } else {
+            const auto classification = classify("eng.sh_quant_fpbo", archive.sh_optim_bits);
+            quantized("optim.features_sh", "eng.sh_quant_fpbo", "gaussian_adam", n, channels,
+                      UpdateCodec::Adam, classification->bits,
+                      QuantizedAdamState<8>::kBytesPerCell, true, true);
+        }
+    }
+    plain("eng.radii", "eng.radii", "resumed_densification_statistic", n, 1, true);
+    plain("eng.accum_buffer", "eng.accum_buffer", "resumed_densification_statistic", n, 2, true);
+    const auto& ppisp = update_object(archive.state, "ppisp");
+    if (ppisp.get_double("enabled", 0) == 1) {
+        const int channels = checked_state_int(ppisp, "num_params", 1, INT32_MAX);
+        const auto& info = archive.arrays.at("eng.ppisp.params");
+        const int64_t rows = (int64_t)(info.data_bytes / sizeof(float) / channels);
+        update_require(rows > 0, "empty PPISP table");
+        plain("eng.ppisp.params", "eng.ppisp.params", "appearance_parameter", rows, channels);
+        if (ppisp.get_double("use_adagrad", 0) == 1) {
+            plain("eng.ppisp.accum", "eng.ppisp.accum", "appearance_adagrad", rows, channels);
+        } else {
+            for (const char* moment : {"g1", "g2"}) {
+                const std::string slot = std::string("eng.ppisp.") + moment;
+                plain(slot, slot, "appearance_adam", rows, channels);
+            }
+        }
+    }
+    for (const char* which : {"rgb", "depth", "normal"}) {
+        const BilagridState grid = bilagrid_state(archive.state, which);
+        if (!grid.enabled) continue;
+        const std::string prefix = std::string("eng.bg.") + which;
+        const std::string value_slot = prefix + (grid.value_bits == 32 ? ".grids" : ".grids_q.q");
+        const auto& info = archive.arrays.at(value_slot);
+        const int64_t cells = (int64_t)(info.data_bytes / (grid.value_bits / 8));
+        const int64_t channels = checked_grid_cells(grid.lhw, grid.C);
+        update_require(cells > 0 && cells % channels == 0, "invalid grid table count " + prefix);
+        const int64_t rows = cells / channels;
+        if (grid.value_bits == 32)
+            plain(prefix + ".grids", value_slot, "appearance_parameter", rows, channels);
+        else
+            quantized(prefix + ".grids", prefix + ".grids_q", "appearance_parameter",
+                      rows, channels, UpdateCodec::Linear, 16, QuantizedTensor<16>::kBytesPerCell);
+        if (grid.use_adagrad) {
+            if (grid.optim_bits == 32)
+                plain(prefix + ".accum", prefix + ".accum", "appearance_adagrad", rows, channels);
+            else
+                quantized(prefix + ".accum", prefix + ".bg_ag", "appearance_adagrad",
+                          rows, channels, UpdateCodec::Log, grid.optim_bits, 1);
+        } else if (grid.optim_bits == 32) {
+            for (const char* moment : {"g1", "g2"}) {
+                const std::string slot = prefix + "." + moment;
+                plain(slot, slot, "appearance_adam", rows, channels);
+            }
+        } else {
+            quantized(prefix + ".adam", prefix + ".bg_quant", "appearance_adam",
+                      rows, channels, UpdateCodec::Adam, grid.optim_bits,
+                      QuantizedAdamState<8>::kBytesPerCell);
+        }
+        if (std::strcmp(which, "depth") == 0)
+            plain(prefix + ".scalars", prefix + ".scalars", "resumed_depth_quantile", rows, 1);
+    }
+    const auto& background = update_object(archive.state, "background_sh");
+    if (background.get_double("enabled", 0) == 1) {
+        const int side = checked_state_int(background, "degree", 0, 4) + 1;
+        plain("eng.bg_sky.sh_coeffs", "eng.bg_sky.sh_coeffs", "background_parameter", side * side, 3);
+        for (const char* moment : {"g1", "g2"}) {
+            const std::string slot = std::string("eng.bg_sky.") + moment;
+            plain(slot, slot, "background_adam", side * side, 3);
+        }
+    }
+    if (archive.arrays.count("eng.color_shift_reg.ema"))
+        plain("eng.color_shift_reg.ema", "eng.color_shift_reg.ema", "resumed_color_shift_ema", 1, 3);
+    for (const char* slot : {"color_space.splat_matrix", "color_space.image_matrix"}) {
+        const auto found = archive.arrays.find(slot);
+        if (found == archive.arrays.end()) continue;
+        const uint64_t bytes = found->second.data_bytes;
+        update_require(bytes == 9 * sizeof(float) || bytes == 27 * sizeof(float),
+                       "unsupported color matrix allocation " + std::string(slot));
+        plain(slot, slot, "fixed_color_transform", 3, 3);
+        // EngineColorSpace allocates float3[3,3]; kernels consume only the first nine floats.
+        fields.back().storage_cells = (int64_t)(bytes / sizeof(float));
+    }
+    return fields;
+}
+
+const NpyInfo& update_array(const NativeUpdateArchive& archive, const std::string& name,
+                           const char* descr, int64_t cells, int bytes_per_cell) {
+    update_require(cells >= 0 && bytes_per_cell > 0 &&
+                   (uint64_t)cells <= std::numeric_limits<size_t>::max() / bytes_per_cell &&
+                   (uint64_t)cells <= (uint64_t)std::numeric_limits<std::streamsize>::max() / bytes_per_cell,
+                   "array size exceeds host I/O " + name);
+    const auto found = archive.arrays.find(name);
+    update_require(found != archive.arrays.end() && found->second.descr == descr &&
+                   found->second.data_bytes == (uint64_t)cells * bytes_per_cell,
+                   "missing/incompatible array " + name + " in " + archive.directory.string());
+    return found->second;
+}
+
+template<UpdateCodec CODEC, int BITS>
+float2 decode_update_cell(const Buffer& values, const Buffer& bounds, int64_t cell, int64_t block) {
+    if constexpr (CODEC == UpdateCodec::Float) {
+        return {update_load<float>(values, cell), 0};
+    } else if constexpr (CODEC == UpdateCodec::Adam) {
+        return QuantizedAdamState<BITS>::decode_g1g2(values.u8(), cell, update_load<float4>(bounds, block));
+    } else if constexpr (CODEC == UpdateCodec::Log) {
+        return {QuantizedTensorLog<BITS>::decode_v(values.u8(), cell, update_load<float2>(bounds, block)), 0};
+    } else {
+        return {QuantizedTensor<BITS>::decode_v(values.u8(), cell, update_load<float2>(bounds, block)), 0};
+    }
+}
+
+template<UpdateCodec CODEC, int BITS>
+void measure_native_update_field(const NativeUpdateField& field,
+                                 const std::array<Buffer, 4>& values,
+                                 const std::array<Buffer, 4>& bounds,
+                                 const NativeUpdateRows& rows,
+                                 std::ostream& out, std::array<uint64_t, 4>& unexpected) {
+    std::array<NativeUpdateMetric, 2> all, cohort;
+    const bool world = field.role == "gaussian_parameter";
+    const bool means = field.name == "world.means";
+    const auto address = field.sh_fpbo ? sh_quant_addr((uint32_t)(field.channels / 3), 0) : ShQuantAddr{};
+    constexpr int moments = CODEC == UpdateCodec::Adam ? 2 : 1;
+    for (int64_t row = 0; row < field.rows; ++row) {
+        std::array<uint8_t, 4> status{};
+        if (field.gaussian)
+            for (size_t i = 0; i < 4; ++i) status[i] = rows.status[i][(size_t)row];
+        const bool unchanged = field.gaussian && rows.cohort[(size_t)row];
+        const int64_t base = field.sh_fpbo ? address.base(row) : row * field.channels;
+        const int64_t row_block = field.gaussian ? row / kBlock : 0;
+        for (int64_t component = 0; component < field.channels; ++component) {
+            const int64_t cell = field.sh_fpbo ? address.cell(base, (int)component) : base + component;
+            const int64_t block = CODEC == UpdateCodec::Float ? 0 :
+                field.gaussian ? row_block : cell / kBlock;
+            std::array<float, 4> first, second;
+            for (size_t i = 0; i < 4; ++i) {
+                const float2 value = decode_update_cell<CODEC, BITS>(values[i], bounds[i], cell, block);
+                first[i] = value.x;
+                second[i] = value.y;
+            }
+            const int64_t index = row * field.channels + component;
+            all[0].add(first, index, status, world, means);
+            if (unchanged) cohort[0].add(first, index, status, world, means);
+            if constexpr (CODEC == UpdateCodec::Adam) {
+                all[1].add(second, index, status, false, false);
+                if (unchanged) cohort[1].add(second, index, status, false, false);
+            }
+        }
+    }
+    for (int moment = 0; moment < moments; ++moment) {
+        const std::string name = field.name + (field.adam() ? (moment ? ".g2" : ".g1") : "");
+        all[moment].emit(out, field, name,
+                        field.gaussian ? "all_capacity_slots_descriptive" : "all_enabled_table_cells");
+        if (field.gaussian)
+            cohort[moment].emit(out, field, name, "no_observed_clock_reset_or_mean_nan_change");
+        for (size_t i = 0; i < 4; ++i)
+            unexpected[i] += all[moment].samples[i].unexpected_nonfinite;
+    }
+}
+
+void compare_native_update_field(const NativeUpdateField& field,
+                                 const std::array<Buffer, 4>& values,
+                                 const std::array<Buffer, 4>& bounds,
+                                 const NativeUpdateRows& rows, std::ostream& out,
+                                 std::array<uint64_t, 4>& unexpected) {
+    if (field.codec == UpdateCodec::Float)
+        measure_native_update_field<UpdateCodec::Float, 32>(field, values, bounds, rows, out, unexpected);
+    else if (field.codec == UpdateCodec::Linear && field.bits == 8)
+        measure_native_update_field<UpdateCodec::Linear, 8>(field, values, bounds, rows, out, unexpected);
+    else if (field.codec == UpdateCodec::Linear && field.bits == 16)
+        measure_native_update_field<UpdateCodec::Linear, 16>(field, values, bounds, rows, out, unexpected);
+    else if (field.codec == UpdateCodec::Adam && field.bits == 4)
+        measure_native_update_field<UpdateCodec::Adam, 4>(field, values, bounds, rows, out, unexpected);
+    else if (field.codec == UpdateCodec::Adam && field.bits == 8)
+        measure_native_update_field<UpdateCodec::Adam, 8>(field, values, bounds, rows, out, unexpected);
+    else if (field.codec == UpdateCodec::Adam && field.bits == 16)
+        measure_native_update_field<UpdateCodec::Adam, 16>(field, values, bounds, rows, out, unexpected);
+    else if (field.codec == UpdateCodec::Log && field.bits == 4)
+        measure_native_update_field<UpdateCodec::Log, 4>(field, values, bounds, rows, out, unexpected);
+    else if (field.codec == UpdateCodec::Log && field.bits == 8)
+        measure_native_update_field<UpdateCodec::Log, 8>(field, values, bounds, rows, out, unexpected);
+    else update_require(false, "unhandled native scalar codec " + field.name);
+}
+
+void validate_native_update_inputs(const std::array<NativeUpdateArchive, 4>& archives) {
+    const auto& source = archives[0];
+    update_require(source.step < archives[1].step, "source must precede the completed endpoint");
+    for (size_t i = 1; i < 4; ++i) {
+        const auto& endpoint = archives[i];
+        update_require(endpoint.step == archives[1].step && endpoint.horizon == source.horizon,
+                       "endpoints must share a completed step and the unchanged source horizon");
+        for (const char* key : {
+                 "format_version", "full_resume", "quant_codec", "quant_block_size", "quant_eps",
+                 "primitive", "max_num_splats", "num_sh", "packed", "sh_optim_bits", "sh_value_bits",
+                 "non_sh_optim_bits", "use_fused_proj_bwd_optim", "use_per_splat_bias_correction",
+                 "bilagrid_rgb", "bilagrid_depth", "bilagrid_normal", "ppisp", "background_sh"}) {
+            const JsonValue* a = source.state.find(key), *b = endpoint.state.find(key);
+            update_require(a && b && same_update_json(*a, *b),
+                           "source/endpoint layout mismatch " + std::string(key));
+        }
+        update_require(endpoint.arrays.size() == source.arrays.size(), "checkpoint array set changed");
+        for (const auto& entry : source.arrays) {
+            const auto found = endpoint.arrays.find(entry.first);
+            update_require(found != endpoint.arrays.end() &&
+                           found->second.descr == entry.second.descr &&
+                           found->second.data_bytes == entry.second.data_bytes,
+                           "checkpoint array layout changed " + entry.first);
+        }
+        if (i == 1) continue;
+        const auto& reference = archives[1].state;
+        update_require(reference.obj.size() == endpoint.state.obj.size(), "endpoint metadata key set changed");
+        for (const auto& entry : reference.obj) {
+            if (entry.first == "arrays") continue;
+            const auto* other = endpoint.state.find(entry.first);
+            update_require(other && same_update_json(entry.second, *other),
+                           "endpoint metadata mismatch " + entry.first);
+        }
+    }
+}
+
+void initialize_native_update_rows(std::array<NativeUpdateArchive, 4>& archives,
+                                   const std::array<Buffer, 4>& means,
+                                   NativeUpdateRows& rows, std::ostream& out) {
+    const int64_t n = archives[0].capacity;
+    const int64_t updates = archives[1].step - archives[0].step;
+    std::array<Buffer, 4> clocks;
+    for (size_t i = 0; i < 4; ++i) {
+        rows.status[i].resize((size_t)n);
+        if (archives[0].row_clocks)
+            clocks[i] = read_npy_buffer(archives[i].in,
+                update_array(archives[i], "eng.bias_correction_steps", "<i4", n, sizeof(int32_t)));
+        std::array<uint64_t, 8> nan_patterns{};
+        uint64_t prefix_nan = 0, inf_rows = 0;
+        for (int64_t row = 0; row < n; ++row) {
+            uint8_t status = row >= archives[i].current ? 16 : 0;
+            for (int component = 0; component < 3; ++component) {
+                const int kind = update_value_class(update_load<float>(means[i], 3 * row + component));
+                if (kind == 1) status |= uint8_t(1u << component);
+                if (kind >= 2) status |= 8;
+            }
+            rows.status[i][(size_t)row] = status;
+            ++nan_patterns[status & 7];
+            prefix_nan += (status & 7) != 0 && row < archives[i].current;
+            inf_rows += (status & 8) != 0;
+            if (!clocks[i].bytes.empty()) {
+                const int32_t clock = update_load<int32_t>(clocks[i], row);
+                update_require(clock >= 0 && clock <= archives[i].step,
+                               "invalid row clock at " + std::to_string(row) + " in " +
+                               archives[i].directory.string());
+            }
+        }
+        out << "{\"type\":\"row_inventory\",\"state\":" << json_quote(kUpdateStates[i])
+            << ",\"current_prefix_rows\":" << archives[i].current
+            << ",\"current_prefix_nan_mean_rows\":" << prefix_nan
+            << ",\"mean_inf_rows\":" << inf_rows << ",\"mean_nan_component_mask_histogram\":[";
+        for (size_t mask = 0; mask < 8; ++mask)
+            out << (mask ? "," : "") << nan_patterns[mask];
+        out << "]}\n";
+    }
+    rows.cohort.assign((size_t)n, 0);
+    for (int64_t row = 0; row < n; ++row) {
+        bool unchanged = archives[0].row_clocks && rows.status[0][(size_t)row] == 0;
+        for (size_t i = 1; i < 4; ++i) {
+            unchanged &= rows.status[i][(size_t)row] == 0;
+            if (archives[0].row_clocks)
+                unchanged &= int64_t(update_load<int32_t>(clocks[i], row)) -
+                             update_load<int32_t>(clocks[0], row) == updates;
+        }
+        rows.cohort[(size_t)row] = unchanged ? 1 : 0;
+        rows.cohort_rows += unchanged;
+    }
+    for (size_t i = 1; i < 4; ++i) {
+        uint64_t nan_changes = 0, footprint_changes = 0, birth = 0, inactive = 0;
+        uint64_t clock_below = 0, clock_above = 0, clock_decreased = 0;
+        std::map<int64_t, uint64_t> deltas;
+        int64_t first_nan_change = -1, first_clock_change = -1;
+        for (int64_t row = 0; row < n; ++row) {
+            const uint8_t a = rows.status[0][(size_t)row], b = rows.status[i][(size_t)row];
+            const bool nan_changed = (a & 7) != (b & 7);
+            nan_changes += nan_changed;
+            footprint_changes += a != b;
+            birth += (a & 23) != 0 && b == 0;
+            inactive += a == 0 && (b & 23) != 0;
+            if (nan_changed && first_nan_change < 0) first_nan_change = row;
+            if (archives[0].row_clocks) {
+                const int64_t delta = int64_t(update_load<int32_t>(clocks[i], row)) -
+                                      update_load<int32_t>(clocks[0], row);
+                ++deltas[delta];
+                clock_below += delta < updates;
+                clock_above += delta > updates;
+                clock_decreased += delta < 0;
+                if (delta != updates && first_clock_change < 0) first_clock_change = row;
+            }
+        }
+        out << "{\"type\":\"topology_observation\",\"endpoint\":" << json_quote(kUpdateStates[i])
+            << ",\"scope\":\"all_capacity_slots_descriptive\",\"row_identity_proven\":false"
+               ",\"mean_nan_pattern_changed_rows\":" << nan_changes
+            << ",\"mean_nonfinite_or_prefix_status_changed_rows\":" << footprint_changes
+            << ",\"birth_or_reactivation_candidates\":" << birth
+            << ",\"became_nan_inactive_or_left_prefix_candidates\":" << inactive
+            << ",\"first_nan_pattern_change_row\":" << first_nan_change
+            << ",\"row_clocks_available\":" << (archives[0].row_clocks ? "true" : "false")
+            << ",\"logical_updates\":" << updates
+            << ",\"clock_delta_below_logical_updates_rows\":" << clock_below
+            << ",\"clock_delta_above_logical_updates_rows\":" << clock_above
+            << ",\"clock_decreased_rows\":" << clock_decreased
+            << ",\"first_unexpected_clock_delta_row\":" << first_clock_change
+            << ",\"clock_delta_histogram\":[";
+        bool first = true;
+        for (const auto& entry : deltas) {
+            out << (first ? "" : ",") << "{\"delta\":" << entry.first << ",\"rows\":" << entry.second << '}';
+            first = false;
+        }
+        out << "]}\n";
+    }
+    if (archives[0].row_clocks) {
+        for (size_t i : {size_t(2), size_t(3)}) {
+            uint64_t equal = 0;
+            int64_t maxabs = 0, first_mismatch = -1;
+            for (int64_t row = 0; row < n; ++row) {
+                const int64_t delta = int64_t(update_load<int32_t>(clocks[i], row)) -
+                                      update_load<int32_t>(clocks[1], row);
+                equal += delta == 0;
+                maxabs = std::max(maxabs, delta < 0 ? -delta : delta);
+                if (delta && first_mismatch < 0) first_mismatch = row;
+            }
+            out << "{\"type\":\"clock_comparison\",\"field\":\"eng.bias_correction_steps\""
+                   ",\"reference\":\"nativeA\",\"candidate\":" << json_quote(kUpdateStates[i])
+                << ",\"scope\":\"all_capacity_slots_descriptive\",\"exact_equal_rows\":" << equal
+                << ",\"exact_unequal_rows\":" << n - equal << ",\"maxabs\":" << maxabs
+                << ",\"first_mismatch_row\":" << first_mismatch << "}\n";
+        }
+    }
+    out << "{\"type\":\"row_cohort\",\"scope\":\"no_observed_clock_reset_or_mean_nan_change\""
+           ",\"rows\":" << rows.cohort_rows
+        << ",\"requires_finite_means_and_current_prefix_in_all_four\":true"
+           ",\"requires_source_clock_plus_logical_updates_in_all_endpoints\":true"
+           ",\"row_identity_proven\":false,\"copied_clocks_or_intermediate_births_may_be_unobservable\":true}\n";
+}
+
 }  // namespace
 
 
 // ===========================================================================
 // Public entry points
 // ===========================================================================
+
+void compare_native_checkpoint_updates(const fs::path& source,
+                                      const fs::path& reference,
+                                      const fs::path& actual,
+                                      const fs::path& native_repeat,
+                                      const fs::path& output_directory) {
+    update_require(fs::create_directory(output_directory), "output directory must be fresh");
+    std::ofstream out(output_directory / "native-checkpoint-updates.jsonl", std::ios::binary);
+    update_require(bool(out), "cannot open update report");
+    out.imbue(std::locale::classic());
+    out << std::setprecision(17);
+    out << "{\"type\":\"scope\",\"schema\":\"native_checkpoint_updates_v1\",\"cpu_only\":true"
+           ",\"acceptance_tolerance\":null,\"byte_identity_qualified\":false,\"numerically_qualified\":false"
+           ",\"quality_recovery_qualified\":false,\"lineage_proven\":false,\"row_identity_proven\":false"
+           ",\"numeric_scope\":\"finite_endpoint_pairs_and_finite_source_endpoint_triples_only\""
+           ",\"zero_denominator_ratio\":null,\"topology_may_be_active\":true"
+           ",\"source_camera_runtime_metadata_and_sh_degree_counter_may_change\":true"
+           ",\"config_checked_fields\":[\"num_iterations\"]}\n";
+    try {
+        std::array<NativeUpdateArchive, 4> archives{
+            NativeUpdateArchive(source), NativeUpdateArchive(reference),
+            NativeUpdateArchive(actual), NativeUpdateArchive(native_repeat)};
+        validate_native_update_inputs(archives);
+        for (size_t i = 0; i < 4; ++i) {
+            const auto& archive = archives[i];
+            out << "{\"type\":\"input\",\"state\":" << json_quote(kUpdateStates[i])
+                << ",\"checkpoint\":" << json_quote(fs::absolute(archive.directory).string())
+                << ",\"completed_step\":" << archive.step << ",\"horizon\":" << archive.horizon
+                << ",\"current_rows\":" << archive.current << ",\"capacity\":" << archive.capacity
+                << ",\"num_sh\":" << archive.num_sh << ",\"sh_optim_bits\":" << archive.sh_optim_bits
+                << ",\"sh_value_bits\":" << archive.sh_value_bits
+                << ",\"non_sh_optim_bits\":" << archive.non_sh_optim_bits
+                << ",\"row_clocks\":" << (archive.row_clocks ? "true" : "false")
+                << ",\"array_count\":" << archive.arrays.size() << "}\n";
+        }
+        const auto fields = native_update_fields(archives[0]);
+        std::set<std::string> handled;
+        for (const auto& field : fields) {
+            const bool quantized = field.codec != UpdateCodec::Float;
+            const std::string slot = field.slot + (quantized ? ".q" : "");
+            update_require(handled.insert(slot).second, "duplicate field coverage " + slot);
+            const int64_t blocks = quantized ? num_blocks(field.storage_cells, field.bounds_stride) : 0;
+            for (const auto& archive : archives) {
+                update_array(archive, slot, quantized ? "|u1" : "<f4",
+                             field.storage_cells, field.allocated_bytes_per_cell);
+                if (quantized)
+                    update_array(archive, field.slot + ".qb", "<f4", blocks,
+                                 field.adam() ? sizeof(float4) : sizeof(float2));
+            }
+            if (quantized) handled.insert(field.slot + ".qb");
+        }
+        if (archives[0].row_clocks) {
+            for (const auto& archive : archives)
+                update_array(archive, "eng.bias_correction_steps", "<i4",
+                             archive.capacity, sizeof(int32_t));
+            handled.insert("eng.bias_correction_steps");
+        }
+        uint64_t transient_arrays = 0;
+        for (const auto& entry : archives[0].arrays) {
+            if (handled.count(entry.first)) continue;
+            PoolSlot slot;
+            uint32_t sub;
+            update_require(parse_saved_name(entry.first, slot, sub) && slot_save(slot) == SaveClass::Never,
+                           "unhandled persistent training/appearance array " + entry.first);
+            ++transient_arrays;
+            out << "{\"type\":\"array_classification\",\"slot\":" << json_quote(entry.first)
+                << ",\"classification\":\"transient_not_persistent_training_state\",\"compared\":false"
+                   ",\"native_save_class\":\"never\",\"descr\":" << json_quote(entry.second.descr)
+                << ",\"bytes_per_checkpoint\":" << entry.second.data_bytes << "}\n";
+        }
+        NativeUpdateRows rows;
+        std::array<uint64_t, 4> unexpected{};
+        uint64_t decoded_fields = 0;
+        for (const auto& field : fields) {
+            std::array<Buffer, 4> values, bounds;
+            const bool quantized = field.codec != UpdateCodec::Float;
+            const std::string slot = field.slot + (quantized ? ".q" : "");
+            for (size_t i = 0; i < 4; ++i) {
+                values[i] = read_npy_buffer(archives[i].in, archives[i].arrays.at(slot));
+                if (!quantized) continue;
+                bounds[i] = read_npy_buffer(archives[i].in, archives[i].arrays.at(field.slot + ".qb"));
+                for (size_t pair = 0; pair < bounds[i].bytes.size() / sizeof(float2); ++pair) {
+                    const float2 range = update_load<float2>(bounds[i], (int64_t)pair);
+                    const bool logarithmic = field.codec == UpdateCodec::Log || (field.adam() && (pair & 1));
+                    update_require(!update_value_class(range.x) && !update_value_class(range.y) &&
+                                   range.x <= range.y && (!logarithmic || range.x >= 0),
+                                   "nonfinite/unordered/invalid raw quantization bounds " +
+                                   field.slot + ".qb pair " + std::to_string(pair) + " in " +
+                                   archives[i].directory.string());
+                }
+            }
+            if (field.name == "world.means")
+                initialize_native_update_rows(archives, values, rows, out);
+            int64_t used_bytes = field.storage_cells * field.allocated_bytes_per_cell;
+            if (field.codec == UpdateCodec::Adam) used_bytes = field.storage_cells * (field.bits / 4);
+            if (field.codec == UpdateCodec::Log)
+                used_bytes = field.bits == 4 ? (field.storage_cells + 1) / 2 : field.storage_cells;
+            const char* codec = field.codec == UpdateCodec::Float ? "fp32" :
+                field.codec == UpdateCodec::Linear ? "QuantizedTensor" :
+                field.adam() ? "QuantizedAdamState.decode_g1g2" : "QuantizedTensorLog";
+            out << "{\"type\":\"storage\",\"field\":" << json_quote(field.name)
+                << ",\"slot\":" << json_quote(field.slot) << ",\"codec\":" << json_quote(codec)
+                << ",\"bits\":" << field.bits << ",\"logical_cells\":" << field.cells()
+                << ",\"stored_cells\":" << field.storage_cells
+                << ",\"excluded_physical_padding_cells\":" << field.storage_cells - field.cells()
+                << ",\"fpbo_sh_addressing\":" << (field.sh_fpbo ? "true" : "false")
+                << ",\"excluded_overallocated_packed_bytes\":"
+                << field.storage_cells * field.allocated_bytes_per_cell - used_bytes
+                << ",\"all_raw_bounds_validated\":" << (quantized ? "true" : "null") << "}\n";
+            compare_native_update_field(field, values, bounds, rows, out, unexpected);
+            decoded_fields += field.adam() ? 2 : 1;
+            out.flush();
+            update_require(bool(out), "cannot write update report");
+        }
+        out << "{\"type\":\"summary\",\"complete\":true,\"decoded_fields\":" << decoded_fields
+            << ",\"covered_persistent_arrays\":" << handled.size()
+            << ",\"classified_transient_arrays\":" << transient_arrays
+            << ",\"logical_updates\":" << archives[1].step - archives[0].step
+            << ",\"unchanged_observation_cohort_rows\":" << rows.cohort_rows
+            << ",\"unexpected_nonfinite_cells\":{";
+        for (size_t i = 0; i < 4; ++i)
+            out << (i ? "," : "") << json_quote(kUpdateStates[i]) << ':' << unexpected[i];
+        out << "},\"numerically_qualified\":false,\"row_identity_proven\":false"
+               ",\"quality_recovery_qualified\":false}\n";
+        out.close();
+        update_require(bool(out), "cannot finish update report");
+    } catch (const std::exception& error) {
+        if (out.is_open()) {
+            out << "{\"type\":\"error\",\"complete\":false,\"message\":" << json_quote(error.what()) << "}\n";
+            out.flush();
+        }
+        throw;
+    }
+}
 
 bool needs_adapt(const JsonValue& state, const TargetLayout& t) {
     bool shape_changed =

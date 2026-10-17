@@ -1,18 +1,8 @@
-// Fused SSIM forward+backward (Vulkan backend), mirroring
-// kernels/loss/FusedSSIM.cu's memory_efficient_ssim_backward_kernel<true>.
-//
-// CUDA runs 24x24 blocks; the resulting shared arrays (~68 KB) exceed the
-// 32 KB llvmpipe groupshared floor, so this port runs 16x16 logical tiles as
-// flat 256-wide workgroups (VUID-02757: workgroup X must be a multiple of the
-// pinned 32-wide subgroup). Every per-pixel output is a pure function of the
-// zero-padded input, so tile size only shifts the atomic ssim scalar's
-// grouping (loose parity channel).
-//
-// Masked pixels -- and, with `sat` positive, ones both images clip above --
-// drop out of the window sums, divided back out through mask_w (FusedSSIM.cu).
+// Fused SSIM forward/backward in global image coordinates.
+// Masked and clipped pixels drop out of window moments and coverage.
+// Owned-center scalar statistics use tile partials and a pairwise reduction.
 
 #include "int8_compat.slang"
-#include "atomic_float.slang"
 
 // The double halo makes the tile edge expensive: 16 loads 36x36 per 256
 // pixels, 24 (the CUDA block) 44x44 per 576. 24 needs 47712 B of groupshared,
@@ -51,7 +41,7 @@ struct SsimParams {
     uint* masks;      // [Bm,Hm,Wm] bool bytes
     float* mask_w;    // [B,H,W] gaussian window coverage, or fallback
     float* dL_dimg1;  // [B,H,W,3], accumulated (+=)
-    float* ssim_val;  // scalar accumulator
+    float* ssim_val;  // raw owned-center sum per dispatched workgroup
     float* loss_map;  // [B,H,W,1], accumulated (+=)
     int B, H, W;
     int Bm, Hm, Wm;
@@ -60,6 +50,7 @@ struct SsimParams {
     float sat;        // clip threshold, or <= 0 to disable
     int mode;         // SsimLossMapMode: 0 skip, 1 LCS, 2 CS, 3 structure
     uint flags;
+    uint owned_begin, owned_end, row_begin, row_end;
 };
 
 [ForceInline]
@@ -123,7 +114,7 @@ struct SsimCovParams {
     int B, H, W;
     int Bm, Hm, Wm;
     float sat;
-    int _pad0;
+    uint row_begin, row_end, _pad0;
 };
 
 // Bm is 0 when there is no mask buffer, which _fs_mask_at reads as unmasked.
@@ -139,9 +130,9 @@ float _fs_cov_mask(SsimCovParams p, int b, int y, int x) {
 void ssim_mask_cov_x(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
                      uniform SsimCovParams p) {
     int x = int(wg.x) * 16 + int(tid % 16u);
-    int y = int(wg.y) * 16 + int(tid / 16u);
+    int y = int(p.row_begin + wg.y * 16) + int(tid / 16u);
     int b = int(wg.z);
-    if (x >= p.W || y >= p.H) return;
+    if (x >= p.W || uint(y) >= p.row_end) return;
     float acc = 0.0f;
     [ForceUnroll]
     for (int d = 1; d <= HALO; d++)
@@ -156,9 +147,9 @@ void ssim_mask_cov_x(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
 void ssim_mask_cov_y(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
                      uniform SsimCovParams p) {
     int x = int(wg.x) * 16 + int(tid % 16u);
-    int y = int(wg.y) * 16 + int(tid / 16u);
+    int y = int(p.row_begin + wg.y * 16) + int(tid / 16u);
     int b = int(wg.z);
-    if (x >= p.W || y >= p.H) return;
+    if (x >= p.W || uint(y) >= p.row_end) return;
     float acc = 0.0f;
     [ForceUnroll]
     for (int d = 1; d <= HALO; d++) {
@@ -187,7 +178,7 @@ groupshared float _fs_ssim[BY * BX];                // per-pixel map, then reduc
 void ssim_bwd_inplace(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
                       uniform SsimParams p) {
     const int bIdx = int(wg.z);
-    const int startY = int(wg.y) * BY;
+    const int startY = int(p.row_begin) + int(wg.y) * BY;
     const int startX = int(wg.x) * BX;
     const int num_pix = p.H * p.W;
 
@@ -306,7 +297,7 @@ void ssim_bwd_inplace(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
             // put every value HALO pixels down and right of its pixel.
             if ((has_val || lm_active) && lx >= HALO && lx < HALO + BX &&
                     ly >= 2 * HALO && ly < 2 * HALO + BY &&
-                    cx < p.W && cy < p.H) {
+                    cx < p.W && uint(cy) < p.row_end) {
                 bool cmask = _fs_mask(p, bIdx, cy, cx);
                 float ssim_v = (C_ * D_) / (A * B_);
                 if (lm_active) {
@@ -327,7 +318,8 @@ void ssim_bwd_inplace(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
                     else
                         _fs_ssim[(ly - 2 * HALO) * BX + (lx - HALO)] += lm_v;
                 }
-                ssim_val += cmask ? ssim_v : 1.0f;
+                if (uint(cy) >= p.owned_begin && uint(cy) < p.owned_end)
+                    ssim_val += cmask ? ssim_v : 1.0f;
             }
 
             float d_m_dmu1 = ((mu2 * 2.0f * D_) / (A * B_) -
@@ -384,7 +376,8 @@ void ssim_bwd_inplace(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
             int ly = l / BX + HALO;
             int pix_x = startX + lx;
             int pix_y = startY + l / BX;
-            if (pix_x >= p.W || pix_y >= p.H) continue;
+            if (pix_x >= p.W || uint(pix_y) < p.owned_begin ||
+                uint(pix_y) >= p.owned_end) continue;
             float sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f;
             [ForceUnroll]
             for (int d = 1; d <= HALO; d++) {
@@ -419,7 +412,7 @@ void ssim_bwd_inplace(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
         for (int l = int(tid); l < BY * BX; l += 256) {
             int pix_x = startX + l % BX;
             int pix_y = startY + l / BX;
-            if (pix_x >= p.W || pix_y >= p.H) continue;
+            if (pix_x >= p.W || uint(pix_y) >= p.row_end) continue;
             float ssim_v = _fs_ssim[l] / 3.0f;
             int out_idx = bIdx * num_pix + pix_y * p.W + pix_x;
             p.loss_map[out_idx] += p.map_weight * (1.0f - ssim_v);
@@ -429,16 +422,42 @@ void ssim_bwd_inplace(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
     if (has_val) {
         // Reuse _fs_ssim as the block-reduce scratch (map reads done above).
         GroupMemoryBarrierWithGroupSync();
-        ssim_val /= 3.0f * float(p.B) * float(p.H) * float(p.W);
         _fs_ssim[tid] = ssim_val;
         GroupMemoryBarrierWithGroupSync();
         for (uint s = 128; s > 0; s >>= 1) {
             if (tid < s) _fs_ssim[tid] += _fs_ssim[tid + s];
             GroupMemoryBarrierWithGroupSync();
         }
-        if (tid == 0 && _fs_ssim[0] != 0.0f)
-            atomic_add_f32(p.ssim_val, _fs_ssim[0]);
+        if (tid == 0) {
+            const uint gx = (uint(p.W) + uint(BX) - 1u) / uint(BX);
+            const uint gy = (p.row_end - p.row_begin + uint(BY) - 1u) / uint(BY);
+            p.ssim_val[(wg.z * gy + wg.y) * gx + wg.x] = _fs_ssim[0];
+        }
     }
+}
+
+struct SsimReduceParams {
+    float* src;
+    float* dst;
+    uint n, wgs_per_row;
+    float scale;
+    uint _pad0;
+};
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void ssim_reduce(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
+                 uniform SsimReduceParams p) {
+    const uint group = wg.y * p.wgs_per_row + wg.x;
+    if (group >= (p.n + 255u) / 256u) return;
+    const uint index = group * 256u + tid;
+    _fs_ssim[tid] = index < p.n ? p.src[index] : 0.0f;
+    GroupMemoryBarrierWithGroupSync();
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) _fs_ssim[tid] += _fs_ssim[tid + stride];
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (tid == 0) p.dst[group] = _fs_ssim[0] * p.scale;
 }
 
 #undef sTile

@@ -9,6 +9,9 @@
 #include "kernels/projection/ProjectionBwd.cuh"
 #include "kernels/projection/ProjectionBwdQuantGrad.cuh"
 #include "kernels/raster/RasterizationBwd.cuh"
+#if defined(SS_BACKEND_VULKAN)
+#include "backend/vulkan/kernels/ImageStrip.h"
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -288,6 +291,8 @@ static void _engine_raster_proj_backward(
         throw std::runtime_error("engine raster/proj backward: unknown primitive: " + engine().primitive);
     }
 
+    if (engine().image_strip_join)
+        engine().image_strip_join(v_splats_s_out);
     // --- Projection backward ---
     // In fused-proj-bwd-optim mode the projection backward is folded into the
     // optimizer step; we just stash the screen-space gradients for that call.
@@ -680,6 +685,12 @@ static std::map<std::string, float> _engine_loss(
 
     // The one place the error map is conditioned, so the preview copy below
     // and the raster backward aggregation read the same picture.
+#if defined(SS_BACKEND_VULKAN)
+    if (compute_loss_map && _tv_valid(loss_map_buf) &&
+        (loss_map_normalize || loss_map_clip_quantile < 1.0f))
+        backend::vk::image_strip_sum((float*)std::get<0>(loss_map_buf),
+                                     (size_t)(C * H * W));
+#endif
     if (compute_loss_map && _tv_valid(loss_map_buf))
         normalize_clip_map_inplace_tensor(loss_map_buf, loss_map_normalize,
                                           loss_map_clip_quantile,
@@ -756,14 +767,14 @@ static std::map<std::string, float> _engine_loss(
     // rewrite. Depth/normal grids are GT-side, inside the bilagrid hook.
     auto _ppisp_bwd = [&]() {
         if (engine().ppisp.enabled) {
-            _ensure_ppisp_optim_state();
+            if (!engine().image_strip_worker) _ensure_ppisp_optim_state();
             _engine_ppisp_backward_hook(pixel_grads.v_render_rgb);
         }
     };
     auto _bilagrid_bwd = [&]() {
         if (engine().bilagrid_rgb.enabled || engine().bilagrid_depth.enabled ||
             engine().bilagrid_normal.enabled) {
-            _ensure_bilagrid_optim_state();
+            if (!engine().image_strip_worker) _ensure_bilagrid_optim_state();
             _engine_bilagrid_backward_hook(
                 pixel_grads.v_render_rgb,
                 pixel_grads.v_ref_depth,

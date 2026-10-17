@@ -12,6 +12,7 @@
 
 #include "backend/vulkan/kernels/KernelCommon.h"
 #include "backend/vulkan/kernels/B1Ownership.h"
+#include "backend/vulkan/kernels/ImageStrip.h"
 #include <shaders/screen_layout.h>
 
 #include <optional>
@@ -33,8 +34,9 @@ struct Raster2dBwdParams {
     uint64_t ordered_partials;
     uint32_t I, N, n_isects, width, height, tile_width, tile_height, macro_log2;
     uint32_t ordered_stride;
+    uint32_t strip_begin, strip_end, strip_groups_y, strip_groups_per_row;
 };
-static_assert(sizeof(Raster2dBwdParams) == 21 * 8 + 10 * 4,
+static_assert(sizeof(Raster2dBwdParams) == 21 * 8 + 14 * 4,
               "params layout must match the slang struct");
 
 
@@ -108,6 +110,46 @@ std::tuple<
     std::optional<std::vector<DeviceTensorFloatND>> v_splats_w,
     std::optional<std::vector<DeviceTensorFloatND>> v_splats_s
 ) {
+    const uint32_t I = (uint32_t)render_Ts.size<0>();
+    const uint32_t tile_height = (uint32_t)tile_offsets.size<1>();
+    const uint32_t tile_width = (uint32_t)tile_offsets.size<2>();
+    const uint32_t n_isects = (uint32_t)flatten_ids.size();
+    const bool strip = backend::vk::image_strip().full_height != 0;
+    const auto rows = backend::vk::image_strip_rows(image_height);
+    uint32_t strip_groups_y = 0, strip_groups_per_row = 0, strip_grid_y = 0;
+    if (strip) {
+        if (render_Ts.size<0>() <= 0 || render_Ts.size<0>() > 0x7fffffffLL ||
+            tile_offsets.size<0>() != render_Ts.size<0>() ||
+            render_Ts.size<1>() != image_height || render_Ts.size<2>() != image_width ||
+            macro_log2 < kMacroLog2Min || macro_log2 > kMacroLog2Max ||
+            num_splats < 0 || num_splats > 0x7fffffffLL / 2 ||
+            image_width == 0 || image_height == 0 ||
+            image_width > 0x7fffffffULL / 3 ||
+            image_height > (0x7fffffffULL / 3) / image_width ||
+            uint64_t(I) > (0x7fffffffULL / 3) / image_width / image_height ||
+            splats_s.empty() || splats_s[0].numel() < 0 ||
+            splats_s[0].numel() > 0x7fffffffLL ||
+            flatten_ids.size() < 0 || flatten_ids.size() > 0x7fffffffLL ||
+            tile_offsets.size<1>() !=
+                (uint64_t(image_height) + (8u << macro_log2) - 1) /
+                    (8u << macro_log2) ||
+            tile_offsets.size<2>() !=
+                (uint64_t(image_width) + (8u << macro_log2) - 1) /
+                    (8u << macro_log2) ||
+            (rows.owned_begin != image_height && rows.owned_begin % 8u != 0) ||
+            (rows.owned_end != image_height && rows.owned_end % 8u != 0))
+            throw std::runtime_error("image strip raster backward dimensions/cut invalid");
+        if (rows.owned_begin != rows.owned_end) {
+            strip_groups_y = (rows.owned_end + 7u) / 8u - rows.owned_begin / 8u;
+            const uint64_t groups = uint64_t(I) * strip_groups_y *
+                                    (uint64_t(tile_width) << macro_log2);
+            if (groups > 65535ULL * 65535ULL)
+                throw std::runtime_error("image strip raster backward dispatch overflow");
+            strip_groups_per_row = uint32_t(std::min<uint64_t>(groups, 65535));
+            strip_grid_y = uint32_t((groups + strip_groups_per_row - 1) /
+                                    strip_groups_per_row);
+        }
+    }
     const uint32_t spec_dist = dist_spec_bwd(dist_type);
     if (accum_weight_map.data_ptr() == nullptr)
         accum_mode = DensifyAccumMode::None;
@@ -131,10 +173,6 @@ std::tuple<
         o_accum_weight.zero();
     }
 
-    const uint32_t I = (uint32_t)render_Ts.size<0>();
-    const uint32_t tile_height = (uint32_t)tile_offsets.size<1>();
-    const uint32_t tile_width = (uint32_t)tile_offsets.size<2>();
-    const uint32_t n_isects = (uint32_t)flatten_ids.size();
 
     const bool ordered = g1_ordered_raster;
     uint32_t subtiles = 0;
@@ -156,6 +194,14 @@ std::tuple<
             (uint64_t(tile_width) << macro_log2) > 65535)
             throw std::runtime_error(
                 "G1 ordered raster scratch/index or dispatch limit exceeded");
+    }
+    if (strip && rows.owned_begin == rows.owned_end) {
+        for (auto& t : v_splats_w.value())
+            if (t.data_ptr()) backend::memset_sync(t.data_ptr(), 0, t.numel() * sizeof(float));
+        for (auto& t : v_splats_s.value())
+            if (t.data_ptr()) backend::memset_sync(t.data_ptr(), 0, t.numel() * sizeof(float));
+        return std::make_tuple(v_splats_w.value(), v_splats_s.value(),
+                               o_accum_weight);
     }
 
     if (n_isects > 0) {
@@ -242,6 +288,10 @@ std::tuple<
         p.tile_height = tile_height;
         p.macro_log2 = (uint32_t)macro_log2;
         p.ordered_stride = ordered_stride;
+        p.strip_begin = rows.owned_begin;
+        p.strip_end = rows.owned_end;
+        p.strip_groups_y = strip_groups_y;
+        p.strip_groups_per_row = strip_groups_per_row;
 
         // Spec IDs: cam(0, unused), dist(1), median(2), accum(3),
         // viewmat(4, unused), packed(5), distortion(6, unused), ordered(7).
@@ -249,9 +299,13 @@ std::tuple<
                                    md ? 1u : 0u, (uint32_t)accum_mode,
                                    0u,           packed ? 1u : 0u,
                                    0u, ordered ? 1u : 0u};
-        vkk::dispatch_ring("rasterize_bwd.rasterize_bwd_2d", spec, I,
-                           tile_height << macro_log2,
-                           tile_width << macro_log2, &p, sizeof(p));
+        if (strip)
+            vkk::dispatch_ring("rasterize_bwd.rasterize_bwd_2d", spec,
+                               strip_groups_per_row, strip_grid_y, 1, &p, sizeof(p));
+        else
+            vkk::dispatch_ring("rasterize_bwd.rasterize_bwd_2d", spec, I,
+                               tile_height << macro_log2,
+                               tile_width << macro_log2, &p, sizeof(p));
         if (ordered) {
             backend::DoubleBuffer<int32_t> keys(keys_a.data_ptr(),
                                                 keys_b.data_ptr());
@@ -309,6 +363,8 @@ std::tuple<
     std::optional<std::vector<DeviceTensorFloatND>> v_splats_s,
     bool need_viewmat_grad
 ) {
+    if (backend::vk::image_strip().full_height != 0)
+        throw std::runtime_error("image strip raster supports only 3dgs/mip");
     if (g1_ordered_raster)
         throw std::runtime_error("G1 ordered raster does not support 3dgut");
     (void)loss_map;  // declared but unused by the CUDA kernel as well

@@ -59,6 +59,7 @@ inline DistortionType engine_distortion_type(
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <map>
 #include <string>
@@ -69,6 +70,7 @@ inline DistortionType engine_distortion_type(
 // without dragging the (thread- / queue- / stb_image-heavy) DataManager.h
 // into the dozens of TUs that include EngineState.h.
 class DataManager;
+struct EngineStepConfig;
 
 
 // World splat parameters (allocated once at init; persistent on device).
@@ -626,6 +628,14 @@ struct EngineState {
     PpispState       ppisp;
     ColorSpaceState  color_space;
     ColorShiftRegState color_shift_reg;
+
+    // Borrowed from the live TrainerSession; inactive on ordinary renders.
+    std::function<void(int, const EngineStepConfig&)> image_strip_fork;
+    std::function<void(std::vector<DeviceTensorFloatND>&)> image_strip_join;
+    std::function<void(const float*, size_t, const int*, size_t)> image_strip_audit_pixels;
+    const EngineStepConfig* image_strip_config = nullptr;
+    int image_strip_step = -1;
+    bool image_strip_worker = false;
 
     // Viewer (BVH + thumbnail cache + dataset camera arrays).
     EngineViewerState viewer;

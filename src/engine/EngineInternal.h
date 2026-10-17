@@ -14,6 +14,7 @@
 #include <array>
 #include <cstdint>
 #include <cstddef>
+#include <map>
 
 
 // --- Raw-pointer image conversion helpers (ImageConvert.cu). ---
@@ -176,6 +177,12 @@ void _engine_ppisp_backward_hook(TorchTensorView v_render_rgb);
 // PPISP forward on whatever cam indices are already installed.
 void _engine_ppisp_forward_current();
 void _ensure_ppisp_optim_state();
+
+struct EngineStepConfig;
+void engine_forward_prepared_pixels(bool ppisp_in_forward,
+                                    bool output_median, int dist_type);
+std::map<std::string, float> engine_prepared_pixels_backward(
+    int step, TorchTensorView cam_indices, const EngineStepConfig& cfg);
 
 // Force-allocate splat optimizer state to a given quant layout (checkpoint
 // loader; no training step). Defined in EngineOptim.cpp.

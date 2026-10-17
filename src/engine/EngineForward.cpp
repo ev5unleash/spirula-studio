@@ -393,6 +393,20 @@ void forward_3dgs(
     // the forward, so a later preview or viewer render cannot inherit it.
     engine().fwd.tile_active = DeviceVector<int32_t>();
 
+    if (engine().image_strip_config && engine().image_strip_fork)
+        engine().image_strip_fork(engine().image_strip_step,
+                                  *engine().image_strip_config);
+    engine_forward_prepared_pixels(ppisp_in_forward, output_median,
+                                   (int)dist_type);
+}
+
+void engine_forward_prepared_pixels(bool ppisp_in_forward,
+                                    bool output_median, int dist_type_int) {
+    const auto dist_type = (DistortionType)dist_type_int;
+    const auto& primitive = engine().primitive;
+    const auto& in_splats = engine().fwd.splats_w;
+    const auto& tile_offsets = engine().fwd.tile_offsets;
+    const auto& flatten_ids = engine().fwd.flatten_ids;
     // --- Rasterization forward ---
     RenderOutput::TensorTuple renders;
     RenderOutput::TensorTuple distortions;

@@ -83,6 +83,7 @@ struct RasterFwd2dParams {
     uint32_t tile_width;
     uint32_t tile_height;
     uint32_t macro_log2;
+    uint32_t strip_begin, strip_end, strip_groups_y, strip_groups_per_row;
 };
 
 [shader("compute")]
@@ -93,6 +94,16 @@ void rasterize_fwd_2d(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
     // one workgroup per micro-tile; recover its macro tile for binning
     uint mt_y = wg.y;
     uint mt_x = wg.z;
+    if (p.strip_groups_per_row != 0) {
+        uint linear = wg.y * p.strip_groups_per_row + wg.x;
+        uint groups_x = p.tile_width << p.macro_log2;
+        uint image_groups = p.strip_groups_y * groups_x;
+        image_id = linear / image_groups;
+        if (image_id >= p.I) return;
+        uint local = linear % image_groups;
+        mt_y = p.strip_begin / TILE_SIZE_Y + local / groups_x;
+        mt_x = local % groups_x;
+    }
     int tile_id = int(macro_tile_id(mt_y, mt_x, p.tile_width, p.macro_log2));
 
     int* tile_offsets =
@@ -104,7 +115,8 @@ void rasterize_fwd_2d(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
     float px = float(j) + 0.5f;
     float py = float(i) + 0.5f;
 
-    bool inside = (i < p.height && j < p.width);
+    bool inside = (i < p.height && j < p.width) &&
+        (p.strip_groups_per_row == 0 || (i >= p.strip_begin && i < p.strip_end));
     bool done = !inside;
 
     uint pix_id_global = image_id * p.height * p.width + i * p.width + j;
@@ -247,7 +259,7 @@ void rasterize_fwd_2d(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
         }
     }
 
-    if (i < p.height && j < p.width) {
+    if (inside) {
         p.out_T[pix_id_global] = T;
         if (kOutputMedian != 0)
             p.out_median[pix_id_global] = median_depth;

@@ -250,6 +250,7 @@ struct Raster2dBwdParams {  // via params ring
     uint32_t tile_height;
     uint32_t macro_log2;  // was _pad0; the struct size is unchanged
     uint32_t ordered_stride; // screen fields plus optional densify lanes
+    uint32_t strip_begin, strip_end, strip_groups_y, strip_groups_per_row;
 };
 
 struct Frag2d_ {
@@ -337,8 +338,19 @@ void rasterize_bwd_2d(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
                       uniform Raster2dBwdParams* pp) {
     Raster2dBwdParams p = *pp;
     uint image_id = wg.x;
-    uint tile_id = macro_tile_id(wg.y * TILE_SIZE_DY / TILE_SIZE_Y,
-                                 wg.z * TILE_SIZE_DX / TILE_SIZE_X,
+    uint mt_y = wg.y, mt_x = wg.z;
+    if (p.strip_groups_per_row != 0) {
+        uint linear = wg.y * p.strip_groups_per_row + wg.x;
+        uint groups_x = p.tile_width << p.macro_log2;
+        uint image_groups = p.strip_groups_y * groups_x;
+        image_id = linear / image_groups;
+        if (image_id >= p.I) return;
+        uint local = linear % image_groups;
+        mt_y = p.strip_begin / TILE_SIZE_DY + local / groups_x;
+        mt_x = local % groups_x;
+    }
+    uint tile_id = macro_tile_id(mt_y * TILE_SIZE_DY / TILE_SIZE_Y,
+                                 mt_x * TILE_SIZE_DX / TILE_SIZE_X,
                                  p.tile_width, p.macro_log2);
     uint img_off = image_id * p.height * p.width;
 
@@ -348,10 +360,12 @@ void rasterize_bwd_2d(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
     int bin_local = -1;
     for (uint pix0 = 0; pix0 < RB_BLOCK; pix0 += RB_THREADS) {
         uint pix = pix0 + tid;
-        int gx = int(wg.z * TILE_SIZE_DX) + int(pix % TILE_SIZE_DX);
-        int gy = int(wg.y * TILE_SIZE_DY) + int(pix / TILE_SIZE_DX);
+        int gx = int(mt_x * TILE_SIZE_DX) + int(pix % TILE_SIZE_DX);
+        int gy = int(mt_y * TILE_SIZE_DY) + int(pix / TILE_SIZE_DX);
         uint gpix = uint(gy) * p.width + uint(gx);
-        bool inside = (gx < int(p.width) && gy < int(p.height));
+        bool inside = (gx < int(p.width) && gy < int(p.height)) &&
+            (p.strip_groups_per_row == 0 ||
+             (uint(gy) >= p.strip_begin && uint(gy) < p.strip_end));
         int bin = inside ? p.last_ids[img_off + gpix] : -1;
         _rb_bin[pix] = bin;
         bin_local = max(bin_local, bin);
@@ -374,8 +388,8 @@ void rasterize_bwd_2d(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
             : p.tile_offsets[image_id * p.tile_height * p.tile_width +
                              tile_id + 1];
 
-    float cull_bx0 = float(wg.z * TILE_SIZE_DX);
-    float cull_by0 = float(wg.y * TILE_SIZE_DY);
+    float cull_bx0 = float(mt_x * TILE_SIZE_DX);
+    float cull_by0 = float(mt_y * TILE_SIZE_DY);
     uint wsize = WaveGetLaneCount();
     uint n_waves = RB_THREADS / wsize;
 
@@ -462,7 +476,7 @@ void rasterize_bwd_2d(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
             bool touched = false;
 
             for (int t = 0; t < batch_size + (int)RB_BLOCK - 1; t++) {
-                _rb2_step(t - int(tid), splat_idx, active, wg.y, wg.z, splat,
+                _rb2_step(t - int(tid), splat_idx, active, mt_y, mt_x, splat,
                           v_splat, accum_weight, accum_weight_den, touched);
                 GroupMemoryBarrierWithGroupSync();
             }
@@ -487,8 +501,8 @@ void rasterize_bwd_2d(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
                     // Each (intersection, microtile) has exactly one survivor
                     // lane; no atomic append, no change to the pixel sweep.
                     uint side = 1u << p.macro_log2;
-                    uint subtile = (wg.y & (side - 1u)) * side +
-                                   (wg.z & (side - 1u));
+                    uint subtile = (mt_y & (side - 1u)) * side +
+                                   (mt_x & (side - 1u));
                     uint slot = uint(splat_idx) * side * side + subtile;
                     float* dst = p.ordered_partials + slot * p.ordered_stride;
                     scr2_store(dst, v_splat.xy, v_splat.depth, v_splat.conic,

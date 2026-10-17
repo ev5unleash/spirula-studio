@@ -20,6 +20,7 @@
 #include <kernels/raster/RasterizationBwd.cuh>
 #include <kernels/raster/RasterizationEval3DBwd.cuh>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -27,12 +28,14 @@
 #include <random>
 #include <vector>
 #include "backend/tests/ScreenRows.h"
+#ifdef SS_BACKEND_VULKAN
+#include "backend/vulkan/kernels/ImageStrip.h"
+#endif
 
 using backend::MemcpyKind;
 
 static constexpr int64_t N = 3000;
 static constexpr uint32_t C = 2;
-static constexpr uint32_t W = 200, H = 150;
 static constexpr int NUM_SH = 15;
 
 template <typename T>
@@ -72,12 +75,18 @@ static DeviceTensor2D<uint2> vec_to_2d_aabb(const DeviceVector<uint2>& vec) {
 }
 
 int main(int argc, char** argv) {
-    if (argc != 3 ||
-        (std::strcmp(argv[1], "dump") && std::strcmp(argv[1], "compare"))) {
-        std::fprintf(stderr, "usage: %s dump|compare <ref.bin>\n", argv[0]);
+    const bool strip_fixture = argc == 2 && std::strcmp(argv[1], "strip") == 0;
+    if (!strip_fixture && (argc != 3 ||
+        (std::strcmp(argv[1], "dump") && std::strcmp(argv[1], "compare")))) {
+        std::fprintf(stderr, "usage: %s dump|compare <ref.bin> | strip\n", argv[0]);
         return 2;
     }
-    const bool dumping = std::strcmp(argv[1], "dump") == 0;
+#ifndef SS_BACKEND_VULKAN
+    if (strip_fixture) return 2;
+#endif
+    const bool dumping = !strip_fixture && std::strcmp(argv[1], "dump") == 0;
+    const uint32_t W = strip_fixture ? 201u : 200u;
+    const uint32_t H = strip_fixture ? 151u : 150u;
 
     std::mt19937 rng(112233u);
     auto uf = [&](float lo, float hi) {
@@ -170,6 +179,7 @@ int main(int argc, char** argv) {
         bool median;
         DensifyAccumMode aw;
         bool vmg;  // 3dgut viewmat grad
+        bool strip_only = false;
     };
     // The 3dgs backward never sees the camera, so the tier sweep lives on the
     // 3dgut rows; the 3dgs rows carry it through the projection only.
@@ -182,6 +192,7 @@ int main(int argc, char** argv) {
         {2, false, 1, 2, DistortionType::D, true, DensifyAccumMode::Max, false},
         {2, false, 0, 1, DistortionType::RGB_D, false, DensifyAccumMode::Sum, false},
         {2, true, 0, 2, DistortionType::D, false, DensifyAccumMode::Avg, false},
+        {0, true, 0, 0, DistortionType::None, false, DensifyAccumMode::Avg, false, true},
     };
     const char* cams[4] = {"PINHOLE", "FISHEYE", "EQUISOLID",
                            "EQUIRECTANGULAR"};
@@ -190,7 +201,11 @@ int main(int argc, char** argv) {
                    {(int64_t)C, kCameraDistortionParams});
     };
 
+    for (int requested_macro = strip_fixture ? kMacroLog2Min : kMacroLog2Default;
+         requested_macro <= (strip_fixture ? kMacroLog2Max : kMacroLog2Default);
+         ++requested_macro)
     for (const Cfg& cfg : cfgs) {
+        if ((strip_fixture && cfg.prim != 0) || (cfg.strip_only && !strip_fixture)) continue;
         backend::memset_sync(d_radii, 0, N * sizeof(float));
 
         // --- projection ---
@@ -233,7 +248,7 @@ int main(int argc, char** argv) {
         // --- tile intersection ---
         DeviceVector<int32_t>* image_ids_ptr =
             cfg.packed && cam_ids.data_ptr() ? &cam_ids : nullptr;
-        int macro_log2 = kMacroLog2Default;
+        int macro_log2 = requested_macro;
         auto [isect_ids, flatten_ids, tile_offsets] =
             do_intersect_tile_generic(aabb_2d, depths_nd,
                                       ellipse_view(splats_s, cfg.prim == 2), C,
@@ -280,6 +295,149 @@ int main(int argc, char** argv) {
             ? t3f1(d_awmap) : DeviceTensor3D<float>{};
         DeviceTensor3D<float> v_med_t =
             cfg.median ? t3f1(d_v_med) : DeviceTensor3D<float>{};
+#ifdef SS_BACKEND_VULKAN
+        if (strip_fixture) {
+            auto snapshot = [&] {
+                std::vector<float> v;
+                readback(v, reinterpret_cast<const float*>(
+                    std::get<0>(std::get<0>(rout)).data_ptr()), n_pix * 3);
+                readback(v, std::get<1>(std::get<0>(rout)).data_ptr(), n_pix);
+                readback(v, std::get<1>(rout).data_ptr(), n_pix);
+                if (cfg.dt == DistortionType::RGB_D)
+                    readback(v, reinterpret_cast<const float*>(
+                        std::get<0>(std::get<3>(rout)).data_ptr()), n_pix * 3);
+                if (dist_any(cfg.dt))
+                    readback(v, std::get<1>(std::get<3>(rout)).data_ptr(), n_pix);
+                if (cfg.median) readback(v, std::get<4>(rout).data_ptr(), n_pix);
+                return v;
+            };
+            auto last_snapshot = [&] {
+                std::vector<int32_t> v(n_pix);
+                backend::memcpy_sync(v.data(), std::get<2>(rout).data_ptr(),
+                                     v.size() * sizeof(int32_t), MemcpyKind::DeviceToHost);
+                return v;
+            };
+            const auto full_pixels = snapshot();
+            const auto full_last = last_snapshot();
+            for (size_t i = 0; i < h_v_rgb.size(); ++i)
+                h_v_rgb[i] = (full_pixels[i] > 0.3f ? 1.f : -1.f) /
+                             float(n_pix * 3);
+            backend::memcpy_sync(d_v_rgb, h_v_rgb.data(), h_v_rgb.size() * sizeof(float),
+                                 MemcpyKind::HostToDevice);
+            struct Capture { std::vector<float> gradient, density; };
+            auto backward = [&] {
+                std::optional<RenderOutput::TensorTuple> df;
+                if (dist_any(cfg.dt)) df = std::get<3>(rout);
+                auto [vw, vs, density] = rasterize_to_pixels_3dgs_bwd(
+                    N, in_splats, splats_s, gauss_ids, W, H, tile_offsets,
+                    flatten_ids, macro_log2, std::get<1>(rout), std::get<2>(rout),
+                    std::get<0>(rout), df, cfg.dt, awmap_t, cfg.aw,
+                    v_renders, t3f1(d_v_T), v_med_t, v_dist_opt,
+                    std::nullopt, std::nullopt);
+                backend::device_synchronize();
+                Capture out;
+                readback(out.gradient, vs[0].data_ptr(), vs[0].numel());
+                readback(out.density, density.data_ptr(), density.size());
+                return out;
+            };
+            const auto full = backward();
+            const auto repeat = backward();
+            if (check_error()) return 1;
+            backend::vk::set_image_strip({H, 1, 64, 17, {}});
+            bool refused_unaligned = false;
+            try { (void)backward(); }
+            catch (const std::runtime_error&) { refused_unaligned = true; }
+            backend::vk::set_image_strip({});
+            if (!refused_unaligned) return 1;
+            auto report = [&](const char* label, const std::vector<float>& actual,
+                              const std::vector<float>& expected) {
+                if (actual.size() != expected.size()) return false;
+                double max_abs = 0, diff2 = 0, ref2 = 0;
+                size_t diagnostic_violations = 0;
+                for (size_t i = 0; i < actual.size(); ++i) {
+                    if (!std::isfinite(actual[i]) || !std::isfinite(expected[i])) return false;
+                    double d = double(actual[i]) - expected[i];
+                    max_abs = std::max(max_abs, std::abs(d));
+                    if (std::abs(d) > 3e-4 + 0.003 *
+                        std::max(std::abs(double(actual[i])), std::abs(double(expected[i]))))
+                        ++diagnostic_violations;
+                    diff2 += d * d;
+                    ref2 += double(expected[i]) * expected[i];
+                }
+                double rel_rms = std::sqrt(diff2 / std::max(ref2, 1e-30));
+                std::printf("raster strip macro=%d packed=%d dist=%d accum=%d %s "
+                            "max_abs=%.9g rel_rms=%.9g diagnostic_violations=%zu\n",
+                            macro_log2, int(cfg.packed), int(cfg.dt), int(cfg.aw),
+                            label, max_abs, rel_rms, diagnostic_violations);
+                if (ref2 == 0) return max_abs == 0;
+                return diagnostic_violations == 0 &&
+                    max_abs <= 1e-4 + 1e-4 * std::sqrt(ref2) && rel_rms <= 5e-4;
+            };
+            if (!report("native_repeat_gradient", repeat.gradient, full.gradient) ||
+                !report("native_repeat_density", repeat.density, full.density)) return 1;
+            Capture combined;
+            combined.gradient.resize(full.gradient.size(), 0.f);
+            combined.density.resize(full.density.size(), 0.f);
+            const uint32_t extents[][2] = {{0, 64}, {64, H}, {0, 0}, {H, H}};
+            for (const auto& extent : extents) {
+                backend::vk::set_image_strip({H, extent[0], extent[1], 17, {}});
+                const auto rows = backend::vk::image_strip_rows(H);
+                rout = rasterize_to_pixels_3dgs_fwd(
+                    N, in_splats, splats_s, gauss_ids, W, H, tile_offsets,
+                    flatten_ids, macro_log2, cfg.dt, cfg.median);
+                backend::device_synchronize();
+                if (check_error()) return 1;
+                const auto pixels = snapshot();
+                const auto last = last_snapshot();
+                for (size_t i = 0; i < pixels.size(); ++i) {
+                    const size_t rgb_end = size_t(n_pix) * 3;
+                    size_t pixel;
+                    if (i < rgb_end) pixel = i / 3;
+                    else if (i < rgb_end + size_t(n_pix) * 2)
+                        pixel = (i - rgb_end) % n_pix;
+                    else {
+                        size_t offset = i - rgb_end - size_t(n_pix) * 2;
+                        if (cfg.dt == DistortionType::RGB_D && offset < rgb_end)
+                            pixel = offset / 3;
+                        else {
+                            if (cfg.dt == DistortionType::RGB_D) offset -= rgb_end;
+                            pixel = offset % n_pix;
+                        }
+                    }
+                    uint32_t y = uint32_t(pixel / W % H);
+                    bool work = y >= rows.work_begin && y < rows.work_end;
+                    float expected = work ? full_pixels[i] : 0.f;
+                    if (std::memcmp(&pixels[i], &expected, sizeof(float)) != 0) {
+                        std::fprintf(stderr, "raster strip forward mismatch index=%zu row=%u\n", i, y);
+                        return 1;
+                    }
+                }
+                for (size_t i = 0; i < last.size(); ++i) {
+                    uint32_t y = uint32_t(i / W % H);
+                    int32_t expected = y >= rows.work_begin && y < rows.work_end
+                        ? full_last[i] : 0;
+                    if (last[i] != expected) return 1;
+                }
+                const auto part = backward();
+                if (check_error()) return 1;
+                const bool empty = extent[0] == extent[1];
+                for (size_t i = 0; i < part.gradient.size(); ++i) {
+                    if (empty && part.gradient[i] != 0.f) return 1;
+                    if (!empty) combined.gradient[i] += part.gradient[i];
+                }
+                for (size_t i = 0; i < part.density.size(); ++i) {
+                    if (empty && part.density[i] != 0.f) return 1;
+                    if (!empty) combined.density[i] = cfg.aw == DensifyAccumMode::Max
+                        ? std::max(combined.density[i], part.density[i])
+                        : combined.density[i] + part.density[i];
+                }
+                backend::vk::set_image_strip({});
+            }
+            if (!report("combined_gradient", combined.gradient, full.gradient) ||
+                !report("combined_density_raw", combined.density, full.density)) return 1;
+            continue;
+        }
+#endif
 
         // --- rasterization backward ---
         if (cfg.prim == 2) {
@@ -321,6 +479,10 @@ int main(int argc, char** argv) {
             if (accum_any(cfg.aw))
                 readback(acc, aw_out.data_ptr(), N * accum_lanes(cfg.aw));
         }
+    }
+    if (strip_fixture) {
+        std::printf("raster_bwd_parity: strip PASSED\n");
+        return 0;
     }
 
     if (dumping) {

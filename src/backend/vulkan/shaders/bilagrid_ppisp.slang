@@ -97,6 +97,7 @@ struct BpSampleParams {
     uint total;              // N*m*h*w or nnz
     uint wgs_per_row;
     uint _pad0;
+    uint row_begin, row_end;
 };
 
 [shader("compute")]
@@ -105,6 +106,8 @@ void bilagrid_ppisp_sample_fwd(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
                                uniform BpSampleParams p) {
     uint idx = (wg.y * p.wgs_per_row + wg.x) * 256 + tid;
     if (idx >= p.total) return;
+    uint row = (idx / uint(p.w)) % uint(p.h);
+    if (kPacked == 0 && (row < p.row_begin || row >= p.row_end)) return;
     int g_off = int(idx);
     int ni;
     if (kPacked != 0) {
@@ -148,6 +151,17 @@ void bilagrid_ppisp_sample_bwd(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
                                uniform BpSampleParams p) {
     uint idx = (wg.y * p.wgs_per_row + wg.x) * 256 + tid;
     if (idx >= p.total) return;
+    uint row = (idx / uint(p.w)) % uint(p.h);
+    if (kPacked == 0 && (row < p.row_begin || row >= p.row_end)) {
+        p.v_rgb[3 * idx] = 0.0f;
+        p.v_rgb[3 * idx + 1] = 0.0f;
+        p.v_rgb[3 * idx + 2] = 0.0f;
+        if (kCoordsGrad != 0) {
+            p.v_coords[2 * idx] = 0.0f;
+            p.v_coords[2 * idx + 1] = 0.0f;
+        }
+        return;
+    }
     int g_off = int(idx);
     int ni;
     if (kPacked != 0) {
@@ -249,6 +263,7 @@ struct BpUniformParams {
     int has_grid_indices;
     uint total;
     uint wgs_per_row;
+    uint row_begin, row_end;
 };
 
 [ForceInline]
@@ -280,6 +295,8 @@ void bilagrid_ppisp_fwd(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
                         uniform BpUniformParams p) {
     uint idx = (wg.y * p.wgs_per_row + wg.x) * 256 + tid;
     if (idx >= p.total) return;
+    uint row = (idx / uint(p.w)) % uint(p.h);
+    if (row < p.row_begin || row >= p.row_end) return;
     int ni, g_id, g_off3;
     float gx, gy;
     _bp_pix(int(idx), p, ni, g_id, g_off3, gx, gy);
@@ -339,6 +356,7 @@ struct BpV1GridParams {
     int mult_x, mult_y, m_batch_stride;
     int has_grid_indices;
     int _pad0;
+    uint row_begin, row_end;
 };
 
 [shader("compute")]
@@ -423,6 +441,8 @@ void bilagrid_ppisp_bwd_v1_grid(uint3 bid: SV_GroupID, uint ltid: SV_GroupThread
                                   p.w, p.h, 0, 0, p.w - 1, p.h - 1);
             }
 
+            rng.hi0 = max(rng.hi0, int(p.row_begin) + off_y);
+            rng.hi1 = min(rng.hi1, int(p.row_end) + off_y);
             for (int hi = rng.hi0; hi < rng.hi1; hi++)
             for (int wi = rng.wi0; wi < rng.wi1; wi++) {
                 int g_off;
@@ -533,6 +553,7 @@ struct BpV1RgbParams {
     int has_grid_indices;
     uint total;
     uint wgs_per_row;
+    uint row_begin, row_end;
 };
 
 [shader("compute")]
@@ -541,6 +562,13 @@ void bilagrid_ppisp_bwd_v1_rgb(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
                                uniform BpV1RgbParams p) {
     uint idx = (wg.y * p.wgs_per_row + wg.x) * 256 + tid;
     if (idx >= p.total) return;
+    uint row = (idx / uint(p.w)) % uint(p.h);
+    if (row < p.row_begin || row >= p.row_end) {
+        p.v_rgb[3 * idx] = 0.0f;
+        p.v_rgb[3 * idx + 1] = 0.0f;
+        p.v_rgb[3 * idx + 2] = 0.0f;
+        return;
+    }
 
     BpUniformParams u;
     u.fp32 = p.fp32; u.q16 = p.q16; u.vbounds = p.vbounds;
@@ -550,6 +578,7 @@ void bilagrid_ppisp_bwd_v1_rgb(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
     u.m = p.m; u.h = p.h; u.w = p.w; u.h0 = p.h0; u.w0 = p.w0;
     u.has_grid_indices = p.has_grid_indices;
     u.total = p.total; u.wgs_per_row = p.wgs_per_row;
+    u.row_begin = p.row_begin; u.row_end = p.row_end;
     int ni, g_id, g_off3;
     float gx, gy;
     _bp_pix(int(idx), u, ni, g_id, g_off3, gx, gy);
@@ -636,6 +665,7 @@ struct BpV2Params {
     uint total;
     uint wgs_per_row;
     uint _pad0;
+    uint row_begin, row_end;
 };
 
 [shader("compute")]
@@ -644,6 +674,13 @@ void bilagrid_ppisp_bwd_v2(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
                            uniform BpV2Params p) {
     uint idx = (wg.y * p.wgs_per_row + wg.x) * 256 + tid;
     if (idx >= p.total) return;
+    uint row = (idx / uint(p.w)) % uint(p.h);
+    if (row < p.row_begin || row >= p.row_end) {
+        p.v_rgb[3 * idx] = 0.0f;
+        p.v_rgb[3 * idx + 1] = 0.0f;
+        p.v_rgb[3 * idx + 2] = 0.0f;
+        return;
+    }
     int tmp = int(idx);
     int wi = tmp % p.w; tmp /= p.w;
     int hi = tmp % p.h; tmp /= p.h;

@@ -593,10 +593,16 @@ std::string train_config_unsupported(const TrainConfig& c) {
     return {};
 }
 
+TrainerSession::~TrainerSession() {
+    std::lock_guard<std::mutex> lock(engine_mutex);
+    _image_strip.reset();
+}
+
 // Unported-feature guards: fail early rather than ignore a flag.
 void TrainerSession::check_config() {
     if (std::string what = train_config_unsupported(cfg); !what.empty())
         throw std::runtime_error(what);
+    app::ImageStripExecutor::check_config(cfg);
     if (b1_owner_from_env() >= 0 && cfg.color_shift_reg_weight != 0.0f)
         throw std::runtime_error(
             "B1 mode does not support nonzero color_shift_reg_weight");
@@ -842,6 +848,9 @@ std::vector<float> trainer_exif_exposure_evs(const ParsedDataset& ds,
 }
 
 void TrainerSession::setup_engine() {
+    app::ImageStripExecutor::check_config(cfg);
+    _image_strip.reset();
+    _image_strip_poisoned = false;
 #ifndef SS_BACKEND_VULKAN
     check_cuda_runtime();
 #endif
@@ -1073,6 +1082,30 @@ void TrainerSession::setup_engine() {
                                original ? original : b1_source.string(),
                                b1_view_policy, b1_full_train_indices);
     }
+    if (!app::ImageStripExecutor::requested_device().empty()) {
+        if (has_depth || has_normal || engine().bilagrid_depth.enabled ||
+            engine().bilagrid_normal.enabled || engine().background.enabled ||
+            engine().dm->max_input_batch_size() != 1 ||
+            engine().dm->max_face_passes() != 1)
+            throw std::runtime_error(
+                "image strip requires one equal-size camera pass and RGB/mask-only ground truth");
+        const auto resolved = engine_resolve_managed_step_config(
+            build_step_config(cfg, st, start_step));
+        if (!resolved.optim.use_fused_proj_bwd_optim ||
+            engine_distortion_type(engine_primitive_pixel_type(cfg.primitive),
+                resolved.loss.weights[(int)LossWeightIndex::RgbDistReg],
+                resolved.loss.weights[(int)LossWeightIndex::DepthDistReg],
+                resolved.loss.weights[(int)LossWeightIndex::NormalDistReg]) != DistortionType::None ||
+            resolved.loss.weights[(int)LossWeightIndex::MedianDepthNormalReg] != 0)
+            throw std::runtime_error("image strip does not support resolved distortion or depth-normal lanes");
+        const auto& grid = engine().bilagrid_rgb;
+        if (grid.enabled && grid.value_bits == 16 &&
+            (grid.grids.size<1>() * grid.grids.size<2>() *
+             grid.grids.size<3>() * grid.grids.size<4>()) % 256)
+            throw std::runtime_error("image strip requires camera-aligned bilagrid quantization blocks");
+        _image_strip = std::make_unique<app::ImageStripExecutor>(
+            cfg, controller_disconnected);
+    }
 #ifdef SS_BACKEND_VULKAN
     backend::backing_report("trainer_setup_complete");
 #endif
@@ -1165,6 +1198,9 @@ std::string TrainerSession::restore_checkpoint() {
 }
 
 void TrainerSession::save_checkpoint(int step) {
+    if (_image_strip_poisoned)
+        throw std::runtime_error("cannot save a poisoned image-strip session");
+    if (_image_strip) _image_strip->require_checkpointable();
     char name[32];
     std::snprintf(name, sizeof name, "step-%09d.ckpt", step);
     const fs::path ckpt = out_dir / name;
@@ -1302,16 +1338,36 @@ void TrainerSession::save_checkpoint(int step) {
 std::map<std::string, float> TrainerSession::train_step(int step) {
     int sh_degree_to_use = step / std::max(cfg.sh_degree_warmup_every, 1);
     EngineStepConfig sc = build_step_config(cfg, st, step);
-    auto losses = engine_train_step_managed(
-        step, cfg.num_iterations, cfg.primitive, sh_degree_to_use,
-        cfg.packed || cfg.use_bvh, sc);
-
-    // Sticky and returns-and-clears, and nothing else on the training thread
-    // reads it: a failed dispatch or copy would otherwise leave a buffer
-    // unwritten and training would carry on over whatever was in it.
-    if (const char* err = backend::last_error())
-        throw std::runtime_error("GPU backend error at step " +
-                                 std::to_string(step) + ": " + err);
+    if (_image_strip_poisoned)
+        throw std::runtime_error("cannot continue a poisoned image-strip session");
+    std::map<std::string, float> losses;
+    try {
+        if (_image_strip) _image_strip->begin_step(step);
+        losses = engine_train_step_managed(
+            step, cfg.num_iterations, cfg.primitive, sh_degree_to_use,
+            cfg.packed || cfg.use_bvh, sc);
+        if (_image_strip) _image_strip->finish_step();
+        if (const char* err = backend::last_error())
+            throw std::runtime_error("GPU backend error at step " +
+                                     std::to_string(step) + ": " + err);
+    } catch (const DataDecodeError&) {
+        if (_image_strip) {
+            try {
+                _image_strip->abandon_undispatched_step();
+            } catch (...) {
+                _image_strip_poisoned = true;
+                _image_strip->poison();
+                throw;
+            }
+        }
+        throw;
+    } catch (...) {
+        if (_image_strip) {
+            _image_strip_poisoned = true;
+            _image_strip->poison();
+        }
+        throw;
+    }
 
     // Divergence never recovers, and the run otherwise continues in silence to
     // a black render and a checkpoint with zero splats. Reported values sit

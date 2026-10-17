@@ -70,7 +70,6 @@ list(APPEND SS_TOOL_SOURCES
      ${SS_SRC}/app/FrameLook.cpp
      ${SS_SRC}/app/FrameMotion.cpp
      ${SS_SRC}/app/Pano360.cpp
-     ${SS_SRC}/app/AppPaths.cpp
      ${SS_SRC}/app/CrashLog.cpp)
 if(WIN32)
     list(APPEND SS_TOOL_LIBS dbghelp)   # CrashLog.cpp's stack walk
@@ -378,8 +377,7 @@ if(SS_BUILD_GUI)
         ${SS_SRC}/app/gui/DatasetPreset.cpp
         ${SS_SRC}/app/gui/MeshJob.cpp
         ${SS_SRC}/app/gui/MeshPreset.cpp
-        ${SS_SRC}/app/gui/PresetFile.cpp
-        ${SS_SRC}/app/AppPaths.cpp)
+        ${SS_SRC}/app/gui/PresetFile.cpp)
     ss_configure_app(preset_roundtrip_test)
 
     add_executable(batch_process_test
@@ -397,7 +395,6 @@ if(SS_BUILD_GUI)
         ${SS_SRC}/app/FrameMask.cpp
         ${SS_SRC}/app/FrameLook.cpp
         ${SS_SRC}/app/FrameMotion.cpp
-        ${SS_SRC}/app/Pano360.cpp
-        ${SS_SRC}/app/AppPaths.cpp)
+        ${SS_SRC}/app/Pano360.cpp)
     ss_configure_app(batch_process_test)
 endif()

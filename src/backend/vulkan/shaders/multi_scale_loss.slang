@@ -1,19 +1,8 @@
-// Per-pixel fused training losses + image-pyramid helpers (Vulkan backend),
-// mirroring kernels/loss/PerPixelLoss.cu. All per-pixel loss math comes from the
-// canonical shaders/per_pixel_losses.slang (the same functions the CUDA build
-// calls through generated/per_pixel_losses.cuh), so per-pixel outputs and
-// gradients match up to fast-math rounding.
-//
-// Optional buffers: params pointer fields are never null (host launchers pass
-// the zeroed fallback page); presence moves to the in_flags / out_flags bit
-// fields. Bool buffers ([B,H,W] masks) are read/written through u32 words --
-// 8-bit storage access is not baseline SPIR-V.
-//
-// The raw-loss accumulation mirrors the CUDA kernel's routing exactly
-// (global row 0 vs per-image rows 1..N selected by atomicAddWhich), but the
-// CUDA 1024-thread block reduce becomes a flat 256-wide groupshared tree +
-// one float CAS-atomic per workgroup per index: accumulated sums are
-// order-dependent on both backends -> loose parity channel.
+// Per-pixel training loss math comes from shaders/per_pixel_losses.slang.
+// Globally aligned row chunks produce owned-center statistics; complete rows
+// combine before pairwise reduction into the native global/per-camera table.
+// Optional pointers use presence flags and a non-null fallback page.
+// Bool masks use word-addressed bytes because 8-bit storage is not baseline.
 
 #include "int64_compat.slang"
 #include "int8_compat.slang"
@@ -23,7 +12,7 @@
 #include "shaders/per_pixel_losses.slang"
 #undef CudaDeviceExport
 
-static const int kNRaw = int(RawLossIndex::length);        // 31
+static const int kNRaw = int(RawLossIndex::length);
 static const int kNW = int(LossWeightIndex::length);       // 19
 static const int kNL = int(LossIndex::length);             // 14
 
@@ -77,7 +66,7 @@ struct PplParams {
     float* median_normal;
     uint* ref_alpha;      // bool bytes, word-read
     float* loss_map;      // fwd only
-    float* losses;        // fwd: raw-loss accum rows; bwd: v_raw_losses rows
+    float* losses;        // fwd: [B,kNRaw,work_rows,chunks]; bwd: v_raw rows
     float* v_render_rgb;
     float* v_ref_rgb;
     float* v_render_depth;
@@ -102,7 +91,8 @@ struct PplParams {
     float saturation_threshold;
     uint in_flags;
     uint out_flags;
-    uint wgs_per_row;     // pixel axis folds across (wg.x, wg.z); wg.y = batch
+    uint wgs_per_row;     // workgroups fold across (wg.x,wg.z); wg.y = batch
+    uint row_begin, row_end, stat_begin, stat_end;
 };
 
 [ForceInline]
@@ -350,18 +340,22 @@ float _ms_block_sum(float v, uint tid) {
 void ppl_fwd(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
              uniform PplParams* ppp) {
     PplParams p = *ppp;
-    uint pixel_idx = (wg.z * p.wgs_per_row + wg.x) * 256 + tid;
-    uint batch_idx = wg.y;
-    if (batch_idx >= uint(p.B)) return;
-    gindex_t idx = (gindex_t)batch_idx * (gindex_t)p.ppi + (gindex_t)pixel_idx;
-
-    int x_dst = int(pixel_idx % uint(p.W_render));
-    int y_dst = int(pixel_idx / uint(p.W_render));
+    const uint group = wg.z * p.wgs_per_row + wg.x;
+    const uint batch_idx = wg.y;
+    const uint chunks_per_row = (uint(p.W_render) + 255u) / 256u;
+    const uint work_rows = p.row_end - p.row_begin;
+    if (batch_idx >= uint(p.B) || group >= work_rows * chunks_per_row) return;
+    const uint local_y = group / chunks_per_row;
+    const uint chunk = group % chunks_per_row;
+    const int x_dst = int(chunk * 256u + tid);
+    const int y_dst = int(p.row_begin + local_y);
+    const gindex_t idx = ((gindex_t)batch_idx * p.H_render + y_dst) *
+                         (gindex_t)p.W_render + x_dst;
 
     float losses[kNRaw];
     for (int i = 0; i < kNRaw; i++) losses[i] = 0.0f;
 
-    bool inside = pixel_idx < p.ppi;
+    bool inside = x_dst < p.W_render;
     if (inside) {
         float3 render_rgb, ref_rgb, render_normal, depth_normal, ref_normal_v;
         float3 rgb_dist, normal_dist, median_normal;
@@ -398,24 +392,93 @@ void ppl_fwd(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
         }
     }
 
-    uint row_b = batch_idx;
-    if ((p.in_flags & kInCam) != 0)
-        row_b = uint(int(i64mem_get(p.camera_indices[batch_idx])));
+    const gindex_t plane_stride = (gindex_t)work_rows * chunks_per_row;
+    const gindex_t partial_base = (gindex_t)batch_idx * kNRaw * plane_stride + group;
 
     for (int i = 0; i < kNRaw; i++) {
-        float loss = inside ? losses[i] : 0.0f;
+        float loss = inside && uint(y_dst) >= p.stat_begin &&
+                     uint(y_dst) < p.stat_end ? losses[i] : 0.0f;
         loss = _ms_finite(loss) ? loss : 0.0f;
         float sum = _ms_block_sum(loss, tid);
-        if (tid == 0) {
-            if (sum != 0.0f && _ms_finite(sum)) {
-                int which = _ms_add_which(i);
-                if (which == 0 || which == 2)
-                    atomic_add_f32(p.losses + i, sum);
-                if (which == 1 || which == 2)
-                    atomic_add_f32(p.losses + (row_b + 1) * uint(kNRaw) + i,
-                                   sum);
+        if (tid == 0)
+            p.losses[partial_base + i * plane_stride] = _ms_finite(sum) ? sum : 0.0f;
+    }
+}
+
+struct PplRowsParams {
+    float* chunks;
+    float* rows;
+    uint B, H, W, row_begin, row_end, wgs_per_row;
+};
+
+[shader("compute")]
+[numthreads(32, 1, 1)]
+void ppl_rows(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
+              uniform PplRowsParams p) {
+    const uint work_rows = p.row_end - p.row_begin;
+    const uint job = wg.y * p.wgs_per_row + wg.x;
+    const uint batch = job / work_rows;
+    if (batch >= p.B) return;
+    const uint local_y = job % work_rows;
+    const uint chunks_per_row = (p.W + 255u) / 256u;
+    for (uint raw = tid; raw < uint(kNRaw); raw += 32u) {
+        const gindex_t base = ((gindex_t)batch * kNRaw + raw) *
+                             work_rows * chunks_per_row + local_y * chunks_per_row;
+        float sum = 0.0f;
+        for (uint chunk = 0; chunk < chunks_per_row; ++chunk)
+            sum += p.chunks[base + chunk];
+        p.rows[((gindex_t)batch * kNRaw + raw) * p.H + p.row_begin + local_y] = sum;
+    }
+}
+
+struct PplRawSumParams {
+    float* src;
+    float* dst;
+    uint B, n, wgs_per_row, _pad0;
+};
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void ppl_raw_sum(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
+                 uniform PplRawSumParams p) {
+    const uint outputs = (p.n + 255u) / 256u;
+    const uint job = wg.y * p.wgs_per_row + wg.x;
+    const uint plane = job / outputs;
+    if (plane >= p.B * uint(kNRaw)) return;
+    const uint chunk = job % outputs;
+    const uint index = chunk * 256u + tid;
+    _ms_red[tid] = index < p.n ? p.src[(gindex_t)plane * p.n + index] : 0.0f;
+    GroupMemoryBarrierWithGroupSync();
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) _ms_red[tid] += _ms_red[tid + stride];
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (tid == 0) p.dst[(gindex_t)plane * outputs + chunk] = _ms_red[0];
+}
+
+struct PplRawGatherParams {
+    float* sums;
+    i64mem_t* camera_indices;
+    float* raw;
+    uint B, has_cameras;
+};
+
+[shader("compute")]
+[numthreads(32, 1, 1)]
+void ppl_raw_gather(uint tid: SV_GroupThreadID, uniform PplRawGatherParams p) {
+    for (uint raw = tid; raw < uint(kNRaw); raw += 32u) {
+        const int which = _ms_add_which(int(raw));
+        float total = 0.0f;
+        for (uint batch = 0; batch < p.B; ++batch) {
+            const float value = p.sums[(gindex_t)batch * kNRaw + raw];
+            if (which != 1) total += value;
+            if (which != 0) {
+                const uint camera = p.has_cameras != 0u ?
+                    uint(int(i64mem_get(p.camera_indices[batch]))) : batch;
+                p.raw[((gindex_t)camera + 1) * kNRaw + raw] += value;
             }
         }
+        if (which != 1) p.raw[raw] = total;
     }
 }
 
@@ -424,9 +487,11 @@ void ppl_fwd(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
 void ppl_bwd(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
              uniform PplParams* ppp) {
     PplParams p = *ppp;
-    uint pixel_idx = (wg.z * p.wgs_per_row + wg.x) * 256 + tid;
+    uint pixel_idx = (wg.z * p.wgs_per_row + wg.x) * 256 + tid +
+                     p.row_begin * uint(p.W_render);
     uint batch_idx = wg.y;
-    if (batch_idx >= uint(p.B) || pixel_idx >= p.ppi) return;
+    if (batch_idx >= uint(p.B) ||
+        pixel_idx >= p.row_end * uint(p.W_render)) return;
     gindex_t idx = (gindex_t)batch_idx * (gindex_t)p.ppi + (gindex_t)pixel_idx;
 
     int x_dst = int(pixel_idx % uint(p.W_render));
@@ -610,7 +675,7 @@ struct MsPoolParams {
     int lsH, lsW;
     int scale;   // upsample only: 1 << scale_index
     float a, b;  // upsample only
-    int _pad0;
+    uint row_begin, row_end, _pad0;
 };
 
 [shader("compute")]
@@ -618,9 +683,9 @@ struct MsPoolParams {
 void ms_downsample_f(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
                      uniform MsPoolParams p) {
     uint xid = wg.x * 16 + (tid % 16u);
-    uint yid = wg.y * 16 + (tid / 16u);
+    uint yid = p.row_begin + wg.y * 16 + (tid / 16u);
     uint bid = wg.z;
-    if (yid >= uint(p.lsH) || xid >= uint(p.lsW)) return;
+    if (yid >= p.row_end || xid >= uint(p.lsW)) return;
     // Clamp the odd-row/col tail (a floor-halved dst never reads it when the
     // src dim is even; clamping keeps the odd-dim edge case in-bounds).
     uint y0 = min(2 * yid, uint(p.hsH - 1)), y1 = min(2 * yid + 1, uint(p.hsH - 1));
@@ -644,9 +709,9 @@ void ms_downsample_f(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
 void ms_downsample_gt_geo(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
                           uniform MsPoolParams p) {
     uint xid = wg.x * 16 + (tid % 16u);
-    uint yid = wg.y * 16 + (tid / 16u);
+    uint yid = p.row_begin + wg.y * 16 + (tid / 16u);
     uint bid = wg.z;
-    if (yid >= uint(p.lsH) || xid >= uint(p.lsW)) return;
+    if (yid >= p.row_end || xid >= uint(p.lsW)) return;
     uint ys[2] = { min(2 * yid, uint(p.hsH - 1)), min(2 * yid + 1, uint(p.hsH - 1)) };
     uint xs[2] = { min(2 * xid, uint(p.hsW - 1)), min(2 * xid + 1, uint(p.hsW - 1)) };
     gindex_t base = ((gindex_t)bid * p.hsH) * (gindex_t)p.hsW;
@@ -679,7 +744,7 @@ struct MsPoolMaskedParams {
     int B, C;
     int hsH, hsW;
     int lsH, lsW;
-    int _pad0;
+    uint row_begin, row_end;
 };
 
 [shader("compute")]
@@ -687,9 +752,9 @@ struct MsPoolMaskedParams {
 void ms_downsample_masked_f(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
                             uniform MsPoolMaskedParams p) {
     uint xid = wg.x * 16 + (tid % 16u);
-    uint yid = wg.y * 16 + (tid / 16u);
+    uint yid = p.row_begin + wg.y * 16 + (tid / 16u);
     uint bid = wg.z;
-    if (yid >= uint(p.lsH) || xid >= uint(p.lsW)) return;
+    if (yid >= p.row_end || xid >= uint(p.lsW)) return;
     uint ys[2] = { min(2 * yid, uint(p.hsH - 1)), min(2 * yid + 1, uint(p.hsH - 1)) };
     uint xs[2] = { min(2 * xid, uint(p.hsW - 1)), min(2 * xid + 1, uint(p.hsW - 1)) };
     gindex_t base = ((gindex_t)bid * p.hsH) * (gindex_t)p.hsW;
@@ -720,7 +785,7 @@ struct MsZeroMaskedParams {
     float* grad;
     uint* mask;
     int B, C, H, W;
-    int _pad0;
+    uint row_begin, row_end;
 };
 
 [shader("compute")]
@@ -728,9 +793,9 @@ struct MsZeroMaskedParams {
 void ms_zero_masked_grad(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
                          uniform MsZeroMaskedParams p) {
     uint xid = wg.x * 16 + (tid % 16u);
-    uint yid = wg.y * 16 + (tid / 16u);
+    uint yid = p.row_begin + wg.y * 16 + (tid / 16u);
     uint bid = wg.z;
-    if (yid >= uint(p.H) || xid >= uint(p.W)) return;
+    if (yid >= p.row_end || xid >= uint(p.W)) return;
     gindex_t i = ((gindex_t)bid * p.H + yid) * (gindex_t)p.W + xid;
     if (u8_load(p.mask, (uint)i) != 0u) return;
     for (int c = 0; c < p.C; c++)
@@ -742,9 +807,9 @@ void ms_zero_masked_grad(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
 void ms_upsample_f(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
                    uniform MsPoolParams p) {
     uint xid = wg.x * 16 + (tid % 16u);
-    uint yid = wg.y * 16 + (tid / 16u);
+    uint yid = p.row_begin + wg.y * 16 + (tid / 16u);
     uint bid = wg.z;
-    if (yid >= uint(p.hsH) || xid >= uint(p.hsW)) return;
+    if (yid >= p.row_end || xid >= uint(p.hsW)) return;
     for (int c = 0; c < p.C; c++) {
         gindex_t hidx = (((gindex_t)bid * p.hsH + yid) * (gindex_t)p.hsW + xid) *
                            p.C + c;
@@ -769,6 +834,7 @@ struct MsPoolBoolParams {
     int hsH, hsW;
     int lsH, lsW;
     uint wgs_per_row;
+    uint row_begin, row_end, words_per_batch, _pad0;
 };
 
 [shader("compute")]
@@ -776,15 +842,24 @@ struct MsPoolBoolParams {
 void ms_downsample_b(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
                      uniform MsPoolBoolParams p) {
     uint total = uint(p.B) * uint(p.lsH) * uint(p.lsW);
-    uint n_words = (total + 3u) / 4u;
-    uint word = (wg.y * p.wgs_per_row + wg.x) * 256 + tid;
-    if (word >= n_words) return;
+    uint n_words = p.words_per_batch != 0 ? uint(p.B) * p.words_per_batch :
+                   (total + 3u) / 4u;
+    uint slot = (wg.y * p.wgs_per_row + wg.x) * 256 + tid;
+    if (slot >= n_words) return;
+    uint begin = 0u, end = total, word = slot;
+    if (p.words_per_batch != 0) {
+        uint batch = slot / p.words_per_batch;
+        uint plane = batch * uint(p.lsH) * uint(p.lsW);
+        begin = plane + p.row_begin * uint(p.lsW);
+        end = plane + p.row_end * uint(p.lsW);
+        word = begin / 4u + slot % p.words_per_batch;
+    }
 
     uint out_w = 0u;
     uint covered = 0u;
     for (uint k = 0; k < 4u; k++) {
         uint byte_idx = 4u * word + k;
-        if (byte_idx >= total) break;
+        if (byte_idx < begin || byte_idx >= end) continue;
         covered |= 0xffu << (8u * k);
         uint hw = uint(p.lsH) * uint(p.lsW);
         uint bid = byte_idx / hw;
@@ -802,6 +877,7 @@ void ms_downsample_b(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
                  _ms_load_u8(p.src, plane + y1 * uint(p.hsW) + x1);
         if (v >= 2u) out_w |= 1u << (8u * k);
     }
+    if (covered == 0u) return;
     if (covered == 0xffffffffu) {
         p.dst[word] = out_w;
     } else {
@@ -843,6 +919,7 @@ struct MsNmsParams {
     uint* fails;   // [B,H,W] bytes, 0..2 sides outranking the pixel
     int B, H, W;
     float falloff;
+    uint row_begin, row_end;
 };
 
 static const int NMS_BLOCK = 16;
@@ -855,7 +932,8 @@ groupshared float _nms_tile[NMS_TILE * NMS_TILE];
 void ms_nms_mask(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
                  uniform MsNmsParams p) {
     int lx = int(tid % 16u), ly = int(tid / 16u);
-    int x0 = int(wg.x) * NMS_BLOCK, y0 = int(wg.y) * NMS_BLOCK;
+    int x0 = int(wg.x) * NMS_BLOCK;
+    int y0 = int(p.row_begin) + int(wg.y) * NMS_BLOCK;
     int bid = int(wg.z);
 
     for (int i = int(tid); i < NMS_TILE * NMS_TILE; i += 256) {
@@ -867,7 +945,7 @@ void ms_nms_mask(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
     GroupMemoryBarrierWithGroupSync();
 
     int xid = x0 + lx, yid = y0 + ly;
-    if (yid >= p.H || xid >= p.W) return;
+    if (uint(yid) >= p.row_end || xid >= p.W) return;
 
     int ty = ly + NMS_HALO, tx = lx + NMS_HALO;
     float gx = 0.0f, gy = 0.0f;
@@ -897,8 +975,8 @@ void ms_nms_mask(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
 void ms_nms_apply(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
                   uniform MsNmsParams p) {
     uint xid = wg.x * 16 + (tid % 16u);
-    uint yid = wg.y * 16 + (tid / 16u);
-    if (yid >= uint(p.H) || xid >= uint(p.W)) return;
+    uint yid = p.row_begin + wg.y * 16 + (tid / 16u);
+    if (yid >= p.row_end || xid >= uint(p.W)) return;
     gindex_t idx = ((gindex_t)wg.z * p.H + yid) * (gindex_t)p.W + xid;
     uint n = u8_load(p.fails, (uint)idx);
     float m = n == 0u ? 1.0f : (n == 1u ? p.falloff : p.falloff * p.falloff);

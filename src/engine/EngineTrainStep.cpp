@@ -140,7 +140,20 @@ static std::map<std::string, float> _engine_step_fwd_bwd_only(
         engine().ppisp.enabled && engine().ppisp.cur_run_before_color_space;
     engine().background.match_luma_pending = cfg.background.match_luminance;
 
+    engine().image_strip_step = step;
+    engine().image_strip_config = &cfg;
     forward_3dgs(primitive, sh_degree, packed, /*output_median=*/false, (int)dist_type);
+    engine().image_strip_config = nullptr;
+    auto losses = engine_prepared_pixels_backward(
+        step, bilagrid_cam_indices, cfg);
+    engine_bin_tile_observe(std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - step_t0).count());
+    return losses;
+}
+
+std::map<std::string, float> engine_prepared_pixels_backward(
+    int step, TorchTensorView bilagrid_cam_indices,
+    const EngineStepConfig& cfg) {
 
     // PPISP already ran inside the forward in the before-color-space order.
     const bool ppisp_after = engine().ppisp.enabled &&
@@ -173,8 +186,6 @@ static std::map<std::string, float> _engine_step_fwd_bwd_only(
         cfg.loss.color_shift_reg_weight,
         cfg.loss.color_shift_reg_beta);
     engine_diagnostic_stage("backward", step);
-    engine_bin_tile_observe(std::chrono::duration<double>(
-        std::chrono::steady_clock::now() - step_t0).count());
     return losses;
 }
 

@@ -9,6 +9,7 @@
 #include <kernels/raster/RasterizationEval3DFwd.cuh>
 
 #include "backend/vulkan/kernels/KernelCommon.h"
+#include "backend/vulkan/kernels/ImageStrip.h"
 
 namespace {
 
@@ -19,8 +20,9 @@ struct RasterFwd2dParams {
     uint64_t out_rgb, out_depth, out_T, out_last_ids;
     uint64_t dist_rgb, dist_depth, out_median;
     uint32_t I, n_isects, width, height, tile_width, tile_height, macro_log2;
+    uint32_t strip_begin, strip_end, strip_groups_y, strip_groups_per_row;
 };
-static_assert(sizeof(RasterFwd2dParams) == 10 * 8 + 7 * 4 + 4 /*pad*/,
+static_assert(sizeof(RasterFwd2dParams) == 128,
               "params layout must match the slang struct");
 
 // Mirrors RasterFwd3dgutParams in shaders/rasterize_fwd.slang.
@@ -116,9 +118,52 @@ launch_raster_2d_fwd(
     const int64_t batch = tile_offsets.size<0>();
     const uint32_t tile_height = (uint32_t)tile_offsets.size<1>();
     const uint32_t tile_width = (uint32_t)tile_offsets.size<2>();
+    const bool strip = backend::vk::image_strip().full_height != 0;
+    const auto rows = backend::vk::image_strip_rows(image_height);
+    uint32_t strip_groups_y = 0, strip_groups_per_row = 0, strip_grid_y = 0;
+    if (strip) {
+        if (batch <= 0 || batch > 0x7fffffffLL ||
+            macro_log2 < kMacroLog2Min || macro_log2 > kMacroLog2Max ||
+            image_width == 0 || image_height == 0 ||
+            image_width > 0x7fffffffULL / 3 ||
+            image_height > (0x7fffffffULL / 3) / image_width ||
+            uint64_t(batch) > (0x7fffffffULL / 3) / image_width / image_height ||
+            splats_s.empty() || splats_s[0].numel() < 0 ||
+            splats_s[0].numel() > 0x7fffffffLL ||
+            flatten_ids.size() < 0 || flatten_ids.size() > 0x7fffffffLL ||
+            tile_offsets.size<1>() !=
+                (uint64_t(image_height) + (8u << macro_log2) - 1) /
+                    (8u << macro_log2) ||
+            tile_offsets.size<2>() !=
+                (uint64_t(image_width) + (8u << macro_log2) - 1) /
+                    (8u << macro_log2))
+            throw std::runtime_error("image strip raster forward dimensions invalid");
+        if (rows.owned_begin != rows.owned_end) {
+            strip_groups_y = (rows.work_end + 7u) / 8u - rows.work_begin / 8u;
+            const uint64_t groups = uint64_t(batch) * strip_groups_y *
+                                    (uint64_t(tile_width) << macro_log2);
+            if (groups > 65535ULL * 65535ULL)
+                throw std::runtime_error("image strip raster forward dispatch overflow");
+            strip_groups_per_row = uint32_t(std::min<uint64_t>(groups, 65535));
+            strip_grid_y = uint32_t((groups + strip_groups_per_row - 1) /
+                                    strip_groups_per_row);
+        }
+    }
 
     RasterOutputs o = alloc_raster_outputs(batch, image_height, image_width,
                                            dist_type, output_median);
+    if (strip) {
+        std::get<0>(o.renders).zero();
+        std::get<1>(o.renders).zero();
+        o.render_Ts.zero();
+        o.last_ids.zero();
+        if (dist_type == DistortionType::RGB_D) std::get<0>(o.distortions).zero();
+        if (dist_type != DistortionType::None) std::get<1>(o.distortions).zero();
+        if (output_median) o.render_median.zero();
+        if (rows.owned_begin == rows.owned_end)
+            return std::make_tuple(o.renders, o.render_Ts, o.last_ids,
+                                   o.distortions, o.render_median);
+    }
 
     Vanilla3DGS<0>::ScreenBuffer sb(splats_s);
 
@@ -140,14 +185,22 @@ launch_raster_2d_fwd(
     p.tile_width = tile_width;
     p.tile_height = tile_height;
     p.macro_log2 = (uint32_t)macro_log2;
+    p.strip_begin = rows.work_begin;
+    p.strip_end = rows.work_end;
+    p.strip_groups_y = strip_groups_y;
+    p.strip_groups_per_row = strip_groups_per_row;
 
     backend::vk::SpecList spec{0u, dist_spec(dist_type),
                                output_median ? 1u : 0u};
     static_assert(sizeof(RasterFwd2dParams) <= 128,
                   "must stay under the push-constant floor");
-    dispatch_raster_push("rasterize_fwd.rasterize_fwd_2d", spec,
-                         (uint32_t)batch, tile_width, tile_height, macro_log2,
-                         &p, sizeof(p));
+    if (strip)
+        vkk::dispatch("rasterize_fwd.rasterize_fwd_2d", spec,
+                      strip_groups_per_row, strip_grid_y, 1, &p, sizeof(p));
+    else
+        dispatch_raster_push("rasterize_fwd.rasterize_fwd_2d", spec,
+                             (uint32_t)batch, tile_width, tile_height, macro_log2,
+                             &p, sizeof(p));
 
     return std::make_tuple(o.renders, o.render_Ts, o.last_ids, o.distortions,
                            o.render_median);
@@ -236,6 +289,8 @@ std::tuple<
     DistortionType dist_type,
     bool output_median
 ) {
+    if (backend::vk::image_strip().full_height != 0)
+        throw std::runtime_error("image strip raster supports only 3dgs/mip");
     const vkk::CamDistSpec cd = vkk::cam_dist_spec(camera_model, distortion);
 
     const int64_t batch = tile_offsets.size<0>();

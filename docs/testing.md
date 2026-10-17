@@ -90,6 +90,62 @@ The `training_gpu` CTest resource lock serializes this test within an invocation
 it is not a system-wide reservation against another trainer. Run hardware lanes
 one at a time. No exact stochastic model bytes or loss trajectory are compared.
 
+### Experimental same-view image strips
+
+These focused checks are separate from CTest's headless suite. Use a Windows
+Vulkan build and two distinct supported non-NVIDIA device UUIDs:
+
+```bat
+set SS_VK_DEVICE=uuid:A
+set SS_PPISP_REDUCTION=native
+build_vulkan\vk_runtime_smoke.exe --strip-finite
+build_vulkan\raster_bwd_parity.exe strip
+build_vulkan\ppisp_parity.exe strip
+build_vulkan\msloss_parity.exe strip
+set SS_PPISP_REDUCTION=staged
+build_vulkan\g1_native_proof.exe image-strip-source-proof --resume SOURCE --device uuid:A --worker-device uuid:B --output FRESH --input-index INDEX
+```
+
+Repeat the four single-device checks with `SS_VK_DEVICE=uuid:B`.
+`ppisp_parity strip` requires native PPISP reduction (unset or `native`).
+The source proof requires a native full packed-3DGS/FPBO checkpoint with active
+PPISP and RGB PPISP bilagrid, raw Avg density accumulation and one RGB/mask
+camera pass; `FRESH` must not exist. `--input-index INDEX` is optional: it fixes
+one source training input for diagnosis, not a production sampling policy.
+Omit it to use the native sampling policy through the quiescent diagnostic
+sampler; this does not exercise ordinary asynchronous sampling.
+
+The proof compares same-prepared-input native repeats with actual two-device
+strip gradients/losses using declared numerical gates, not canonical optimizer
+byte equality. Its input and numerical gates run before the single authority
+update and abort on failure; it does not substitute reference gradients.
+The proof also injects a pre-fetch decode exception, checks unchanged state,
+saves a source-step checkpoint, and retries in the same worker session.
+Actual worker-owned RGB and last-intersection IDs are compared byte-exact with
+both full native replays before the update. These audit payloads are absent
+from ordinary training.
+
+For matched short fixed-input continuations and decoded checkpoint diagnostics:
+
+```bat
+build_vulkan\g1_native_proof.exe image-strip-source-run --resume SOURCE --device uuid:A --output FRESH_RUN --updates 20 --input-index INDEX --worker-device uuid:B
+build_vulkan\g1_native_proof.exe checkpoint-update-compare --source SOURCE --reference NATIVE --actual STRIP --native-repeat NATIVE_REPEAT --output FRESH_REPORT
+```
+
+Omit `--worker-device` for native controls; keep staged PPISP, source, input and
+update count identical. The run uses `TrainerSession::train`, disables periodic
+saves, retains the source horizon and writes one final full checkpoint. Its
+fixed input does not exercise ordinary sampling. The CPU-only comparator
+decodes native values/moments/bounds/clocks and enabled appearance state,
+reports update-relative errors and native-repeat noise, and separates inactive
+mean sentinels from unexpected nonfinite values. Its topology cohorts are
+descriptive, not proven stable identities, and it supplies no acceptance gate.
+
+Neither these commands nor implementation availability imply a passed source
+proof, runtime qualification, quality/recovery proof or a performance win.
+See the [investigation and evidence limits](notes/multi-gpu-image-strip-investigation.md)
+and [runtime scope](../src/backend/vulkan/README.md#experimental-same-view-image-strips).
+
 ### Bounded native two-owner group validation
 
 Use two distinct supported non-NVIDIA Vulkan UUIDs, a native full source
@@ -496,7 +552,7 @@ source reset including all28 physical TAR NPY payloads. At most the first comple
 different-field pair is retained, up to360,000,000B; other fields retain full typed
 hash/numerical/first-byte summaries. Total new-output reserve427,108,864B; no new
 checkpoint/PLY serializer. Keep source/run/sealed declaration and retained pair
-dependencies for the campaign's independent `A4-once-backward-verify.py` consumer.
+dependencies for the campaign's independently retained backward-verification consumer.
 
 Native exit0 means complete operational/reset evidence, **not numerical equivalence**.
 Consumer0 also accepts a complete consistently negative numerical verdict;

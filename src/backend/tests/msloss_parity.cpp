@@ -12,8 +12,13 @@
 #include <kernels/loss/PerPixelLoss.cuh>
 #include <kernels/densify/Densify.cuh>
 #include <core/Tensor.h>
+#ifdef SS_BACKEND_VULKAN
+#include "backend/vulkan/kernels/ImageStrip.h"
+#include <kernels/pixelwise/PixelWise.cuh>
+#endif
 
 #include <array>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -21,6 +26,9 @@
 #include <limits>
 #include <random>
 #include <vector>
+#include <stdexcept>
+#include <string>
+#include <utility>
 
 using backend::MemcpyKind;
 
@@ -348,10 +356,427 @@ void run_normalize_clip(Rng& r) {
     std::printf("msloss_parity: cfg %-12s done\n", "norm_clip");
 }
 
+#ifdef SS_BACKEND_VULKAN
+static void strip_compare(const char* label, const std::vector<float>& got,
+                          const std::vector<float>& ref, double abs_tol = 1e-6,
+                          size_t row_width = 0) {
+    if (got.size() != ref.size()) throw std::runtime_error("strip result shape mismatch");
+    double max_abs = 0, error2 = 0, ref2 = 0;
+    size_t max_index = 0;
+    for (size_t i = 0; i < got.size(); ++i) {
+        if (!std::isfinite(got[i]) || !std::isfinite(ref[i])) {
+            std::fprintf(stderr, "strip %s nonfinite entry=%zu got=%.9g ref=%.9g\n",
+                         label, i, double(got[i]), double(ref[i]));
+            throw std::runtime_error(std::string(label) + ": non-finite result");
+        }
+        const double error = double(got[i]) - ref[i];
+        if (std::abs(error) > max_abs) {
+            max_abs = std::abs(error);
+            max_index = i;
+        }
+        error2 += error * error;
+        ref2 += double(ref[i]) * ref[i];
+    }
+    const double rel_rms = ref2 ? std::sqrt(error2 / ref2) : 0;
+    std::printf("strip %-22s max_abs=%.9g rel_rms=%.9g\n", label, max_abs, rel_rms);
+    if ((!ref2 && error2) || max_abs > abs_tol || rel_rms > 1e-3) {
+        std::fprintf(stderr,
+            "strip %s worst_entry=%zu got=%.9g ref=%.9g delta=%.9g "
+            "max_abs_limit=%.9g rel_rms=%.9g ref_norm=%.9g\n",
+            label, max_index, double(got[max_index]), double(ref[max_index]),
+            double(got[max_index]) - ref[max_index], abs_tol, rel_rms, std::sqrt(ref2));
+        if (row_width)
+            std::fprintf(stderr, "strip %s plane=%zu coordinate=%zu\n",
+                         label, max_index / row_width, max_index % row_width);
+        throw std::runtime_error(std::string(label) + ": numerical mismatch");
+    }
+}
+
+static void run_strip_pixel_checks() {
+    using namespace backend::vk;
+    constexpr int64_t B = 2, H = 67, W = 43, np = B * H * W;
+    Rng rng(171027u);
+    std::vector<void*> allocations;
+    auto own = [&](auto* pointer) {
+        allocations.push_back(pointer);
+        return pointer;
+    };
+    float* rgb = own(upload(rng.vec(3 * np, -0.2f, 2.0f)));
+    float* Ts = own(upload(rng.vec(np, 0.05f, 0.95f)));
+    float* blended = own(alloc_zero<float>(3 * np));
+    float* encoded = own(alloc_zero<float>(3 * np));
+    float* v_rgb = own(alloc_zero<float>(3 * np));
+    float* v_Ts = own(alloc_zero<float>(np));
+    float* matrix = own(upload(std::vector<float>{
+        0.9f, 0.08f, 0.02f, 0.05f, 0.9f, 0.05f, 0.02f, 0.08f, 0.9f}));
+    const auto seed = rng.vec(3 * np, -0.3f, 0.3f);
+    auto t3 = [&](float* p) { return DeviceTensor3D<float3>(ttv(p, {B, H, W, 3})); };
+    auto t1 = [&](float* p) { return DeviceTensor3D<float>(ttv(p, {B, H, W, 1})); };
+    const auto cm = DeviceTensor2D<float3>(ttv(matrix, {3, 1, 3}));
+    struct Result {
+        std::vector<float> image, gradient, Ts;
+        ImageStripRows rows;
+    };
+    for (int transfer : {0, 2}) for (bool linear : {false, true}) {
+        auto run = [&](ImageStripContext strip) {
+            set_image_strip(std::move(strip));
+            backend::memcpy_sync(v_rgb, seed.data(), seed.size() * sizeof(float),
+                                 MemcpyKind::HostToDevice);
+            backend::memset_sync(blended, 0x3f, 3 * np * sizeof(float));
+            backend::memset_sync(encoded, 0x3f, 3 * np * sizeof(float));
+            backend::memset_sync(v_Ts, 0x3f, np * sizeof(float));
+            const float3 background = make_float3(0.15f, 0.2f, 0.1f);
+            blend_background_color_forward(t3(rgb), t1(Ts), background, t3(blended));
+            working_to_display_forward(transfer, linear, t3(blended), cm, t3(encoded));
+            working_to_display_backward(transfer, linear, t3(blended), cm, t3(v_rgb), t3(v_rgb));
+            overexposure_grad_add(t3(blended), 0.17f, t3(v_rgb));
+            blend_background_color_backward(t3(rgb), t1(Ts), background, 0.13f,
+                                            t3(v_rgb), t3(v_rgb), t1(v_Ts));
+            Result result;
+            result.rows = image_strip_rows(uint32_t(H));
+            readback_f(result.image, encoded, 3 * np);
+            readback_f(result.gradient, v_rgb, 3 * np);
+            readback_f(result.Ts, v_Ts, np);
+            return result;
+        };
+        const Result native = run({});
+        for (uint32_t cut : {0u, 32u, uint32_t(H)}) {
+            const Result a = run({uint32_t(H), 0, cut, 10, {}});
+            const Result b = run({uint32_t(H), cut, uint32_t(H), 10, {}});
+            std::vector<float> gradient(3 * np), grad_Ts(np);
+            for (size_t i = 0; i < gradient.size(); ++i)
+                gradient[i] = a.gradient[i] + b.gradient[i];
+            for (size_t i = 0; i < grad_Ts.size(); ++i)
+                grad_Ts[i] = a.Ts[i] + b.Ts[i];
+            for (int64_t batch = 0; batch < B; ++batch)
+                for (uint32_t y = 0; y < uint32_t(H); ++y)
+                    for (uint32_t x = 0; x < uint32_t(W); ++x) {
+                        const size_t i = (size_t(batch) * H + y) * W + x;
+                        const Result& owner = y < cut ? a : b;
+                        const Result& other = y < cut ? b : a;
+                        if (other.Ts[i] != 0)
+                            throw std::runtime_error("strip pixelwise transmittance halo is not zero");
+                        for (int k = 0; k < 3; ++k) {
+                            const size_t j = 3 * i + k;
+                            if (std::memcmp(&owner.image[j], &native.image[j], sizeof(float)) ||
+                                !std::isfinite(owner.image[j]) || other.gradient[j] != 0)
+                                throw std::runtime_error("strip pointwise RGB/ownership mismatch");
+                            for (const Result* result : {&a, &b})
+                                if ((y < result->rows.work_begin || y >= result->rows.work_end) &&
+                                    result->image[j] != 0)
+                                    throw std::runtime_error("strip pointwise forward halo is not zero");
+                        }
+                    }
+            strip_compare("pixelwise_rgb", gradient, native.gradient);
+            strip_compare("pixelwise_Ts", grad_Ts, native.Ts);
+        }
+    }
+    set_image_strip({});
+    for (void* pointer : allocations) backend::device_free(pointer);
+}
+
+static int run_strip_checks() {
+    using namespace backend::vk;
+    auto require = [](bool valid, const char* message) {
+        if (!valid) throw std::runtime_error(message);
+    };
+    auto reject = [&](auto operation) {
+        bool rejected = false;
+        try { operation(); } catch (const std::runtime_error&) { rejected = true; }
+        require(rejected, "image strip accepted invalid rows");
+        set_image_strip({});
+    };
+    reject([] { set_image_strip({65, 40, 20, 10, {}}); });
+    reject([] { set_image_strip({65, 0, 66, 10, {}}); });
+    reject([] { set_image_strip({65, 0, 32, 10, {}}); image_strip_rows(33); });
+    reject([] { set_image_strip({65, 0, 31, 10, {}}); image_strip_rows(32); });
+    reject([] { image_strip_halo(0); });
+    reject([] { image_strip_halo(5); });
+    require(image_strip_halo(1) == 10 && image_strip_halo(4) == 87 &&
+            image_strip_halo(4, true) == 89, "image strip halo support changed");
+    run_strip_pixel_checks();
+    std::puts("strip collective=capture_actual_A_then_B_sum_then_replay; full-owned reference checked separately");
+
+    struct Case {
+        const char* name;
+        uint32_t H, W, cut, scales;
+        int mask;  // 0 none, 1 mixed, 2 all masked, 3 separate resolution
+        DensifyLossMapMode map_mode;
+        bool identical_rgb = false;
+        int B = 2;
+    };
+    const Case cases[] = {
+        {"even_boundary", 256, 80, 128, 3, 0, DensifyLossMapMode::SsimFull},
+        {"odd_four", 257, 79, 128, 4, 1, DensifyLossMapMode::SsimContrastStruct},
+        {"scaled_mask", 193, 67, 64, 2, 3, DensifyLossMapMode::SsimStructure},
+        {"all_masked", 65, 31, 32, 3, 2, DensifyLossMapMode::LossFull},
+        {"empty_top", 129, 35, 0, 3, 1, DensifyLossMapMode::LossFull},
+        {"empty_bottom", 129, 35, 129, 2, 0, DensifyLossMapMode::SsimFull},
+        {"odd_nms", 67, 49, 32, 1, 1, DensifyLossMapMode::LossFullNms},
+        {"tiny_pyramid", 3, 5, 0, 4, 1, DensifyLossMapMode::SsimFull},
+        {"scalar_reduction", 2880, 2880, 1472, 2, 0,
+         DensifyLossMapMode::SsimFull, true, 1},
+    };
+    Rng rng(171026u);
+    for (const Case& c : cases) {
+        const int B = c.B;
+        const int64_t np = int64_t(B) * c.H * c.W;
+        const uint32_t mask_h = c.mask == 3 ? 97 : c.H;
+        const uint32_t mask_w = c.mask == 3 ? 35 : c.W;
+        std::vector<void*> allocations;
+        auto own = [&](auto* pointer) {
+            allocations.push_back(pointer);
+            return pointer;
+        };
+        auto input_rgb = rng.vec(3 * np, 0.05f, 0.95f);
+        auto ref = c.identical_rgb ? input_rgb : rng.vec(3 * np, 0.05f, 0.95f);
+        const auto depth = c.identical_rgb ? std::vector<float>(size_t(np), 1.0f) :
+                                            rng.vec(np, 0.3f, 3.0f);
+        const auto transmittance = rng.vec(np, 0.05f, 0.95f);
+        for (int b = 0; b < B; ++b)
+            for (uint32_t y = c.cut > 5 ? c.cut - 5 : 0;
+                 y < std::min(c.H, c.cut + 5); ++y)
+                for (uint32_t x = 5; x < std::min(c.W, 17u); ++x)
+                    for (int k = 0; k < 3; ++k) {
+                        const size_t i = ((size_t(b) * c.H + y) * c.W + x) * 3 + k;
+                        input_rgb[i] = 0.995f;
+                        ref[i] = 0.995f;
+                    }
+        // A nonzero MSE keeps the canonical PSNR VJP finite.
+        if (c.identical_rgb)
+            for (float& value : input_rgb) value += 1e-5f;
+        std::vector<uint8_t> mask(size_t(B) * mask_h * mask_w);
+        for (size_t i = 0; i < mask.size(); ++i)
+            mask[i] = c.mask != 2 && (i % 11 < 7 || i % 23 == 0) ? 1 : 0;
+        float* d_rgb = own(upload(input_rgb));
+        float* d_ref = own(upload(ref));
+        float* d_depth = own(upload(depth));
+        float* d_Ts = own(upload(transmittance));
+        uint8_t* d_mask = c.mask ? own(upload(mask)) : nullptr;
+        int64_t* d_cameras = own(upload(std::vector<int64_t>(size_t(B), 3)));
+        std::array<float, (int)LossWeightIndex::length> weights{};
+        weights[(int)LossWeightIndex::RgbSupL1] = 0.7f;
+        weights[(int)LossWeightIndex::RgbSupL2] = 0.3f;
+        weights[(int)LossWeightIndex::YSupL2] = 0.2f;
+        weights[(int)LossWeightIndex::AlphaSup] = 0.15f;
+        weights[(int)LossWeightIndex::AlphaSupUnder] = 0.25f;
+        weights[(int)LossWeightIndex::AlphaReg] = c.identical_rgb ? 0.0f : 0.1f;
+        std::vector<float> v_loss((int)LossIndex::length, 1.0f);
+        v_loss[(int)LossIndex::RgbPSNR] = 0;
+        float* d_v_loss = own(upload(v_loss));
+        float* d_v_rgb = own(alloc_zero<float>(3 * np));
+        float* d_v_depth = own(alloc_zero<float>(np));
+        float* d_v_Ts = own(alloc_zero<float>(np));
+        float* d_map = own(alloc_zero<float>(np));
+        PerPixelGrads grads{};
+        grads.v_render_rgb = ttv(d_v_rgb, {B, c.H, c.W, 3});
+        grads.v_render_depth = ttv(d_v_depth, {B, c.H, c.W, 1});
+        grads.v_render_Ts = ttv(d_v_Ts, {B, c.H, c.W, 1});
+        std::vector<bool> needs(13, false);
+        needs[0] = needs[2] = needs[7] = true;
+        struct Result {
+            std::vector<float> rgb, depth, Ts, map, losses, raw;
+        };
+        using Phases = std::vector<std::vector<float>>;
+        auto run = [&](ImageStripContext strip) {
+            set_image_strip(std::move(strip));
+            std::vector<float> source;
+            const float* source_data = input_rgb.data();
+            if (image_strip().full_height) {
+                source = input_rgb;
+                source_data = source.data();
+                const auto rows = image_strip_rows(c.H);
+                for (int b = 0; b < B; ++b)
+                    for (uint32_t y = 0; y < c.H; ++y)
+                        if (y < rows.work_begin || y >= rows.work_end)
+                            std::fill_n(source.begin() +
+                                (size_t(b) * c.H + y) * c.W * 3, c.W * 3,
+                                std::numeric_limits<float>::quiet_NaN());
+            }
+            backend::memcpy_sync(d_rgb, source_data, input_rgb.size() * sizeof(float),
+                                 MemcpyKind::HostToDevice);
+            for (auto buffer : {std::pair<float*, int64_t>{d_v_rgb, 3 * np},
+                                {d_v_depth, np}, {d_v_Ts, np}, {d_map, np}})
+                backend::memset_sync(buffer.first, 0x3f,
+                                     size_t(buffer.second) * sizeof(float));
+            compute_multi_scale_per_pixel_losses(
+                int(c.scales), ttv(d_rgb, {B, c.H, c.W, 3}),
+                ttv(d_ref, {B, c.H, c.W, 3}),
+                ttv(d_depth, {B, c.H, c.W, 1}), ttv_null(), ttv_null(),
+                ttv_null(), ttv_null(), ttv(d_Ts, {B, c.H, c.W, 1}),
+                ttv_null(), ttv_null(), ttv_null(), ttv_null(), ttv_null(),
+                d_mask ? std::make_tuple(uint64_t(d_mask), uint32_t(1),
+                    std::vector<int64_t>{B, mask_h, mask_w, 1}) : ttv_null(),
+                c.mask != 0, weights, 0.2f, 0.98f,
+                ttv(d_v_loss, {(int)LossIndex::length}), needs, 4,
+                ttv(d_cameras, {B}), ttv(d_map, {B, c.H, c.W, 1}),
+                int(c.map_mode), 0.9f, 0.5f, grads);
+            Result result;
+            readback_f(result.rgb, d_v_rgb, 3 * np);
+            readback_f(result.depth, d_v_depth, np);
+            readback_f(result.Ts, d_v_Ts, np);
+            readback_f(result.map, d_map, np);
+            readback_f(result.losses, DevicePool::global().acquire<float>(
+                PoolSlot::PplTotalLosses, (int)LossIndex::length),
+                (int)LossIndex::length);
+            readback_f(result.losses, DevicePool::global().acquire<float>(
+                PoolSlot::SsimScalar, 1), 1);
+            readback_f(result.raw, DevicePool::global().acquire<float>(
+                PoolSlot::PplRawLosses, 5 * (int)RawLossIndex::length),
+                5 * (int)RawLossIndex::length);
+            return result;
+        };
+        std::printf("strip case=%s H=%u W=%u cut=%u scales=%u\n",
+                    c.name, c.H, c.W, c.cut, c.scales);
+        const Result native = run({});
+        const Result repeat = run({});
+        strip_compare("native_repeat_rgb", repeat.rgb, native.rgb);
+        Phases full;
+        auto capture = [&](Phases& phases, const Phases* add, Phases* local = nullptr) {
+            return [&, add, local](float* device, size_t count) {
+                phases.emplace_back(count);
+                backend::memcpy_sync(phases.back().data(), device, count * sizeof(float),
+                                     MemcpyKind::DeviceToHost);
+                if (local) local->push_back(phases.back());
+                if (add) {
+                    const size_t phase = phases.size() - 1;
+                    require(phase < add->size() && (*add)[phase].size() == count,
+                            "strip collective phase mismatch");
+                    for (size_t i = 0; i < count; ++i)
+                        phases.back()[i] += (*add)[phase][i];
+                    backend::memcpy_sync(device, phases.back().data(), count * sizeof(float),
+                                         MemcpyKind::HostToDevice);
+                }
+            };
+        };
+        const uint32_t halo = image_strip_halo(c.scales);
+        const Result active_full = run({c.H, 0, c.H, halo, capture(full, nullptr)});
+        strip_compare("active_full_rgb", active_full.rgb, native.rgb);
+        Phases partial_a, partial_b, global;
+        run({c.H, 0, c.cut, halo, capture(partial_a, nullptr)});
+        run({c.H, c.cut, c.H, halo, capture(global, &partial_a, &partial_b)});
+        require(global.size() == c.scales + 1 && full.size() == global.size() &&
+                partial_a.size() == global.size() && partial_b.size() == global.size(),
+                "strip collective phase count mismatch");
+        uint32_t phase_height = c.H;
+        for (size_t phase = 0; phase < global.size(); ++phase) {
+            char label[80];
+            std::snprintf(label, sizeof(label), "statistics.%s.scale%zu.phase%zu",
+                          phase == 1 ? "ssim" : "raw_rows", phase < 2 ? 0 : phase - 1, phase);
+            strip_compare(label, global[phase], full[phase], 0.03,
+                          phase == 1 ? 0 : size_t(phase_height));
+            if (phase != 1) phase_height = std::max(1u, phase_height / 2);
+        }
+        uint32_t height = c.H, width = c.W;
+        std::vector<float> expected_raw(5 * (int)RawLossIndex::length, 0.0f);
+        for (uint32_t scale = 0; scale < c.scales; ++scale) {
+            const auto& sum = global[scale == 0 ? 0 : scale + 1];
+            const auto& whole = full[scale == 0 ? 0 : scale + 1];
+            const auto& a_rows = partial_a[scale == 0 ? 0 : scale + 1];
+            const auto& b_rows = partial_b[scale == 0 ? 0 : scale + 1];
+            const uint32_t owned_cut = image_strip_rows(height).owned_begin;
+            require(sum.size() == size_t(B) * (int)RawLossIndex::length * height,
+                    "strip raw row-statistic extent mismatch");
+            for (int batch = 0; batch < B; ++batch)
+                for (uint32_t y = 0; y < height; ++y) {
+                    const size_t base = size_t(batch) * (int)RawLossIndex::length * height + y;
+                    require(sum[base + (int)RawLossIndex::PixelsTotal * height] == float(width),
+                            "strip pixel population is not the full logical row");
+                    for (int index = (int)RawLossIndex::PixelsTotal;
+                         index < (int)RawLossIndex::length; ++index)
+                        require(sum[base + index * height] == whole[base + index * height],
+                                "strip mask/alpha row population mismatch");
+                    for (int index = 0; index < (int)RawLossIndex::length; ++index) {
+                        const size_t element = base + index * height;
+                        require((y < owned_cut ? b_rows[element] : a_rows[element]) == 0,
+                                "strip raw statistic is not zero outside owned rows");
+                    }
+                }
+            if (scale + 1 == c.scales) {
+                for (int index = 0; index < (int)RawLossIndex::length; ++index) {
+                    double total = 0;
+                    for (int batch = 0; batch < B; ++batch)
+                        for (uint32_t y = 0; y < height; ++y)
+                            total += sum[(size_t(batch) * (int)RawLossIndex::length + index) *
+                                         height + y];
+                    const bool per_camera = index >= (int)RawLossIndex::DepthSupX &&
+                                            index <= (int)RawLossIndex::DepthSupXY;
+                    if (!per_camera) expected_raw[index] = float(total);
+                    if (per_camera || index == (int)RawLossIndex::DepthMaskTotal)
+                        expected_raw[4 * (int)RawLossIndex::length + index] = float(total);
+                }
+            }
+            height = std::max(1u, height / 2);
+            width = std::max(1u, width / 2);
+        }
+        strip_compare("routed_native_raw", native.raw, expected_raw, 0.03);
+        size_t phase = 0;
+        auto replay = [&](float* device, size_t count) {
+            require(phase < global.size() && global[phase].size() == count,
+                    "strip collective replay mismatch");
+            backend::memcpy_sync(device, global[phase].data(), count * sizeof(float),
+                                 MemcpyKind::HostToDevice);
+            ++phase;
+        };
+        const Result a = run({c.H, 0, c.cut, halo, replay});
+        require(phase == global.size(), "strip A missed collective");
+        phase = 0;
+        const Result b = run({c.H, c.cut, c.H, halo, replay});
+        require(phase == global.size(), "strip B missed collective");
+        auto combine = [](const std::vector<float>& a, const std::vector<float>& b) {
+            std::vector<float> sum(a.size());
+            for (size_t i = 0; i < sum.size(); ++i) sum[i] = a[i] + b[i];
+            return sum;
+        };
+        auto check_ownership = [&](const Result& result, uint32_t begin, uint32_t end) {
+            for (int batch = 0; batch < B; ++batch)
+                for (uint32_t y = 0; y < c.H; ++y)
+                    if (y < begin || y >= end)
+                        for (uint32_t x = 0; x < c.W; ++x) {
+                            const size_t i = (size_t(batch) * c.H + y) * c.W + x;
+                            require(result.depth[i] == 0 && result.Ts[i] == 0 &&
+                                    result.map[i] == 0, "strip scalar halo output is not zero");
+                            for (int k = 0; k < 3; ++k)
+                                require(result.rgb[3 * i + k] == 0,
+                                        "strip RGB halo output is not zero");
+                        }
+        };
+        check_ownership(a, 0, c.cut);
+        check_ownership(b, c.cut, c.H);
+        strip_compare("combined_rgb", combine(a.rgb, b.rgb), native.rgb);
+        strip_compare("combined_depth", combine(a.depth, b.depth), native.depth);
+        strip_compare("combined_Ts", combine(a.Ts, b.Ts), native.Ts);
+        strip_compare("combined_map", combine(a.map, b.map), native.map);
+        strip_compare("global_losses_A", a.losses, native.losses, 2e-5);
+        strip_compare("global_losses_B", b.losses, native.losses, 2e-5);
+        strip_compare("routed_raw_A", a.raw, expected_raw, 0.03);
+        strip_compare("routed_raw_B", b.raw, expected_raw, 0.03);
+        strip_compare("global_ssim_A", {a.losses.back()}, {native.losses.back()});
+        strip_compare("global_ssim_B", {b.losses.back()}, {native.losses.back()});
+        if (c.identical_rgb)
+            strip_compare("identity_ssim", {native.losses.back()}, {1.0f});
+        set_image_strip({});
+        for (void* pointer : allocations) backend::device_free(pointer);
+    }
+    std::puts("msloss_parity: STRIP PASSED");
+    return 0;
+}
+#endif
+
 int main(int argc, char** argv) {
+#ifdef SS_BACKEND_VULKAN
+    if (argc == 2 && std::strcmp(argv[1], "strip") == 0) {
+        try { return run_strip_checks(); }
+        catch (const std::exception& error) {
+            backend::vk::set_image_strip({});
+            std::fprintf(stderr, "msloss_parity: STRIP FAILED: %s\n", error.what());
+            return 1;
+        }
+    }
+#endif
     if (argc != 3 ||
         (std::strcmp(argv[1], "dump") && std::strcmp(argv[1], "compare"))) {
-        std::fprintf(stderr, "usage: %s dump|compare <ref.bin>\n", argv[0]);
+        std::fprintf(stderr, "usage: %s dump|compare <ref.bin> | strip\n", argv[0]);
         return 2;
     }
     const bool dumping = std::strcmp(argv[1], "dump") == 0;

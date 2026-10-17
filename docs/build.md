@@ -9,10 +9,10 @@ glob patterns relative to the repo root, read line-by-line by
 `cmake/SsSources.cmake`. Adding a source directory means editing that file
 once.
 
-Two files that belong to `src/app/` are in that list on purpose:
-`app/webviewer/*.cpp` and `app/TrainerCore.cpp`. They live in the engine
-library so every app target shares one build of them rather than each
-compiling its own copy.
+Shared `src/app/` sources—including `app/webviewer/*.cpp`,
+`app/TrainerCore.cpp`, `app/AppPaths.cpp` and `app/ImageStripExecutor.cpp`—are
+in that list on purpose. They live in the common engine library so app and
+test targets reuse one implementation rather than compiling runtime copies.
 
 Always build through the dev scripts.
 

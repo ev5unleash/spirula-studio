@@ -5,6 +5,7 @@
 #include "app/WorkerRequest.h"
 #include "app/TextFile.h"
 #include "app/B1Group.h"
+#include "app/ImageStripExecutor.h"
 #include "core/Env.h"
 
 #ifdef SS_TOOL_SFM
@@ -280,6 +281,8 @@ int run_tool_phase(const app::worker::Request& r, app::worker::Result& result) {
 }  // namespace
 
 int spirula_worker_main(int argc, char** argv) {
+    if (argc > 1 && std::strcmp(argv[1], "--image-strip") == 0)
+        return app::image_strip_worker_main(argc, argv);
     if (argc < 3 || std::strcmp(argv[1], "--request") != 0) {
         std::fprintf(stderr, "usage: spirula worker --request <file>\n");
         return 2;

@@ -6,7 +6,11 @@
 #include "core/Sha256.h"
 #include <map>
 #include "checkpoint/Resume.h"
+#include "checkpoint/Adapt.h"
+#include "backend/vulkan/kernels/PpispBackward.h"
 #include "backend/vulkan/kernels/B1Ownership.h"
+#include "backend/vulkan/kernels/ImageStrip.h"
+#include "app/ImageStripExecutor.h"
 #include "core/Env.h"
 #include "kernels/pixelwise/PixelWise.cuh"
 #include "data/DataManager.h"
@@ -24,6 +28,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <initializer_list>
 #include <stdexcept>
 #include <limits>
 #include <set>
@@ -2541,6 +2546,1143 @@ void ppisp_price(int argc, char** argv) {
                <<std::quoted(error.what())<<"}\n";
             log.close();
         }
+        throw;
+    }
+}
+
+void ordinary_source_setup(spirula::TrainerSession& session, const char* checkpoint,
+                           const char* device, const fs::path& output, bool publish_config = false) {
+    need(backend::device_select_identity(device), "ordinary source device unavailable");
+    const auto source = ckpt::resolve_checkpoint(checkpoint);
+    need(!spirula::env("B1_OWNER") && !ckpt::read_b1_contract(source.ckpt_dir),
+         "ordinary source proof requires a native source without B1");
+    TrainConfig cli; cli.resume = source.ckpt_dir.string();
+    session.cfg = ckpt::build_resume_config(cli, "", {});
+    session.write_config_json = publish_config;
+    session.out_dir_override = output.string();
+    session.check_config();
+    session.load_dataset();
+    // Refuse layout conversion before loading any source state.
+    const std::string resume = session.cfg.resume;
+    session.cfg.resume.clear();
+    session.setup_engine();
+    session.cfg.resume = resume;
+    ckpt::TargetLayout target;
+    const auto& cfg = session.cfg;
+    const auto optim = engine_resolve_managed_step_config(
+        spirula::build_step_config(cfg, session.st, 0)).optim;
+    target.max_num_splats = engine_get_max_num_splats();
+    target.num_sh = (cfg.sh_degree + 1) * (cfg.sh_degree + 1) - 1;
+    target.num_images = (int)session.post.n_post;
+    target.sh_optim_bits = optim.sh_optim_bits;
+    target.sh_value_bits = optim.sh_value_bits;
+    target.non_sh_optim_bits = optim.non_sh_optim_bits;
+    target.use_fused_proj_bwd_optim = optim.use_fused_proj_bwd_optim;
+    target.use_per_splat_bias_correction = optim.use_per_splat_bias_correction;
+    target.background_sh = cfg.background_mode == "sh";
+    target.background_sh_degree = cfg.background_sh_degree;
+    target.bilagrid_optim_bits = optim.sh_optim_bits;
+    target.bilagrid_value_bits = optim.sh_value_bits;
+    target.bilagrid_use_adagrad = cfg.use_adagrad_bilagrid_optim;
+    target.bilagrid_type = cfg.bilagrid_type;
+    auto lhw = [](const std::array<int, 3>& xyz) {
+        return std::array<int, 3>{xyz[2], xyz[1], xyz[0]};
+    };
+    if (session.st.bilagrid_rgb_init) target.bilagrid_rgb = lhw(cfg.bilagrid_shape);
+    if (session.st.bilagrid_depth_init) target.bilagrid_depth = lhw(cfg.bilagrid_shape_geometry);
+    if (session.st.bilagrid_normal_init) target.bilagrid_normal = lhw(cfg.bilagrid_shape_geometry);
+    target.ppisp = session.st.ppisp_init;
+    if (target.ppisp) target.ppisp_param_type = cfg.ppisp_param_type.empty() ? "original" : cfg.ppisp_param_type;
+    target.ppisp_use_adagrad = cfg.use_adagrad_ppisp_optim;
+    need(!ckpt::needs_adapt(ckpt::read_state_json(source.ckpt_dir), target),
+         "ordinary source proof refuses checkpoint layout adaptation");
+    (void)session.restore_checkpoint();
+}
+
+void ppisp_source_price(int argc, char** argv) {
+    need(argc == 8 && std::strcmp(argv[2], "--resume") == 0 &&
+         std::strcmp(argv[4], "--device") == 0 && std::strcmp(argv[6], "--output") == 0,
+         "usage: ppisp-source-price --resume CHECKPOINT --device SELECTOR --output NEW_DIRECTORY");
+    const fs::path root = argv[7];
+    need(fs::create_directory(root), "PPISP source price output must be fresh");
+    std::ofstream log(root / "ppisp-source-price.jsonl", std::ios::binary);
+    need(bool(log), "PPISP source price log open failed");
+    log << std::setprecision(17);
+    spirula::TrainerSession session;
+    struct Cleanup {
+        ~Cleanup() { engine_diagnostic_ppisp_probe({}); }
+    } cleanup;
+    auto checked_sync = [] {
+        backend::device_synchronize();
+        if (const char* error = backend::last_error()) throw std::runtime_error(error);
+    };
+    int captures = 0, completed_step = -1;
+    bool exact = true, gradients_finite = true, borrowed_unchanged = false;
+    try {
+        ordinary_source_setup(session, argv[3], argv[5], root / "session");
+        const auto& cfg = session.cfg;
+        const int step = session.start_step;
+        need(step >= 0 && step < cfg.max_steps.value_or(cfg.num_iterations) &&
+             step < cfg.num_iterations && engine().b1.owner < 0 && !engine().b1.contract &&
+             engine().ppisp.enabled, "PPISP source price needs an active native PPISP training step");
+        log << "{\"type\":\"ppisp_source_price_scope\",\"device\":" << std::quoted(backend::device_current_selector())
+            << ",\"source_step\":" << step << ",\"num_iterations\":" << cfg.num_iterations
+            << ",\"max_steps\":" << cfg.max_steps.value_or(cfg.num_iterations)
+            << ",\"train_views\":" << session.ds.train_indices.size()
+            << ",\"post_cameras\":" << session.post.n_post
+            << ",\"warm_pairs\":1,\"measured_pairs\":3,\"staged_replays\":4"
+               ",\"timing_scope\":\"launcher_plus_device_sync_ms\",\"reset_readback_validation_outside_timing\":true"
+               ",\"native_appearance_topology\":true,\"statistical_significance_claim\":false"
+               ",\"comparison_scope\":\"same_captured_call_only\",\"cross_device_equivalence_claim\":false"
+               ",\"first_warm_includes_cold_pipeline\":true}\n";
+        engine_diagnostic_ppisp_probe([&](uint64_t image_ptr, uint64_t params, uint64_t intr,
+            uint64_t cams, uint64_t cot, int B, int H, int W, int N, int P,
+            float aw, float ah, std::string_view param_type) {
+            need(++captures == 1, "PPISP source price expected exactly one native callback");
+            const std::string type(param_type);
+            need(B > 0 && H > 0 && W > 0 && N > 0 && P > 0 &&
+                 ppisp_param_spec(type).num_params == P && std::isfinite(aw) && aw > 0 &&
+                 std::isfinite(ah) && ah > 0, "PPISP source price callback dimensions invalid");
+            auto bytes = [](std::initializer_list<size_t> dims) {
+                size_t n = sizeof(float);
+                for (size_t d : dims) {
+                    need(d && n <= std::numeric_limits<size_t>::max() / d,
+                         "PPISP source price dimension product overflow");
+                    n *= d;
+                }
+                return n;
+            };
+            const size_t image_bytes = bytes({size_t(B), size_t(H), size_t(W), 3});
+            const std::array<size_t, 5> sizes{image_bytes, bytes({size_t(N), size_t(P)}),
+                bytes({size_t(B), 4}), cams ? bytes({size_t(B)}) : 0, image_bytes};
+            const std::array<uint64_t, 5> borrowed{image_ptr, params, intr, cams, cot};
+            std::vector<void*> allocations; allocations.reserve(10);
+            struct Release {
+                std::vector<void*>& allocations;
+                ~Release() { for (void* p : allocations) backend::device_free(p); }
+            } release{allocations};
+            auto allocate = [&](size_t n) {
+                if (!n) return (void*)nullptr;
+                void* p = backend::device_malloc(n);
+                need(p != nullptr, "PPISP source price private allocation failed");
+                allocations.push_back(p); return p;
+            };
+            std::array<void*, 5> input{};
+            for (size_t i = 0; i < input.size(); ++i) {
+                need(borrowed[i] || !sizes[i], "PPISP source price borrowed input absent");
+                input[i] = allocate(sizes[i]);
+                if (sizes[i]) backend::memcpy_sync(input[i], (const void*)borrowed[i],
+                    sizes[i], backend::MemcpyKind::DeviceToDevice);
+            }
+            checked_sync();
+            Fields original;
+            for (size_t i = 0; i < input.size(); ++i)
+                original.push_back(copy_device(input[i], sizes[i]));
+            const size_t scratch_floats = backend::vk::ppisp_backward_staged_scratch_floats(B, H, W, type);
+            need(scratch_floats && scratch_floats <= std::numeric_limits<size_t>::max() / sizeof(float),
+                 "PPISP source price staged scratch size invalid");
+            auto* scratch = (float*)allocate(scratch_floats * sizeof(float));
+            std::array<void*, 3> outputs{allocate(image_bytes), allocate(image_bytes), allocate(image_bytes)};
+            void* grad = allocate(sizes[1]);
+            auto image = [&](void* p) { return DeviceTensor3D<float3>(tv(p, 4, {B, H, W, 3})); };
+            const auto camera_view = cams ? tv(input[3], 4, {B}) : nil();
+            log << "{\"type\":\"ppisp_source_price_input\",\"B\":" << B << ",\"H\":" << H
+                << ",\"W\":" << W << ",\"N\":" << N << ",\"P\":" << P
+                << ",\"actual_width\":" << aw << ",\"actual_height\":" << ah
+                << ",\"param_type\":" << std::quoted(type) << ",\"image_bytes\":" << image_bytes
+                << ",\"staged_scratch_bytes\":" << scratch_floats * sizeof(float)
+                << ",\"camera_indices\":[";
+            for (int b = 0; cams && b < B; ++b) {
+                int32_t id; std::memcpy(&id, original[3].data() + size_t(b) * 4, 4);
+                need(id >= 0 && id < N, "PPISP source price camera index out of range");
+                log << (b ? "," : "") << id;
+            }
+            log << "],\"indexed\":" << (cams ? "true" : "false") << ",\"intrinsics\":[";
+            for (size_t i = 0; i < original[2].size(); i += 4) {
+                float v; std::memcpy(&v, original[2].data() + i, 4);
+                need(std::isfinite(v), "PPISP source price nonfinite intrinsics");
+                log << (i ? "," : "") << v;
+            }
+            log << "],\"input_field_sha256\":[";
+            for (size_t i = 0; i < original.size(); ++i)
+                log << (i ? "," : "") << std::quoted(backward_sha(original[i]));
+            log << "],\"input_field_order\":[\"pre_rgb\",\"params\",\"intrinsics\",\"camera_indices\",\"incoming_cotangent\"]"
+                   ",\"actual_sub_batches\":[";
+            const auto* actual = engine_diagnostic_ppisp_input();
+            need(actual != nullptr, "PPISP source price actual native input witness absent");
+            for (size_t i = 0; i < actual->subs.size(); ++i) {
+                need(bool(actual->subs[i]), "PPISP source price actual sub-batch absent");
+                const auto& batch = *actual->subs[i];
+                log << (i ? "," : "") << "{\"width\":" << batch.width << ",\"height\":" << batch.height
+                    << ",\"num\":" << batch.num << ",\"indices\":[";
+                for (size_t j = 0; j < batch.indices.size(); ++j)
+                    log << (j ? "," : "") << batch.indices[j];
+                log << "],\"post_offsets\":[";
+                for (size_t j = 0; j < batch.post_offsets.size(); ++j)
+                    log << (j ? "," : "") << batch.post_offsets[j];
+                log << "]}";
+            }
+            log << "]}\n";
+            struct Difference {
+                size_t different = 0, nonfinite = 0;
+                double maxabs = 0, square = 0, refsq = 0;
+                void add(const uint8_t* a, const uint8_t* b) {
+                    different += std::memcmp(a, b, 4) != 0;
+                    float x, y; std::memcpy(&x, a, 4); std::memcpy(&y, b, 4);
+                    if (!std::isfinite(x) || !std::isfinite(y)) { ++nonfinite; return; }
+                    const double delta = double(x) - y;
+                    maxabs = std::max(maxabs, std::abs(delta));
+                    square += delta * delta; refsq += double(x) * x;
+                }
+                void write(std::ostream& out) const {
+                    out << "{\"different_bits_elements\":" << different << ",\"nonfinite_pairs\":" << nonfinite
+                        << ",\"maxabs\":" << maxabs << ",\"relRMS\":" << std::sqrt(square / std::max(refsq, 1e-30)) << "}";
+                }
+            };
+            std::array<Bytes, 4> native_grads, staged_grads;
+            auto launch = [&](int arm) {
+                backend::memcpy_sync(outputs[arm], input[4], image_bytes, backend::MemcpyKind::DeviceToDevice);
+                backend::memset_sync(grad, 0, sizes[1]);
+                checked_sync();
+                const auto start = Clock::now();
+                if (arm == 2) {
+                    backend::vk::ppisp_backward_staged(image(input[0]), tv(input[1], 4, {N, P}),
+                        tv(input[2], 4, {B, 4}), aw, ah, image(outputs[arm]), type, camera_view,
+                        image(outputs[arm]), tv(grad, 4, {N, P}), scratch, scratch_floats);
+                } else {
+                    ppisp_backward(image(input[0]), tv(input[1], 4, {N, P}), tv(input[2], 4, {B, 4}),
+                        aw, ah, image(outputs[arm]), type, camera_view, image(outputs[arm]),
+                        arm == 0 ? tv(grad, 4, {N, P}) : nil());
+                }
+                checked_sync();
+                const double ms = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+                need(std::isfinite(ms) && ms > 0, "PPISP source price invalid elapsed time");
+                return ms;
+            };
+            for (int pair = 0; pair < 4; ++pair) {
+                const bool joint_first = pair % 2 == 0;
+                const std::array<int, 3> order = joint_first ? std::array<int, 3>{0, 1, 2}
+                                                            : std::array<int, 3>{2, 1, 0};
+                std::array<double, 3> ms{};
+                for (int arm : order) {
+                    ms[arm] = launch(arm);
+                    if (arm == 0) native_grads[pair] = copy_device(grad, sizes[1]);
+                    if (arm == 2) staged_grads[pair] = copy_device(grad, sizes[1]);
+                }
+                const Bytes joint = copy_device(outputs[0], image_bytes);
+                Difference rgb, staged_rgb;
+                for (int arm : {1, 2}) {
+                    const Bytes other = copy_device(outputs[arm], image_bytes);
+                    auto& delta = arm == 1 ? rgb : staged_rgb;
+                    for (size_t i = 0; i < image_bytes; i += 4) delta.add(joint.data() + i, other.data() + i);
+                    exact &= delta.different == 0 && delta.nonfinite == 0;
+                }
+                log << "{\"type\":\"ppisp_source_price_pair\",\"warm\":" << (pair == 0 ? "true" : "false")
+                    << ",\"pair\":" << (pair == 0 ? 0 : pair - 1)
+                    << ",\"order\":" << std::quoted(joint_first ? "joint_null_staged" : "staged_null_joint")
+                    << ",\"joint_ms\":" << ms[0] << ",\"null_ms\":" << ms[1] << ",\"staged_ms\":" << ms[2]
+                    << ",\"joint_over_null\":" << ms[0] / ms[1] << ",\"joint_over_staged\":" << ms[0] / ms[2]
+                    << ",\"joint_null_rgb\":"; rgb.write(log);
+                log << ",\"joint_staged_rgb\":"; staged_rgb.write(log); log << "}\n";
+                log.flush(); need(bool(log), "PPISP source price pair write failed");
+            }
+            auto compare_gradients = [&](const char* kind, int reference, int candidate,
+                                         const Bytes& a, const Bytes& b) {
+                Difference total; std::vector<Difference> columns((size_t)P);
+                for (size_t i = 0; i < sizes[1]; i += 4) {
+                    total.add(a.data() + i, b.data() + i);
+                    columns[(i / 4) % size_t(P)].add(a.data() + i, b.data() + i);
+                }
+                gradients_finite &= total.nonfinite == 0;
+                log << "{\"type\":\"ppisp_source_price_gradient\",\"comparison\":" << std::quoted(kind)
+                    << ",\"reference_replay\":" << reference << ",\"candidate_replay\":" << candidate
+                    << ",\"elements\":" << sizes[1] / 4 << ",\"summary\":";
+                total.write(log); log << ",\"per_parameter\":[";
+                for (int p = 0; p < P; ++p) { if (p) log << ","; columns[p].write(log); }
+                log << "]}\n";
+            };
+            for (int i = 0; i < 4; ++i) {
+                compare_gradients("native_vs_staged", i, i, native_grads[i], staged_grads[i]);
+                for (int j = i + 1; j < 4; ++j)
+                    compare_gradients("native_repeat_noise", i, j, native_grads[i], native_grads[j]);
+            }
+            borrowed_unchanged = true;
+            for (size_t i = 0; i < input.size(); ++i) {
+                const bool same = copy_device((const void*)borrowed[i], sizes[i]) == original[i];
+                const bool private_same = copy_device(input[i], sizes[i]) == original[i];
+                borrowed_unchanged &= same && private_same;
+            }
+            checked_sync();
+            need(borrowed_unchanged, "PPISP source price mutated borrowed or immutable private inputs");
+        });
+        (void)session.train_step(step);
+        engine_diagnostic_ppisp_probe({});
+        checked_sync();
+        completed_step = step + 1;
+        need(captures == 1, "PPISP source price native step did not invoke one callback");
+        log << "{\"type\":\"ppisp_source_price_result\",\"native_updates\":1,\"native_completed_step\":"
+            << completed_step << ",\"captures\":" << captures
+            << ",\"borrowed_inputs_unchanged\":" << (borrowed_unchanged ? "true" : "false")
+            << ",\"all_rgb_exact_finite\":" << (exact ? "true" : "false")
+            << ",\"all_parameter_gradients_finite\":" << (gradients_finite ? "true" : "false")
+            << ",\"parameter_gradient_exactness_required\":false,\"parameter_gradient_qualification\":false,\"accepted\":"
+            << (exact && gradients_finite && borrowed_unchanged ? "true" : "false") << "}\n";
+        log.flush(); need(bool(log), "PPISP source price result write failed");
+        need(exact && gradients_finite, "PPISP source price RGB equality/gradient finiteness failed");
+        log.close(); need(bool(log), "PPISP source price log close failed");
+        source_close(session);
+    } catch (const std::exception& error) {
+        engine_diagnostic_ppisp_probe({});
+        log << "{\"type\":\"ppisp_source_price_failure\",\"native_completed_step\":" << completed_step
+            << ",\"error\":" << std::quoted(error.what()) << "}\n";
+        log.close();
+        source_close(session);
+        throw;
+    }
+}
+
+struct StripProofBuffer {
+    std::string name;
+    const void* ptr;
+    size_t bytes;
+    bool floating = true;
+};
+struct StripProofArray {
+    std::string name;
+    Bytes bytes;
+    bool floating;
+};
+using StripProofArrays = std::vector<StripProofArray>;
+
+std::vector<StripProofBuffer> strip_appearance_buffers() {
+    const auto& e = engine();
+    std::vector<StripProofBuffer> fields;
+    auto tensor = [&](const std::string& name, const auto& t) {
+        fields.push_back({name, t.data_ptr(),
+            t.data_ptr() ? size_t(t.numel()) * sizeof(*t.data_ptr()) : 0});
+    };
+    tensor("ppisp.params", e.ppisp.params);
+    tensor("ppisp.g1", e.ppisp.g1);
+    tensor("ppisp.g2", e.ppisp.g2);
+    tensor("ppisp.accum", e.ppisp.accum_f);
+    if (e.bilagrid_rgb.enabled) {
+        const auto& g = e.bilagrid_rgb;
+        tensor("bilagrid.values", g.grids);
+        tensor("bilagrid.g1", g.g1);
+        tensor("bilagrid.g2", g.g2);
+        tensor("bilagrid.accum", g.accum_f);
+        auto quant = [&](const std::string& name, const auto& q) {
+            if (!q.initialized()) return;
+            fields.push_back({name + ".codes", q.packed_ptr(), size_t(q.packed_bytes()), false});
+            fields.push_back({name + ".bounds", q.bounds_ptr(),
+                size_t(q.n_bounds) * sizeof(*q.bounds_ptr())});
+        };
+        quant("bilagrid.value_quant", g.grids_quant);
+        quant("bilagrid.optim_quant", g.quant_state);
+        quant("bilagrid.adagrad_quant", g.adagrad_quant);
+    }
+    return fields;
+}
+
+bool strip_proof_compare(std::ostream& out, const StripProofArrays& reference,
+                         const StripProofArrays& actual, const std::string& comparison,
+                         size_t owned_pixels = 0, bool update_observation = false) {
+    need(reference.size() == actual.size(), "strip proof array count changed");
+    bool accepted = true;
+    for (size_t f = 0; f < reference.size(); ++f) {
+        const auto& a = reference[f]; const auto& b = actual[f];
+        need(a.name == b.name && a.floating == b.floating && a.bytes.size() == b.bytes.size(),
+             "strip proof named array layout changed");
+        size_t bytes = a.bytes.size();
+        if (owned_pixels && a.name == "render.authority_rgb") bytes = owned_pixels * 3 * 4;
+        if (owned_pixels && a.name == "render.authority_last_ids") bytes = owned_pixels * 4;
+        need(bytes <= a.bytes.size(), "strip proof owned render exceeds full image");
+        const bool exact = !a.floating || a.name == "render.authority_rgb";
+        const bool raster = a.name.rfind("raster.", 0) == 0;
+        size_t different_bytes = 0, different = 0, nonfinite = 0, outside = 0, zero_nonzero = 0;
+        double maxabs = 0, squared = 0, refsq = 0;
+        for (size_t i = 0; i < bytes; ++i) different_bytes += a.bytes[i] != b.bytes[i];
+        if (a.floating) {
+            need(bytes % 4 == 0, "strip proof float alignment");
+            for (size_t i = 0; i < bytes; i += 4) {
+                float x, y;
+                std::memcpy(&x, a.bytes.data() + i, 4);
+                std::memcpy(&y, b.bytes.data() + i, 4);
+                different += std::memcmp(a.bytes.data() + i, b.bytes.data() + i, 4) != 0;
+                if (!std::isfinite(x) || !std::isfinite(y)) { ++nonfinite; continue; }
+                const double d = std::abs(double(x) - y);
+                maxabs = std::max(maxabs, d);
+                squared += d * d;
+                refsq += double(x) * x;
+                zero_nonzero += x == 0 && y != 0;
+                outside += d > (raster ? 3e-4 + .003 * std::max(std::abs(double(x)), std::abs(double(y))) : 1e-6);
+            }
+        }
+        if (!a.floating) {
+            const size_t stride = bytes % 4 == 0 && a.name == "render.authority_last_ids" ? 4 : 1;
+            for (size_t i = 0; i < bytes; i += stride)
+                different += std::memcmp(a.bytes.data() + i, b.bytes.data() + i, stride) != 0;
+        }
+        const double relative = std::sqrt(squared / std::max(refsq, 1e-30));
+        const bool zero_ok = refsq != 0 || maxabs == 0;
+        const bool inactive_camera_zero = a.name != "appearance.ppisp_data" || zero_nonzero == 0;
+        const bool numerical = raster
+            ? outside == 0 && maxabs <= 1e-4 + 1e-4 * std::sqrt(refsq) && relative <= 5e-4
+            : outside == 0 && relative <= 1e-3;
+        const bool pass = nonfinite == 0 && (update_observation ||
+            (exact ? different_bytes == 0 : numerical && zero_ok && inactive_camera_zero));
+        accepted &= pass;
+        out << "{\"type\":\"image_strip_comparison\",\"comparison\":" << std::quoted(comparison)
+            << ",\"field\":" << std::quoted(a.name) << ",\"bytes\":" << bytes
+            << ",\"floating\":" << (a.floating ? "true" : "false")
+            << ",\"different_bytes\":" << different_bytes << ",\"different_bits_elements\":" << different
+            << ",\"nonfinite_pairs\":" << nonfinite << ",\"maxabs\":" << maxabs
+            << ",\"relRMS\":" << relative << ",\"reference_squared_norm\":" << refsq
+            << ",\"diagnostic_outside\":" << outside << ",\"zero_reference_nonzero_elements\":" << zero_nonzero
+            << ",\"zero_array_invariant\":" << (zero_ok ? "true" : "false")
+            << ",\"update_observation_only\":" << (update_observation ? "true" : "false")
+            << ",\"accepted\":" << (pass ? "true" : "false") << "}\n";
+        if (!pass && a.floating && a.name == "loss.weighted") {
+            static constexpr std::array<const char*, 14> names{
+                "RgbLoss", "RgbPSNR", "DepthSup", "NormalSup", "AlphaSup", "NormalReg", "AlphaReg",
+                "RgbDistReg", "DepthDistReg", "NormalDistReg", "MeanMedianDepthSup",
+                "MedianDepthNormalReg", "MedianNormalSup", "MedianRenderNormalReg"};
+            static_assert(names.size() == size_t(LossIndex::length), "weighted loss diagnostic names changed");
+            need(bytes == names.size() * 4, "weighted loss diagnostic extent changed");
+            for (size_t index = 0; index < names.size(); ++index) {
+                float x, y;
+                std::memcpy(&x, a.bytes.data() + index * 4, 4);
+                std::memcpy(&y, b.bytes.data() + index * 4, 4);
+                const bool finite = std::isfinite(x) && std::isfinite(y);
+                out << "{\"type\":\"image_strip_loss_failure_entry\",\"comparison\":" << std::quoted(comparison)
+                    << ",\"field\":" << std::quoted(a.name) << ",\"index\":" << index
+                    << ",\"loss_index\":" << std::quoted(names[index]) << ",\"reference\":";
+                if (std::isfinite(x)) out << x; else out << "null";
+                out << ",\"candidate\":";
+                if (std::isfinite(y)) out << y; else out << "null";
+                out << ",\"candidate_minus_reference\":";
+                if (finite) out << double(y) - x; else out << "null";
+                out << ",\"abs_delta\":";
+                if (finite) out << std::abs(double(y) - x); else out << "null";
+                out << ",\"finite_pair\":" << (finite ? "true" : "false")
+                    << ",\"different_bits\":" << (std::memcmp(&x, &y, 4) != 0 ? "true" : "false")
+                    << ",\"outside_unchanged_abs_gate\":"
+                    << (!finite || std::abs(double(y) - x) > 1e-6 ? "true" : "false") << "}\n";
+            }
+        }
+    }
+    return accepted;
+}
+
+void image_strip_source_proof(int argc, char** argv) {
+    need((argc == 10 || argc == 12) && std::strcmp(argv[2], "--resume") == 0 &&
+         std::strcmp(argv[4], "--device") == 0 && std::strcmp(argv[6], "--worker-device") == 0 &&
+         std::strcmp(argv[8], "--output") == 0 &&
+         (argc == 10 || std::strcmp(argv[10], "--input-index") == 0),
+         "usage: image-strip-source-proof --resume CHECKPOINT --device uuid:A --worker-device uuid:B --output NEW_DIRECTORY [--input-index INDEX]");
+    int input_index = -1;
+    if (argc == 12) {
+        const std::string token = argv[11];
+        need(!token.empty() && token.find_first_not_of("0123456789") == std::string::npos,
+             "strip proof input index must be a nonnegative integer");
+        const uint64_t parsed = std::stoull(token);
+        need(parsed <= uint64_t(std::numeric_limits<int32_t>::max()), "strip proof input index exceeds int32");
+        input_index = int(parsed);
+    }
+    need(std::string(argv[5]).rfind("uuid:", 0) == 0 && std::string(argv[7]).rfind("uuid:", 0) == 0,
+         "strip source proof requires two explicit device UUIDs");
+    const std::string authority = backend::device_resolve_identity(argv[5]);
+    const std::string worker = backend::device_resolve_identity(argv[7]);
+    need(!authority.empty() && !worker.empty() && authority != worker,
+         "strip source proof requires two distinct available devices");
+    const fs::path root = argv[9];
+    need(fs::create_directory(root), "strip source proof output must be fresh");
+    std::ofstream log(root / "image-strip-source-proof.jsonl", std::ios::binary);
+    need(bool(log), "strip source proof log open failed");
+    log << std::setprecision(17);
+    struct Environment {
+        explicit Environment(const std::string& value) {
+            const char* inherited = spirula::env("IMAGE_STRIP_WORKER_DEVICE");
+            need(!inherited || !*inherited, "strip proof requires a clean worker environment; use --worker-device");
+#ifdef _WIN32
+            need(_putenv_s("SS_IMAGE_STRIP_WORKER_DEVICE", value.c_str()) == 0, "strip worker environment failed");
+#else
+            need(setenv("SS_IMAGE_STRIP_WORKER_DEVICE", value.c_str(), 1) == 0, "strip worker environment failed");
+#endif
+        }
+        ~Environment() {
+#ifdef _WIN32
+            _putenv_s("SS_IMAGE_STRIP_WORKER_DEVICE", "");
+#else
+            unsetenv("SS_IMAGE_STRIP_WORKER_DEVICE");
+#endif
+        }
+    } environment(worker);
+    spirula::TrainerSession session;
+    int forks = 0, joins = 0, pixel_audits = 0, completed_step = -1;
+    bool numerical = true;
+    try {
+        session.diagnostic_sync_sampler = true;
+        ordinary_source_setup(session, argv[3], argv[5], root / "session", true);
+        const int step = session.start_step;
+        const auto& cfg = session.cfg;
+        need(step >= 0 && step < cfg.num_iterations && step < cfg.max_steps.value_or(cfg.num_iterations) &&
+             engine().primitive == "3dgs" && engine().packed && engine().ppisp.enabled &&
+             engine().bilagrid_rgb.enabled && !engine().image_strip_worker && cfg.save_full_checkpoint &&
+             engine().b1.owner < 0 && !engine().b1.contract &&
+             bool(engine().image_strip_fork) && bool(engine().image_strip_join),
+             "strip source proof requires the active ordinary packed 3DGS/PPISP/bilagrid strip authority");
+        TrainStep replay_input;
+        if (input_index >= 0) {
+            need(std::find(session.ds.train_indices.begin(), session.ds.train_indices.end(), input_index) !=
+                 session.ds.train_indices.end(), "strip proof forced input must belong to the source training set");
+            auto decoded = std::make_shared<DecodedBatch>();
+            engine().dm->fetch_one(input_index, *decoded);
+            need(decoded->indices.size() == 1 && decoded->indices[0] == input_index &&
+                 decoded->input_num == 1 && decoded->num == 1 &&
+                 decoded->depth_buffer.empty() && decoded->normal_buffer.empty(),
+                 "strip proof forced input must retain the current one-camera RGB/mask lane");
+            replay_input.subs.push_back(std::move(decoded));
+        }
+        const std::string config_hash = ckpt::b1_config_hash(cfg);
+        log << "{\"type\":\"image_strip_scope\",\"authority\":" << std::quoted(authority)
+            << ",\"worker\":" << std::quoted(worker) << ",\"source_step\":" << step
+            << ",\"input_policy\":" << std::quoted(input_index < 0 ? "ordinary_sampler" : "diagnostic_forced_input")
+            << ",\"diagnostic_input_index\":" << (input_index < 0 ? "null" : std::to_string(input_index))
+            << ",\"sampler_mode\":\"quiescent_diagnostic_sync\",\"ordinary_async_sampling_coverage_claim\":false"
+            << ",\"horizon\":" << cfg.num_iterations << ",\"max_steps\":" << cfg.max_steps.value_or(cfg.num_iterations)
+            << ",\"train_views\":" << session.ds.train_indices.size() << ",\"eval_views\":" << session.ds.val_indices.size()
+            << ",\"post_cameras\":" << session.post.n_post << ",\"config_sha256\":" << std::quoted(config_hash)
+            << ",\"source_state_sha256\":" << std::quoted(ckpt::b1_file_hash(ckpt::resolve_checkpoint(argv[3]).ckpt_dir / "state.tar"))
+            << ",\"planned_native_warm_pixel_replays\":1,\"planned_native_measured_pixel_replays\":2,\"planned_native_updates\":1"
+               ",\"proof_retained_bytes_cap\":2147483648,\"engine_and_transport_allocations_in_cap\":false"
+               ",\"appearance_loss_maxabs\":1e-6,\"appearance_loss_relRMS\":1e-3"
+               ",\"raster_diagnostic_atol\":3e-4,\"raster_diagnostic_rtol\":0.003"
+               ",\"raster_maxabs_base\":1e-4,\"raster_maxabs_reference_l2_scale\":1e-4,\"raster_relRMS\":5e-4"
+               ",\"pointwise_rgb\":\"both_roles_owned_rows_byte_exact\",\"zero_array_reference\":\"exact_zero\""
+               ",\"pointwise_last_ids\":\"both_roles_owned_rows_byte_exact\""
+               ",\"optimizer_gradient_substitution\":false,\"canonical_byte_equality_claim\":false"
+               ",\"quality_recovery_qualified\":false}\n";
+        auto sync = [] {
+            backend::device_synchronize();
+            if (const char* error = backend::last_error()) throw std::runtime_error(error);
+        };
+        struct PrivateBins {
+            std::vector<void*> allocations;
+            size_t bytes = 0;
+            ~PrivateBins() {
+                backend::device_synchronize();
+                for (void* p : allocations) backend::device_free(p);
+            }
+        } bins;
+        StripProofArrays appearance_before, native[2];
+        uint32_t rgb_cut = 0;
+        auto retained = [&] {
+            size_t bytes = bins.bytes;
+            for (const auto* arrays : {&appearance_before, &native[0], &native[1]})
+                for (const auto& a : *arrays) bytes += a.bytes.size();
+            return bytes;
+        };
+        auto reserve = [&](size_t bytes) {
+            need(bytes <= BackwardStageCap && retained() <= BackwardStageCap - bytes,
+                 "strip source proof retained arrays exceed 2 GiB");
+        };
+        auto snapshot = [&](const std::vector<StripProofBuffer>& fields) {
+            size_t total = 0;
+            for (const auto& f : fields) {
+                need(f.bytes <= BackwardStageCap - total, "strip proof snapshot size overflow");
+                total += f.bytes;
+            }
+            reserve(total);
+            StripProofArrays arrays;
+            for (const auto& f : fields)
+                arrays.push_back({f.name, copy_device(f.ptr, f.bytes), f.floating});
+            return arrays;
+        };
+        struct Restore {
+            decltype(engine().image_strip_fork) fork = engine().image_strip_fork;
+            decltype(engine().image_strip_join) join = engine().image_strip_join;
+            decltype(engine().image_strip_audit_pixels) pixel_audit = engine().image_strip_audit_pixels;
+            backend::vk::ImageStripContext context = backend::vk::image_strip();
+            EngineDiagnosticPpisp ppisp = engine_diagnostic_ppisp_probe();
+            DeviceTensor3D<int32_t> offsets;
+            DeviceVector<int32_t> ids;
+            bool installed = false;
+            ~Restore() {
+                engine().image_strip_fork = std::move(fork);
+                engine().image_strip_join = std::move(join);
+                engine().image_strip_audit_pixels = std::move(pixel_audit);
+                engine().image_strip_config = nullptr;
+                backend::vk::set_image_strip(std::move(context));
+                engine_diagnostic_ppisp_probe(std::move(ppisp));
+                if (installed) {
+                    engine().fwd.tile_offsets = offsets;
+                    engine().fwd.flatten_ids = ids;
+                }
+            }
+        } restore;
+        need(!restore.context.full_height && !restore.ppisp && !restore.pixel_audit,
+             "strip source proof cannot nest another strip/probe/audit context");
+        // Registering a probe retains the managed TrainStep witness through the fork.
+        engine_diagnostic_ppisp_probe([](auto...) {});
+        auto identities = [&](const std::string& phase, const std::vector<StripProofBuffer>& fields) {
+            std::vector<std::string> digests;
+            for (const auto& f : fields) {
+                reserve(f.bytes);
+                const Bytes data = copy_device(f.ptr, f.bytes);
+                const std::string sha = backward_sha(data);
+                digests.push_back(f.name + ":" + std::to_string(f.bytes) + ":" + sha);
+                log << "{\"type\":\"image_strip_input\",\"phase\":" << std::quoted(phase)
+                    << ",\"field\":" << std::quoted(f.name) << ",\"bytes\":" << f.bytes
+                    << ",\"sha256\":" << std::quoted(sha) << "}\n";
+            }
+            return digests;
+        };
+        auto serialized_inputs = [&] {
+            std::vector<StripProofBuffer> fields;
+            for (const auto& slot : DevicePool::global().saved(SaveClass::Resume))
+                fields.push_back({slot.name + ":dtype=" + std::to_string(slot.dtype_tag),
+                    slot.ptr, slot.nbytes, false});
+            return fields;
+        };
+        const std::string sampler_before = engine().dm->diagnostic_signature();
+        const auto source_before = identities("predecode_injection_before", serialized_inputs());
+        need(engine_diagnostic_replay_step() == nullptr, "strip proof cannot nest a diagnostic replay provider");
+        bool injected_decode = false, caught_decode = false;
+        int provider_calls = 0;
+        struct ClearReplayProvider {
+            ~ClearReplayProvider() { engine_diagnostic_replay_step({}); }
+        } clear_replay;
+        engine_diagnostic_replay_step([&]() -> const TrainStep* {
+            ++provider_calls;
+            if (!injected_decode) {
+                injected_decode = true;
+                throw DataDecodeError("diagnostic predecode exception injection");
+            }
+            return input_index < 0 ? nullptr : &replay_input;
+        });
+        {
+            struct RestoreInjectedCallbacks {
+                decltype(engine().image_strip_fork) fork = engine().image_strip_fork;
+                decltype(engine().image_strip_join) join = engine().image_strip_join;
+                ~RestoreInjectedCallbacks() {
+                    engine().image_strip_fork = std::move(fork);
+                    engine().image_strip_join = std::move(join);
+                }
+            } callbacks;
+            engine().image_strip_fork = [&](int current, const EngineStepConfig& sc) {
+                ++forks;
+                callbacks.fork(current, sc);
+            };
+            engine().image_strip_join = [&](std::vector<DeviceTensorFloatND>& screen) {
+                ++joins;
+                callbacks.join(screen);
+            };
+            try {
+                (void)session.train_step(step);
+            } catch (const DataDecodeError& error) {
+                caught_decode = std::strcmp(error.what(), "diagnostic predecode exception injection") == 0;
+                if (!caught_decode) throw;
+            }
+        }
+        need(injected_decode && caught_decode && provider_calls == 1 && forks == 0 && joins == 0 &&
+             !backend::vk::image_strip().full_height && !engine().image_strip_config &&
+             engine().dm->diagnostic_signature() == sampler_before &&
+             ckpt::b1_config_hash(cfg) == config_hash &&
+             identities("predecode_injection_after", serialized_inputs()) == source_before,
+             "strip proof predecode injection changed source/sampler state or dispatched pixel work");
+        session.save_checkpoint(step);
+        char checkpoint_name[32];
+        std::snprintf(checkpoint_name, sizeof checkpoint_name, "step-%09d.ckpt", step);
+        const fs::path predecode_checkpoint = fs::absolute(session.out_dir / checkpoint_name);
+        ckpt::check_resumable(predecode_checkpoint);
+        const JsonValue predecode_state = ckpt::read_state_json(predecode_checkpoint);
+        const JsonValue* saved_step = predecode_state.find("step");
+        need(saved_step && saved_step->as_int(-1) == step &&
+             engine().dm->diagnostic_signature() == sampler_before &&
+             identities("predecode_checkpoint_after", serialized_inputs()) == source_before,
+             "strip proof predecode checkpoint failed source-step identity preservation");
+        log << "{\"type\":\"image_strip_predecode_regression\",\"accepted\":true,\"source_step\":" << step
+            << ",\"exception_class\":\"DataDecodeError\",\"injection_scope\":\"exception_injection_not_OS_decode\""
+               ",\"sampler_unchanged\":true,\"serialized_source_state_unchanged\":true"
+               ",\"pixel_forks\":0,\"pixel_joins\":0,\"logical_updates\":0"
+               ",\"native_checkpoint_allowed_after_unwind\":true,\"full_checkpoint\":"
+            << std::quoted(predecode_checkpoint.string())
+            << ",\"worker_lifetime\":\"same_TrainerSession_no_reinitialization\"}\n";
+        log.flush(); need(bool(log), "strip proof predecode regression log failed");
+        std::vector<StripProofBuffer> inputs;
+        std::vector<std::string> prepared_identity;
+        auto outputs = [&](const std::vector<DeviceTensorFloatND>& screen) {
+            need(screen.size() == 1 && screen[0].get_ndim() == 2 && screen[0].size(1) == 10,
+                 "strip proof requires one packed ten-channel screen gradient");
+            const auto& e = engine();
+            need(e.fwd.accum_mode == DensifyAccumMode::Avg &&
+                 e.fwd.accum_weight.size() == 2 * e.cur_num_splats,
+                 "strip proof requires the current source raw Avg density numerator/denominator");
+            const size_t pixels = size_t(e.camera.num) * e.camera.height * e.camera.width;
+            return snapshot({
+                {"raster.screen", screen[0].data_ptr(), size_t(screen[0].numel()) * 4},
+                {"raster.density_numerator", e.fwd.accum_weight.data_ptr(), size_t(e.cur_num_splats) * 4},
+                {"raster.density_denominator", e.fwd.accum_weight.data_ptr() + e.cur_num_splats, size_t(e.cur_num_splats) * 4},
+                {"appearance.ppisp_data", e.ppisp.grads.data_ptr(), size_t(e.ppisp.grads.numel()) * 4},
+                {"appearance.bilagrid_image", e.bilagrid_rgb.image_grad.data_ptr(), size_t(e.bilagrid_rgb.image_grad.numel()) * 4},
+                {"loss.weighted", DevicePool::global().acquire<float>(PoolSlot::PplTotalLosses, (int)LossIndex::length),
+                    sizeof(float) * (int)LossIndex::length},
+                {"loss.ssim_scalar", DevicePool::global().acquire<float>(PoolSlot::SsimScalar, 1), 4},
+                {"render.authority_rgb", std::get<0>(e.fwd.renders).data_ptr(), pixels * 12},
+                {"render.authority_last_ids", e.fwd.last_ids.data_ptr(), pixels * 4, false}
+            });
+        };
+        engine().image_strip_audit_pixels = [&](const float* values, size_t count,
+                                               const int* last_ids, size_t pixel_count) {
+            static_assert(sizeof(int) == sizeof(int32_t));
+            const auto& e = engine();
+            need(++pixel_audits == 1 && forks == 1 && joins == 1 && values && last_ids &&
+                 rgb_cut > 0 && rgb_cut < uint32_t(e.camera.height) &&
+                 pixel_count == size_t(e.camera.height - rgb_cut) * e.camera.width && count == pixel_count * 3,
+                 "strip proof worker pixel audit has a stale or invalid owned-row extent");
+            const size_t offset = size_t(rgb_cut) * e.camera.width * 3 * sizeof(float);
+            bool exact = true;
+            for (int replay = 0; replay < 2; ++replay) {
+                const auto reference = std::find_if(native[replay].begin(), native[replay].end(),
+                    [](const StripProofArray& a) { return a.name == "render.authority_rgb"; });
+                need(reference != native[replay].end() && reference->bytes.size() == offset + count * 4,
+                     "strip proof native bottom RGB snapshot is absent or has a different full-image extent");
+                size_t different_bytes = 0, different_elements = 0, nonfinite = 0;
+                double maxabs = 0, squared = 0, refsq = 0;
+                for (size_t i = 0; i < count; ++i) {
+                    float x, y;
+                    const auto* a = reference->bytes.data() + offset + i * 4;
+                    const auto* b = reinterpret_cast<const uint8_t*>(values + i);
+                    std::memcpy(&x, a, 4); std::memcpy(&y, b, 4);
+                    different_elements += std::memcmp(a, b, 4) != 0;
+                    for (size_t byte = 0; byte < 4; ++byte) different_bytes += a[byte] != b[byte];
+                    if (!std::isfinite(x) || !std::isfinite(y)) { ++nonfinite; continue; }
+                    const double delta = double(y) - x;
+                    maxabs = std::max(maxabs, std::abs(delta));
+                    squared += delta * delta; refsq += double(x) * x;
+                }
+                const bool pass = different_bytes == 0 && nonfinite == 0;
+                exact &= pass;
+                log << "{\"type\":\"image_strip_worker_rgb_audit\",\"reference_replay\":" << replay
+                    << ",\"field\":\"render.worker_owned_rgb\",\"owned_begin\":" << rgb_cut
+                    << ",\"owned_end\":" << e.camera.height << ",\"full_height\":" << e.camera.height
+                    << ",\"width\":" << e.camera.width << ",\"components\":" << count << ",\"bytes\":" << count * 4
+                    << ",\"different_bytes\":" << different_bytes << ",\"different_bits_elements\":" << different_elements
+                    << ",\"nonfinite_pairs\":" << nonfinite << ",\"maxabs\":" << maxabs
+                    << ",\"relRMS\":" << std::sqrt(squared / std::max(refsq, 1e-30))
+                    << ",\"native_full_rgb_snapshot_reused\":true,\"before_authority_update\":true"
+                    << ",\"accepted\":" << (pass ? "true" : "false") << "}\n";
+                const auto reference_ids = std::find_if(native[replay].begin(), native[replay].end(),
+                    [](const StripProofArray& a) { return a.name == "render.authority_last_ids"; });
+                const size_t ids_offset = size_t(rgb_cut) * e.camera.width * sizeof(int32_t);
+                need(reference_ids != native[replay].end() &&
+                     reference_ids->bytes.size() == ids_offset + pixel_count * sizeof(int32_t),
+                     "strip proof native bottom lastIDs snapshot is absent or has a different full-image extent");
+                size_t ids_different_bytes = 0, ids_different_elements = 0;
+                for (size_t i = 0; i < pixel_count; ++i) {
+                    const auto* a = reference_ids->bytes.data() + ids_offset + i * sizeof(int32_t);
+                    const auto* b = reinterpret_cast<const uint8_t*>(last_ids + i);
+                    ids_different_elements += std::memcmp(a, b, sizeof(int32_t)) != 0;
+                    for (size_t byte = 0; byte < sizeof(int32_t); ++byte) ids_different_bytes += a[byte] != b[byte];
+                }
+                const bool ids_pass = ids_different_bytes == 0;
+                exact &= ids_pass;
+                log << "{\"type\":\"image_strip_worker_last_ids_audit\",\"reference_replay\":" << replay
+                    << ",\"field\":\"render.worker_owned_last_ids\",\"owned_begin\":" << rgb_cut
+                    << ",\"owned_end\":" << e.camera.height << ",\"full_height\":" << e.camera.height
+                    << ",\"width\":" << e.camera.width << ",\"pixels\":" << pixel_count
+                    << ",\"bytes\":" << pixel_count * sizeof(int32_t)
+                    << ",\"different_bytes\":" << ids_different_bytes << ",\"different_elements\":" << ids_different_elements
+                    << ",\"native_full_last_ids_snapshot_reused\":true,\"sentinels_compared_byte_exact\":true"
+                    << ",\"before_authority_update\":true,\"accepted\":" << (ids_pass ? "true" : "false") << "}\n";
+            }
+            numerical &= exact;
+            log.flush();
+            need(bool(log) && exact, "strip proof worker-owned RGB/lastIDs are not byte-exact to both native replays");
+        };
+        engine().image_strip_join = [&](std::vector<DeviceTensorFloatND>& screen) {
+            need(++joins == 1, "strip proof received more than one native join");
+            const auto context = backend::vk::image_strip();
+            need(context.full_height == uint32_t(engine().camera.height) && context.owned_begin == 0 &&
+                 context.owned_end > 0 && context.owned_end < context.full_height,
+                 "strip proof did not execute a nonempty two-role strip");
+            restore.join(screen);
+            need(pixel_audits == 1, "strip proof did not receive exactly one actual worker-owned pixel audit");
+            {
+                const auto actual = outputs(screen);
+                const size_t pixels = size_t(context.owned_end) * engine().camera.width;
+                for (int i = 0; i < 2; ++i)
+                    numerical &= strip_proof_compare(log, native[i], actual, "native_" + std::to_string(i) + "_vs_dual_gpu", pixels);
+            }
+            need(identities("dual_gpu_join_before_update", inputs) == prepared_identity,
+                 "strip proof prepared source inputs changed before the one update");
+            const auto unchanged = snapshot(strip_appearance_buffers());
+            need(unchanged.size() == appearance_before.size(), "strip proof appearance state layout changed");
+            for (size_t f = 0; f < appearance_before.size(); ++f)
+                need(appearance_before[f].bytes == unchanged[f].bytes,
+                     "strip proof appearance params/moments changed before optimizer");
+            log.flush();
+            need(bool(log), "strip source proof comparison log failed");
+            need(numerical, "strip source proof predeclared numerical/zero/exact gate failed before update");
+        };
+        const auto joined = engine().image_strip_join;
+        engine().image_strip_fork = [&](int current, const EngineStepConfig& sc) {
+            need(++forks == 1 && current == step && sc.optim.use_fused_proj_bwd_optim &&
+                 !sc.optim.split_batch && sc.loss.color_shift_reg_weight == 0 &&
+                 !engine().ppisp.cur_run_before_color_space && !engine().background.enabled &&
+                 engine().camera.num == 1, "strip source proof requires the unchanged current-source single-pass lane");
+            auto& e = engine();
+            const uint32_t height = uint32_t(e.camera.height);
+            rgb_cut = std::min(height, ((height / 2 + 32) / 64) * 64);
+            const auto* batch = engine_diagnostic_ppisp_input();
+            need(batch && batch->subs.size() == 1 && batch->subs[0], "strip proof managed input witness missing");
+            const auto& b = *batch->subs[0];
+            log << "{\"type\":\"image_strip_batch\",\"step\":" << current
+                << ",\"width\":" << e.camera.width << ",\"height\":" << e.camera.height
+                << ",\"cameras\":" << e.camera.num << ",\"rows\":" << e.cur_num_splats
+                << ",\"projected_rows\":" << e.fwd.splats_s.at(0).size(0)
+                << ",\"intersections\":" << e.fwd.flatten_ids.size() << ",\"macro_log2\":" << e.fwd.macro_log2
+                << ",\"ppisp_cameras\":" << e.ppisp.params.size<0>() << ",\"ppisp_parameters\":" << e.ppisp.num_params
+                << ",\"ppisp_type\":" << std::quoted(e.ppisp.param_type)
+                << ",\"ppisp_adagrad\":" << (e.ppisp.use_adagrad ? "true" : "false")
+                << ",\"bilagrid_shape\":[" << e.bilagrid_rgb.grids.size<0>() << ","
+                << e.bilagrid_rgb.grids.size<1>() << "," << e.bilagrid_rgb.grids.size<2>() << ","
+                << e.bilagrid_rgb.grids.size<3>() << "," << e.bilagrid_rgb.grids.size<4>() << "]"
+                << ",\"bilagrid_value_bits\":" << e.bilagrid_rgb.value_bits
+                << ",\"bilagrid_optim_bits\":" << e.bilagrid_rgb.optim_bits
+                << ",\"bilagrid_adagrad\":" << (e.bilagrid_rgb.use_adagrad ? "true" : "false")
+                << ",\"input_indices\":[";
+            for (size_t i = 0; i < b.indices.size(); ++i) log << (i ? "," : "") << b.indices[i];
+            log << "],\"post_offsets\":[";
+            for (size_t i = 0; i < b.post_offsets.size(); ++i) log << (i ? "," : "") << b.post_offsets[i];
+            log << "],\"face_passes\":[";
+            for (size_t i = 0; i < b.face_passes.size(); ++i) {
+                const auto& pass = b.face_passes[i];
+                log << (i ? "," : "") << "{\"k0\":" << pass.k0 << ",\"k1\":" << pass.k1
+                    << ",\"width\":" << pass.width << ",\"height\":" << pass.height << "}";
+            }
+            log << "]}\n";
+            restore.offsets = e.fwd.tile_offsets;
+            restore.ids = e.fwd.flatten_ids;
+            auto clone = [&](const void* source, size_t bytes) {
+                reserve(bytes);
+                if (!bytes) return (void*)nullptr;
+                void* p = backend::device_malloc(bytes);
+                need(p != nullptr, "strip proof private bin allocation failed");
+                bins.allocations.push_back(p); bins.bytes += bytes;
+                backend::memcpy_sync(p, source, bytes, backend::MemcpyKind::DeviceToDevice);
+                return p;
+            };
+            restore.installed = true;
+            // RasterBwd may reuse the intersector arena; never replay borrowed bins.
+            const auto& t = restore.offsets;
+            e.fwd.tile_offsets = DeviceTensor3D<int32_t>(tv(clone(t.data_ptr(), size_t(t.numel()) * 4), 4,
+                {t.size<0>(), t.size<1>(), t.size<2>()}));
+            e.fwd.flatten_ids = DeviceVector<int32_t>(tv(clone(restore.ids.data_ptr(), size_t(restore.ids.size()) * 4), 4,
+                {restore.ids.size()}));
+            _ensure_ppisp_optim_state();
+            _ensure_bilagrid_optim_state();
+            appearance_before = snapshot(strip_appearance_buffers());
+            inputs = {
+                {"prepared.screen", e.fwd.splats_s.at(0).data_ptr(), size_t(e.fwd.splats_s.at(0).numel()) * 4},
+                {"prepared.gaussian_ids", e.fwd.gaussian_ids.data_ptr(), size_t(e.fwd.gaussian_ids.size()) * 4, false},
+                {"prepared.tile_offsets", e.fwd.tile_offsets.data_ptr(), size_t(e.fwd.tile_offsets.numel()) * 4, false},
+                {"prepared.flatten_ids", e.fwd.flatten_ids.data_ptr(), size_t(e.fwd.flatten_ids.size()) * 4, false},
+                {"camera.viewmats", e.camera.viewmats.data_ptr(), size_t(e.camera.viewmats.numel()) * sizeof(float4)},
+                {"camera.intrinsics", e.camera.intrins.data_ptr(), size_t(e.camera.intrins.size()) * sizeof(float4)},
+                {"camera.indices", e.bilagrid_cur_cam_indices.data_ptr(), size_t(e.bilagrid_cur_cam_indices.size()) * 4, false},
+                {"ground_truth.rgb", e.gt.rgb.data_ptr(), size_t(e.gt.rgb.numel()) * sizeof(float3)},
+                {"ground_truth.mask", e.gt.alpha.data_ptr(), e.gt.alpha.data_ptr() ? size_t(e.gt.alpha.numel()) * sizeof(bool) : 0, false}
+            };
+            const auto appearance = strip_appearance_buffers();
+            inputs.insert(inputs.end(), appearance.begin(), appearance.end());
+            auto source_tensor = [&](const std::string& name, const auto& tensor) {
+                const DeviceTensorFloatND view(tensor);
+                inputs.push_back({name, view.data_ptr(), view.data_ptr() ? size_t(view.numel()) * 4 : 0});
+            };
+            source_tensor("source.world.means", e.world.means);
+            source_tensor("source.world.quats", e.world.quats);
+            source_tensor("source.world.scales", e.world.scales);
+            source_tensor("source.world.opacities", e.world.opacities);
+            source_tensor("source.world.dc", e.world.features_dc);
+            source_tensor("source.world.sh", e.world.features_sh);
+            auto source_quant = [&](const std::string& name, const auto& q) {
+                if (!q.initialized()) return;
+                inputs.push_back({name + ".codes", q.packed_ptr(), size_t(q.packed_bytes()), false});
+                inputs.push_back({name + ".bounds", q.bounds_ptr(), size_t(q.n_bounds) * sizeof(*q.bounds_ptr())});
+            };
+            source_quant("source.world.sh8", e.world.features_sh_quant8);
+            source_quant("source.world.sh16", e.world.features_sh_quant16);
+            source_quant("source.world.sh8_fpbo", e.world.features_sh_quant8_fpbo);
+            source_quant("source.world.sh16_fpbo", e.world.features_sh_quant16_fpbo);
+            source_tensor("source.optim.means.g1", e.optim.g1_means);
+            source_tensor("source.optim.means.g2", e.optim.g2_means);
+            source_tensor("source.optim.quats.g1", e.optim.g1_quats);
+            source_tensor("source.optim.quats.g2", e.optim.g2_quats);
+            source_tensor("source.optim.scales.g1", e.optim.g1_scales);
+            source_tensor("source.optim.scales.g2", e.optim.g2_scales);
+            source_tensor("source.optim.opacities.g1", e.optim.g1_opacities);
+            source_tensor("source.optim.opacities.g2", e.optim.g2_opacities);
+            source_tensor("source.optim.dc.g1", e.optim.g1_features_dc);
+            source_tensor("source.optim.dc.g2", e.optim.g2_features_dc);
+            source_tensor("source.optim.sh.g1", e.optim.g1_features_sh);
+            source_tensor("source.optim.sh.g2", e.optim.g2_features_sh);
+            source_quant("source.optim.means_fpbo", e.optim.means_quant_state_fpbo);
+            source_quant("source.optim.quats_fpbo", e.optim.quats_quant_state_fpbo);
+            source_quant("source.optim.scales_fpbo", e.optim.scales_quant_state_fpbo);
+            source_quant("source.optim.opacities_fpbo", e.optim.opacities_quant_state_fpbo);
+            source_quant("source.optim.dc_fpbo", e.optim.features_dc_quant_state_fpbo);
+            source_quant("source.optim.sh_fpbo", e.optim.sh_quant_state_fpbo);
+            inputs.push_back({"source.optim.bias_steps", e.optim.bias_correction_steps.data_ptr(),
+                size_t(e.optim.bias_correction_steps.size()) * 4, false});
+            prepared_identity = identities("prepared_before_warm", inputs);
+            const auto prior_weight = e.fwd.accum_weight;
+            const auto prior_mode = e.fwd.accum_mode;
+            const bool pending = e.ppisp.forward_pending;
+            e.image_strip_join = {};
+            backend::vk::set_image_strip({});
+            const TorchTensorView cams = tv(e.bilagrid_cur_cam_indices.data_ptr(), 4, {e.bilagrid_cur_cam_indices.size()});
+            for (int replay = -1; replay < 2; ++replay) {
+                e.ppisp.grads.zero();
+                e.bilagrid_rgb.image_grad.zero();
+                e.ppisp.forward_pending = pending;
+                engine_forward_prepared_pixels(false, false, (int)DistortionType::None);
+                if (replay >= 0) e.image_strip_join = [&](std::vector<DeviceTensorFloatND>& screen) {
+                    native[replay] = outputs(screen);
+                    log << "{\"type\":\"image_strip_native_rgb_owned_views\",\"replay\":" << replay
+                        << ",\"authority_begin\":0,\"authority_end\":" << rgb_cut
+                        << ",\"worker_begin\":" << rgb_cut << ",\"worker_end\":" << e.camera.height
+                        << ",\"full_height\":" << e.camera.height
+                        << ",\"worker_bytes\":" << size_t(e.camera.height - rgb_cut) * e.camera.width * 12
+                        << ",\"source_field\":\"render.authority_rgb\",\"private_full_snapshot\":true}\n";
+                };
+                (void)engine_prepared_pixels_backward(current, cams, sc);
+                sync();
+                e.image_strip_join = {};
+                need(identities(replay < 0 ? "warm_after" : "native_" + std::to_string(replay), inputs) == prepared_identity,
+                     "strip proof native pixel replay changed immutable prepared inputs or appearance state");
+            }
+            numerical &= strip_proof_compare(log, native[0], native[1], "native_repeat_noise");
+            need(numerical, "strip proof ordinary same-input repeat failed its fixed gate");
+            e.ppisp.grads.zero();
+            e.bilagrid_rgb.image_grad.zero();
+            e.ppisp.forward_pending = pending;
+            e.fwd.accum_weight = prior_weight;
+            e.fwd.accum_mode = prior_mode;
+            e.fwd.v_splats_s.clear();
+            e.image_strip_join = joined;
+            restore.fork(current, sc);
+            const auto context = backend::vk::image_strip();
+            need(context.owned_end == rgb_cut && context.full_height == height,
+                 "strip proof predetermined native RGB ownership cut differs from the actual executor");
+            log << "{\"type\":\"image_strip_coverage\",\"full_height\":" << context.full_height
+                << ",\"authority_begin\":" << context.owned_begin << ",\"authority_end\":" << context.owned_end
+                << ",\"worker_begin\":" << context.owned_end << ",\"worker_end\":" << context.full_height
+                << ",\"halo\":" << context.halo << ",\"owned_rows_sum\":" << context.full_height
+                << ",\"prepared_inputs_unchanged\":true,\"retained_bytes\":" << retained() << "}\n";
+        };
+        (void)session.train_step(step);
+        sync();
+        completed_step = step + 1;
+        need(forks == 1 && joins == 1 && pixel_audits == 1 && provider_calls == 2 && numerical &&
+             ckpt::b1_config_hash(cfg) == config_hash,
+             "strip source proof did not complete exactly one unchanged managed update");
+        const auto appearance_after = snapshot(strip_appearance_buffers());
+        const bool finite = strip_proof_compare(log, appearance_before, appearance_after,
+            "appearance_before_vs_after_single_update", 0, true);
+        need(finite, "strip proof active appearance params/moments are nonfinite after native update");
+        log << "{\"type\":\"image_strip_result\",\"accepted\":true,\"native_completed_step\":" << completed_step
+            << ",\"native_updates\":1,\"forks\":" << forks << ",\"joins\":" << joins
+            << ",\"predecode_injection_passed\":true,\"replay_provider_calls\":" << provider_calls
+            << ",\"worker_pixel_audits\":" << pixel_audits
+            << ",\"both_roles_pointwise_rgb_exact\":true,\"both_roles_last_ids_exact\":true"
+            << ",\"active_appearance_state_finite\":true,\"native_repeat_gate\":true,\"dual_gpu_gradient_gate\":true"
+               ",\"appearance_update_difference_scope\":\"before_vs_after_observation_not_native_update_parity\""
+               ",\"final_rows\":" << engine().cur_num_splats << ",\"final_capacity\":" << engine().max_num_splats
+            << ",\"horizon\":" << cfg.num_iterations << ",\"full_native_endpoint_quality_recovery_qualified\":false}\n";
+        log.flush(); need(bool(log), "strip source proof result write failed");
+        session.output_lease.release();
+    } catch (const std::exception& error) {
+        log << "{\"type\":\"image_strip_failure\",\"accepted\":false,\"native_completed_step\":" << completed_step
+            << ",\"forks\":" << forks << ",\"joins\":" << joins
+            << ",\"error\":" << std::quoted(error.what()) << "}\n";
+        log.flush();
+        session.output_lease.release();
+        throw;
+    }
+}
+
+void image_strip_source_run(int argc, char** argv) {
+    const auto started = Clock::now();
+    need((argc == 12 || argc == 14) && std::strcmp(argv[2], "--resume") == 0 &&
+         std::strcmp(argv[4], "--device") == 0 && std::strcmp(argv[6], "--output") == 0 &&
+         std::strcmp(argv[8], "--updates") == 0 && std::strcmp(argv[10], "--input-index") == 0 &&
+         (argc == 12 || std::strcmp(argv[12], "--worker-device") == 0),
+         "usage: image-strip-source-run --resume CHECKPOINT --device uuid:A --output NEW_DIRECTORY --updates COUNT --input-index INDEX [--worker-device uuid:B]");
+    auto integer = [](const char* value) {
+        const std::string token = value;
+        need(!token.empty() && token.find_first_not_of("0123456789") == std::string::npos,
+             "source run updates/input index must be nonnegative integers");
+        const uint64_t number = std::stoull(token);
+        need(number <= uint64_t(std::numeric_limits<int32_t>::max()), "source run integer exceeds int32");
+        return int(number);
+    };
+    const int updates = integer(argv[9]), input_index = integer(argv[11]);
+    need(updates > 0 && std::string(argv[5]).rfind("uuid:", 0) == 0,
+         "source run requires positive updates and an explicit authority UUID");
+    const std::string authority = backend::device_resolve_identity(argv[5]);
+    need(!authority.empty(), "source run authority device unavailable");
+    std::string worker;
+    if (argc == 14) {
+        need(std::string(argv[13]).rfind("uuid:", 0) == 0, "source run requires an explicit worker UUID");
+        worker = backend::device_resolve_identity(argv[13]);
+        need(!worker.empty() && worker != authority, "source run worker must be available and distinct");
+    } else {
+        const char* inherited = spirula::env("IMAGE_STRIP_WORKER_DEVICE");
+        need(!inherited || !*inherited, "native source run refuses an inherited image-strip worker selector");
+    }
+    struct Environment {
+        explicit Environment(const std::string& value) {
+            const char* inherited = spirula::env("IMAGE_STRIP_WORKER_DEVICE");
+            need(!inherited || !*inherited, "source run requires a clean worker environment; use --worker-device");
+#ifdef _WIN32
+            need(_putenv_s("SS_IMAGE_STRIP_WORKER_DEVICE", value.c_str()) == 0, "source run environment failed");
+#else
+            need(setenv("SS_IMAGE_STRIP_WORKER_DEVICE", value.c_str(), 1) == 0, "source run environment failed");
+#endif
+        }
+        ~Environment() {
+#ifdef _WIN32
+            _putenv_s("SS_IMAGE_STRIP_WORKER_DEVICE", "");
+#else
+            unsetenv("SS_IMAGE_STRIP_WORKER_DEVICE");
+#endif
+        }
+    } environment(worker);
+    const fs::path root = argv[7];
+    need(fs::create_directory(root), "source run output must be fresh");
+    std::ofstream log(root / "image-strip-source-run.jsonl", std::ios::binary);
+    need(bool(log), "source run log open failed");
+    log << std::setprecision(17);
+    int source_step = -1, completed_step = -1, target = -1, count = 0;
+    double train_wall = 0, loop_wall = 0, step_wall_sum = 0;
+    fs::path checkpoint;
+    try {
+        {
+            spirula::TrainerSession session;
+            ordinary_source_setup(session, argv[3], argv[5], root / "session", true);
+            source_step = session.start_step;
+            completed_step = source_step;
+            const int horizon = session.cfg.num_iterations;
+            need(source_step >= 0 && int64_t(source_step) + updates < horizon &&
+                 int64_t(source_step) + updates <= session.cfg.max_steps.value_or(horizon) &&
+                 session.cfg.save_full_checkpoint, "source run needs a full-save source and target below its unchanged horizon");
+            target = source_step + updates;
+            need(std::find(session.ds.train_indices.begin(), session.ds.train_indices.end(), input_index) !=
+                 session.ds.train_indices.end(), "source run input must belong to the original training set");
+            need(!session.has_depth && !session.has_normal && !engine().bilagrid_depth.enabled &&
+                 !engine().bilagrid_normal.enabled &&
+                 bool(engine().image_strip_fork) == !worker.empty() &&
+                 bool(engine().image_strip_join) == !worker.empty(),
+                 "source run requires RGB/mask-only input and the explicitly selected native/strip arm");
+            const std::string source_config = ckpt::b1_config_hash(session.cfg);
+            session.cfg.steps_per_save = 0;
+            const std::string effective_config = ckpt::b1_config_hash(session.cfg);
+            auto decoded = std::make_shared<DecodedBatch>();
+            engine().dm->fetch_one(input_index, *decoded);
+            need(decoded->indices.size() == 1 && decoded->indices[0] == input_index &&
+                 decoded->input_num == 1 && decoded->num == 1 &&
+                 decoded->depth_buffer.empty() && decoded->normal_buffer.empty(),
+                 "source run fixed input must retain the current one-camera RGB/mask lane");
+            TrainStep fixed_input; fixed_input.subs.push_back(decoded);
+            char name[32]; std::snprintf(name, sizeof name, "step-%09d.ckpt", target);
+            checkpoint = fs::absolute(session.out_dir / name);
+            log << "{\"type\":\"image_strip_run_scope\",\"arm\":" << std::quoted(worker.empty() ? "native" : "strip")
+                << ",\"authority\":" << std::quoted(authority) << ",\"worker\":" << std::quoted(worker)
+                << ",\"source_state_sha256\":" << std::quoted(ckpt::b1_file_hash(ckpt::resolve_checkpoint(argv[3]).ckpt_dir / "state.tar"))
+                << ",\"source_config_sha256\":" << std::quoted(source_config)
+                << ",\"effective_config_sha256\":" << std::quoted(effective_config)
+                << ",\"source_step\":" << source_step << ",\"horizon\":" << horizon
+                << ",\"target_completed_step\":" << target << ",\"planned_logical_updates\":" << updates
+                << ",\"input_policy\":\"diagnostic_fixed_input_not_ordinary_sampling\",\"input_index\":" << input_index
+                << ",\"width\":" << decoded->width << ",\"height\":" << decoded->height
+                << ",\"post_offsets\":[";
+            for (size_t i = 0; i < decoded->post_offsets.size(); ++i)
+                log << (i ? "," : "") << decoded->post_offsets[i];
+            log << "],\"steps_per_save\":0,\"only_config_override\":\"steps_per_save\""
+                   ",\"final_full_checkpoint_on_cooperative_stop\":true"
+                   ",\"wall_scope\":\"mode_entry_through_trainer_destruction_including_setup_fetch_training_final_checkpoint\""
+                   ",\"per_step_wall_scope\":\"TrainerProgress_step_latency_no_added_GPU_sync\""
+                   ",\"gradient_proof_callbacks\":false,\"quality_recovery_qualified\":false"
+                   ",\"ordinary_sampling_coverage_claim\":false}\n";
+            log.flush(); need(bool(log), "source run scope write failed");
+            spirula::TrainerCallbacks callbacks;
+            callbacks.on_step = [&](const spirula::TrainerProgress& progress) {
+                need(progress.step == source_step + count && progress.total_steps == horizon &&
+                     count < updates, "source run completed an unexpected logical step");
+                ++count; completed_step = progress.step + 1;
+                bool finite = std::isfinite(progress.step_latency) && progress.step_latency >= 0;
+                for (const auto& loss : progress.losses) finite &= std::isfinite(loss.second);
+                step_wall_sum += progress.step_latency;
+                log << "{\"type\":\"image_strip_run_step\",\"completed_step\":" << completed_step
+                    << ",\"logical_updates\":" << count << ",\"input_index\":" << input_index
+                    << ",\"step_wall_s\":" << (std::isfinite(progress.step_latency) ? std::to_string(progress.step_latency) : "null")
+                    << ",\"mode_elapsed_s\":" << std::chrono::duration<double>(Clock::now() - started).count()
+                    << ",\"splats\":" << progress.num_splats << ",\"losses_finite\":" << (finite ? "true" : "false")
+                    << ",\"losses\":{";
+                bool first = true;
+                for (const auto& [key, value] : progress.losses) {
+                    log << (first ? "" : ",") << std::quoted(key) << ":";
+                    if (std::isfinite(value)) log << value; else log << "null";
+                    first = false;
+                }
+                log << "}}\n"; log.flush();
+                std::printf("IMAGE_STRIP_SOURCE_RUN_STEP arm=%s completed_step=%d logical_updates=%d target_step=%d input_index=%d loss_finite=%d step_wall_s=%.9f\n",
+                    worker.empty() ? "native" : "strip", completed_step, count, target, input_index, int(finite), progress.step_latency);
+                std::fflush(stdout);
+                need(bool(log) && finite, "source run callback log or finite-loss gate failed");
+                if (completed_step == target) {
+                    session.save_on_stop.store(true);
+                    session.stop_requested.store(true);
+                }
+            };
+            {
+                struct ReplayInput {
+                    explicit ReplayInput(const TrainStep* input) {
+                        need(engine_diagnostic_replay_step() == nullptr, "source run cannot nest a diagnostic replay input");
+                        engine_diagnostic_replay_step([input] { return input; });
+                    }
+                    ~ReplayInput() { engine_diagnostic_replay_step({}); }
+                } replay(&fixed_input);
+                const auto training = Clock::now();
+                session.train(callbacks);
+                train_wall = std::chrono::duration<double>(Clock::now() - training).count();
+            }
+            loop_wall = session.training_time_s;
+            need(count == updates && completed_step == target && session.cur_step.load() == target &&
+                 session.cfg.num_iterations == horizon && ckpt::b1_config_hash(session.cfg) == effective_config,
+                 "source run did not complete the exact fixed-input continuation");
+            ckpt::check_resumable(checkpoint);
+            const JsonValue state = ckpt::read_state_json(checkpoint);
+            const JsonValue* saved_step = state.find("step");
+            need(saved_step && saved_step->as_int(-1) == target, "source run final checkpoint has the wrong completed step");
+        }
+        log << "{\"type\":\"image_strip_run_result\",\"accepted\":true,\"source_step\":" << source_step
+            << ",\"target_completed_step\":" << target << ",\"native_completed_step\":" << completed_step
+            << ",\"logical_updates\":" << count << ",\"input_index\":" << input_index
+            << ",\"full_path_wall_s\":" << std::chrono::duration<double>(Clock::now() - started).count()
+            << ",\"train_call_including_checkpoint_wall_s\":" << train_wall << ",\"training_loop_wall_s\":" << loop_wall
+            << ",\"sum_trainer_step_wall_s\":" << step_wall_sum << ",\"final_full_checkpoint\":" << std::quoted(checkpoint.string())
+            << ",\"fixed_input_diagnostic\":true,\"quality_recovery_qualified\":false,\"ordinary_sampling_coverage_claim\":false}\n";
+        log.flush(); need(bool(log), "source run result write failed");
+    } catch (const std::exception& error) {
+        log << "{\"type\":\"image_strip_run_failure\",\"accepted\":false,\"source_step\":" << source_step
+            << ",\"target_completed_step\":" << target << ",\"native_completed_step\":" << completed_step
+            << ",\"logical_updates\":" << count << ",\"full_path_wall_s\":"
+            << std::chrono::duration<double>(Clock::now() - started).count()
+            << ",\"error\":" << std::quoted(error.what()) << "}\n";
+        log.flush();
         throw;
     }
 }
@@ -5805,6 +6947,27 @@ void coordinator(const char* exe, const DevicePair& devices) {
 }
 int main(int argc, char** argv) {
     try {
+        if (argc >= 2 && std::strcmp(argv[1], "checkpoint-update-compare") == 0) {
+            need(argc == 12 && std::strcmp(argv[2], "--source") == 0 &&
+                 std::strcmp(argv[4], "--reference") == 0 && std::strcmp(argv[6], "--actual") == 0 &&
+                 std::strcmp(argv[8], "--native-repeat") == 0 && std::strcmp(argv[10], "--output") == 0,
+                 "usage: checkpoint-update-compare --source SOURCE --reference CHECKPOINT --actual CHECKPOINT --native-repeat CHECKPOINT --output NEW_DIRECTORY");
+            ckpt::compare_native_checkpoint_updates(fs::path(argv[3]), fs::path(argv[5]),
+                fs::path(argv[7]), fs::path(argv[9]), fs::path(argv[11]));
+            return 0;
+        }
+        if (argc > 2 && std::strcmp(argv[1], "worker") == 0 &&
+            std::strcmp(argv[2], "--image-strip") == 0)
+            return app::image_strip_worker_main(argc - 1, argv + 1);
+        if (argc >= 2 && std::strcmp(argv[1], "image-strip-source-run") == 0) {
+            image_strip_source_run(argc, argv); return 0;
+        }
+        if (argc >= 2 && std::strcmp(argv[1], "image-strip-source-proof") == 0) {
+            image_strip_source_proof(argc, argv); return 0;
+        }
+        if (argc >= 2 && std::strcmp(argv[1], "ppisp-source-price") == 0) {
+            ppisp_source_price(argc, argv); return 0;
+        }
         if (argc >= 2 && std::strcmp(argv[1],"ppisp-price")==0) {
             ppisp_price(argc,argv); return 0;
         }

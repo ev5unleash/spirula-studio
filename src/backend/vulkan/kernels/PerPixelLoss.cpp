@@ -1,21 +1,14 @@
-// Vulkan implementation of the multi-scale per-pixel training loss
-// (kernels/loss/PerPixelLoss.cuh compute_multi_scale_per_pixel_losses), including its
-// internal fused-SSIM backward (kernels/loss/FusedSSIM.cu inplace path) and the
-// edge-aware densification maps (kernels/densify/DensifySplitFilter.cu canny / robust-residual
-// path). Device work: shaders/{multi_scale_loss,fused_ssim,canny}.slang
-// plus the quantile radix-select in Quantile.cpp.
-//
-// The host orchestration (pyramid construction, per-scale scratch aliasing,
-// upsample accumulation, async loss readout) mirrors PerPixelLoss.cu
-// line-for-line; DevicePool and AsyncReadout are backend-portable already.
+// Native multi-scale loss operators with optional globally aligned strip ownership.
 
 #include <kernels/loss/PerPixelLoss.cuh>
 #include <core/Tensor.h>
 
 #include "backend/vulkan/kernels/KernelCommon.h"
+#include "backend/vulkan/kernels/ImageStrip.h"
 
 #include <array>
 #include <cmath>
+#include <limits>
 
 // Quantile.cpp
 template <bool invert_quantile>
@@ -27,7 +20,7 @@ namespace {
 
 using backend::MemcpyKind;
 
-constexpr int kNRaw = (int)RawLossIndex::length;   // 31
+constexpr int kNRaw = (int)RawLossIndex::length;
 constexpr int kNW = (int)LossWeightIndex::length;  // 19
 constexpr int kNL = (int)LossIndex::length;        // 14
 
@@ -55,8 +48,9 @@ struct PplParams {
     int32_t has_mask;
     float saturation_threshold;
     uint32_t in_flags, out_flags, wgs_per_row;
+    uint32_t row_begin, row_end, stat_begin, stat_end;
 };
-static_assert(sizeof(PplParams) == 30 * 8 + (kNW + 15) * 4, "layout");
+static_assert(sizeof(PplParams) == 30 * 8 + (kNW + 19) * 4, "layout");
 
 // in_flags bits (mirror multi_scale_loss.slang)
 constexpr uint32_t kInCam = 1u << 0;
@@ -75,6 +69,24 @@ struct PplReduceParams {
 };
 static_assert(sizeof(PplReduceParams) == 3 * 8 + (kNW + 1) * 4, "layout");
 
+struct PplRowsParams {
+    uint64_t chunks, rows;
+    uint32_t B, H, W, row_begin, row_end, wgs_per_row;
+};
+static_assert(sizeof(PplRowsParams) == 2 * 8 + 6 * 4, "layout");
+
+struct PplRawSumParams {
+    uint64_t src, dst;
+    uint32_t B, n, wgs_per_row, _pad0;
+};
+static_assert(sizeof(PplRawSumParams) == 2 * 8 + 4 * 4, "layout");
+
+struct PplRawGatherParams {
+    uint64_t sums, camera_indices, raw;
+    uint32_t B, has_cameras;
+};
+static_assert(sizeof(PplRawGatherParams) == 3 * 8 + 2 * 4, "layout");
+
 struct MsPoolParams {
     uint64_t hs, ls;
     int32_t B, C;
@@ -82,23 +94,23 @@ struct MsPoolParams {
     int32_t lsH, lsW;
     int32_t scale;
     float a, b;
-    int32_t _pad0;
+    uint32_t row_begin, row_end, _pad0;
 };
-static_assert(sizeof(MsPoolParams) == 2 * 8 + 10 * 4, "layout");
+static_assert(sizeof(MsPoolParams) == 2 * 8 + 12 * 4, "layout");
 
 struct MsPoolMaskedParams {
     uint64_t hs, ls, mask;
     int32_t B, C;
     int32_t hsH, hsW;
     int32_t lsH, lsW;
-    int32_t _pad0;
+    uint32_t row_begin, row_end;
 };
 static_assert(sizeof(MsPoolMaskedParams) == 3 * 8 + 8 * 4, "layout");
 
 struct MsZeroMaskedParams {
     uint64_t grad, mask;
     int32_t B, C, H, W;
-    int32_t _pad0;
+    uint32_t row_begin, row_end;
 };
 static_assert(sizeof(MsZeroMaskedParams) == 2 * 8 + 6 * 4, "layout");
 
@@ -108,8 +120,9 @@ struct MsPoolBoolParams {
     int32_t hsH, hsW;
     int32_t lsH, lsW;
     uint32_t wgs_per_row;
+    uint32_t row_begin, row_end, words_per_batch, _pad0;
 };
-static_assert(sizeof(MsPoolBoolParams) == 2 * 8 + 6 * 4, "layout");
+static_assert(sizeof(MsPoolBoolParams) == 2 * 8 + 10 * 4, "layout");
 
 struct MsAddScaledParams {
     uint64_t dst, src;
@@ -125,17 +138,26 @@ struct SsimParams {
     float dL_dmap, map_weight, sat;
     int32_t mode;
     uint32_t flags;
+    uint32_t owned_begin, owned_end, row_begin, row_end;
 };
-static_assert(sizeof(SsimParams) == 7 * 8 + 11 * 4 + 4, "layout");
+static_assert(sizeof(SsimParams) == 7 * 8 + 15 * 4 + 4, "layout");
+
+struct SsimReduceParams {
+    uint64_t src, dst;
+    uint32_t n, wgs_per_row;
+    float scale;
+    uint32_t _pad0;
+};
+static_assert(sizeof(SsimReduceParams) == 2 * 8 + 4 * 4, "layout");
 
 struct SsimCovParams {
     uint64_t masks, img1, img2, tmp, out;
     int32_t B, H, W;
     int32_t Bm, Hm, Wm;
     float sat;
-    int32_t _pad0;
+    uint32_t row_begin, row_end, _pad0;
 };
-static_assert(sizeof(SsimCovParams) == 5 * 8 + 8 * 4, "layout");
+static_assert(sizeof(SsimCovParams) == 5 * 8 + 10 * 4, "layout");
 
 constexpr uint32_t kSsimHasMask = 1u << 0;
 constexpr uint32_t kSsimHasVal = 1u << 1;
@@ -205,17 +227,103 @@ inline void _hw_or_zero(const TorchTensorView& tv, int& H, int& W) {
     H = (int)s[1];
     W = (int)s[2];
 }
+void zero_nonowned(const TorchTensorView& view) {
+    if (!backend::vk::image_strip().full_height || !_has(view)) return;
+    const auto& sh = std::get<2>(view);
+    backend::vk::image_strip_zero_outside(_fptr(view), sh[0], sh[1], sh[2], sh[3], true);
+}
 
-// Fold the pixel axis across (gx, gz); gy carries the batch index. Params go
-// through the ring (PplParams is above the push floor).
-void dispatch_ppl(const char* entry, int64_t pixels, int64_t B, PplParams& p) {
-    if (pixels <= 0 || B <= 0) return;
-    vkk::Fold f = vkk::fold_1d(pixels, 256);
+void dispatch_ppl_backward(PplParams& p) {
+    const int64_t pixels = int64_t(p.row_end - p.row_begin) * p.W_render;
+    if (pixels <= 0 || p.B <= 0) return;
+    if (pixels > std::numeric_limits<uint32_t>::max())
+        throw std::runtime_error("ppl: strip pixel count exceeds uint32");
+    const vkk::Fold f = vkk::fold_1d(pixels, 256);
     p.wgs_per_row = f.per_row;
-    if (B > 65535 || f.rows > 65535)
+    if (p.B > 65535 || f.rows > 65535)
         throw std::runtime_error("ppl: image grid dimension exceeds 65535");
-    vkk::dispatch_ring(entry, {}, f.per_row, (uint32_t)B, f.rows, &p,
-                       sizeof(p));
+    vkk::dispatch_ring("multi_scale_loss.ppl_bwd", {}, f.per_row, uint32_t(p.B),
+                       f.rows, &p, sizeof(p));
+}
+
+void dispatch_ppl_forward(PplParams& p, long num_train_images, float* raw_losses) {
+    if (p.B <= 0 || p.H_render <= 0 || p.W_render <= 0) {
+        backend::memset_async(raw_losses, 0,
+            (size_t(num_train_images) + 1) * kNRaw * sizeof(float), backend::kDefaultStream);
+        return;
+    }
+    if (p.B > 65535 || p.row_begin > p.row_end || p.row_end > uint32_t(p.H_render))
+        throw std::runtime_error("ppl: invalid forward row extent");
+    const uint32_t work_rows = p.row_end - p.row_begin;
+    const uint32_t chunks_per_row = (uint32_t(p.W_render) + 255u) / 256u;
+    const uint64_t row_values = uint64_t(p.B) * kNRaw * uint32_t(p.H_render);
+    const uint64_t chunk_values = uint64_t(p.B) * kNRaw * work_rows * chunks_per_row;
+    const uint64_t limit = uint64_t(std::numeric_limits<int32_t>::max());
+    if (row_values > limit || chunk_values > limit)
+        throw std::runtime_error("ppl: row statistics or chunk index exceeds int32");
+
+    static const std::array<std::string, 4> keys = {
+        "ppl.raw.chunks", "ppl.raw.rows", "ppl.raw.reduce.0", "ppl.raw.reduce.1"};
+    auto& pool = DevicePool::global();
+    float* rows = static_cast<float*>(pool.acquire_dynamic(
+        VramCategory::Image, keys[1], size_t(row_values) * sizeof(float)));
+    if (p.row_begin != 0 || p.row_end != uint32_t(p.H_render))
+        backend::memset_async(rows, 0, size_t(row_values) * sizeof(float),
+                              backend::kDefaultStream);
+    if (work_rows) {
+        float* chunks = static_cast<float*>(pool.acquire_dynamic(
+            VramCategory::Image, keys[0], size_t(chunk_values) * sizeof(float)));
+        const vkk::Fold grid = vkk::fold_1d(int64_t(work_rows) * chunks_per_row, 1);
+        p.losses = uint64_t(chunks);
+        p.wgs_per_row = grid.per_row;
+        vkk::dispatch_ring("multi_scale_loss.ppl_fwd", {}, grid.per_row, uint32_t(p.B),
+                           grid.rows, &p, sizeof(p));
+        PplRowsParams rp{};
+        rp.chunks = uint64_t(chunks);
+        rp.rows = uint64_t(rows);
+        rp.B = uint32_t(p.B);
+        rp.H = uint32_t(p.H_render);
+        rp.W = uint32_t(p.W_render);
+        rp.row_begin = p.row_begin;
+        rp.row_end = p.row_end;
+        const vkk::Fold row_grid = vkk::fold_1d(int64_t(p.B) * work_rows, 1);
+        rp.wgs_per_row = row_grid.per_row;
+        vkk::dispatch("multi_scale_loss.ppl_rows", {}, row_grid.per_row, row_grid.rows, 1,
+                      &rp, sizeof(rp));
+    }
+
+    // Disjoint global rows combine before any rounding into the camera/global table.
+    backend::vk::image_strip_sum(rows, size_t(row_values));
+    float* sums = rows;
+    uint32_t n = uint32_t(p.H_render), scratch = 2;
+    while (n > 1) {
+        const uint32_t outputs = (n + 255u) / 256u;
+        const uint64_t values = uint64_t(p.B) * kNRaw * outputs;
+        float* out = static_cast<float*>(pool.acquire_dynamic(
+            VramCategory::Image, keys[scratch], size_t(values) * sizeof(float)));
+        const vkk::Fold grid = vkk::fold_1d(int64_t(values), 1);
+        PplRawSumParams rp{};
+        rp.src = uint64_t(sums);
+        rp.dst = uint64_t(out);
+        rp.B = uint32_t(p.B);
+        rp.n = n;
+        rp.wgs_per_row = grid.per_row;
+        vkk::dispatch("multi_scale_loss.ppl_raw_sum", {}, grid.per_row, grid.rows, 1,
+                      &rp, sizeof(rp));
+        sums = out;
+        n = outputs;
+        scratch = scratch == 2 ? 3 : 2;
+    }
+
+    backend::memset_async(raw_losses, 0,
+        (size_t(num_train_images) + 1) * kNRaw * sizeof(float), backend::kDefaultStream);
+    PplRawGatherParams gp{};
+    gp.sums = uint64_t(sums);
+    gp.camera_indices = p.camera_indices;
+    gp.raw = uint64_t(raw_losses);
+    gp.B = uint32_t(p.B);
+    gp.has_cameras = (p.in_flags & kInCam) != 0 ? 1u : 0u;
+    vkk::dispatch("multi_scale_loss.ppl_raw_gather", {}, 1, 1, 1, &gp, sizeof(gp));
 }
 
 // Grid over 16x16 logical tiles of a (W, H, B) image.
@@ -235,14 +343,52 @@ uint32_t ssim_tile() {
                                                                          : 16u;
 }
 
-void dispatch_ssim(const char* entry, int64_t W, int64_t H, int64_t B,
-                   const void* params, uint32_t size) {
-    if (W <= 0 || H <= 0 || B <= 0) return;
+void dispatch_ssim(SsimParams& p, float* scalar) {
+    const int64_t work_height = p.row_end - p.row_begin;
+    if (p.W <= 0 || work_height <= 0 || p.B <= 0) return;
     const uint32_t t = ssim_tile();
-    uint32_t gx = (uint32_t)((W + t - 1) / t), gy = (uint32_t)((H + t - 1) / t);
-    if (gx > 65535 || gy > 65535 || B > 65535)
+    const uint32_t gx = uint32_t((int64_t(p.W) + t - 1) / t);
+    const uint32_t gy = uint32_t((work_height + t - 1) / t);
+    if (gx > 65535 || gy > 65535 || p.B > 65535)
         throw std::runtime_error("ssim: tile grid dimension exceeds 65535");
-    vkk::dispatch(entry, {t}, gx, gy, (uint32_t)B, params, size);
+    float* partials = nullptr;
+    uint32_t count = 0;
+    if (scalar) {
+        const uint64_t groups = uint64_t(gx) * gy * uint32_t(p.B);
+        if (groups > uint64_t(std::numeric_limits<int32_t>::max()))
+            throw std::runtime_error("ssim: scalar reduction count exceeds int32");
+        count = uint32_t(groups);
+        static const std::string key = "ppl.ssim.partial";
+        partials = static_cast<float*>(DevicePool::global().acquire_dynamic(
+            VramCategory::Image, key, size_t(count) * sizeof(float)));
+        p.ssim_val = uint64_t(partials);
+    }
+    vkk::dispatch("fused_ssim.ssim_bwd_inplace", {t}, gx, gy, uint32_t(p.B), &p, sizeof(p));
+    if (!scalar) return;
+
+    static const std::array<std::string, 2> keys = {
+        "ppl.ssim.reduce.0", "ppl.ssim.reduce.1"};
+    uint32_t scratch = 0;
+    const float normalization = 1.0f / (3.0f * p.B * p.H * p.W);
+    do {
+        const uint32_t outputs = (count + 255u) / 256u;
+        float* out = scalar;
+        if (outputs > 1)
+            out = static_cast<float*>(DevicePool::global().acquire_dynamic(
+                VramCategory::Image, keys[scratch], size_t(outputs) * sizeof(float)));
+        const vkk::Fold grid = vkk::fold_1d(outputs, 1);
+        SsimReduceParams rp{};
+        rp.src = uint64_t(partials);
+        rp.dst = uint64_t(out);
+        rp.n = count;
+        rp.wgs_per_row = grid.per_row;
+        rp.scale = outputs == 1 ? normalization : 1.0f;
+        vkk::dispatch("fused_ssim.ssim_reduce", {}, grid.per_row, grid.rows, 1,
+                      &rp, sizeof(rp));
+        partials = out;
+        count = outputs;
+        scratch ^= 1u;
+    } while (count > 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -303,6 +449,11 @@ PplParams build_ppl_params(
     p.has_mask = has_mask ? 1 : 0;
     p.saturation_threshold = saturation_threshold;
     p.in_flags = in_flags;
+    const auto rows = backend::vk::image_strip_rows(uint32_t(H_render));
+    p.row_begin = rows.work_begin;
+    p.row_end = rows.work_end;
+    p.stat_begin = rows.owned_begin;
+    p.stat_end = rows.owned_end;
     return p;
 }
 
@@ -322,6 +473,9 @@ void reduce_dispatch(const char* entry, long num_train_images,
 // ---------------------------------------------------------------------------
 // Fused SSIM inplace (mirrors FusedSSIM.cu's memory-efficient inplace path)
 // ---------------------------------------------------------------------------
+void sum_ssim(float* value) {
+    backend::vk::image_strip_sum(value, 1);
+}
 
 void launch_fused_ssim_inplace(
     const TorchTensorView& img1, const TorchTensorView& img2,
@@ -339,11 +493,16 @@ void launch_fused_ssim_inplace(
     p.masks = vkk::or_fallback(std::get<0>(mask));
     p.mask_w = vkk::or_fallback(nullptr);
     p.dL_dimg1 = vkk::or_fallback(std::get<0>(dL_dimg1));
-    p.ssim_val = vkk::or_fallback(ssim_buf);
+    p.ssim_val = vkk::or_fallback(nullptr);
     p.loss_map = vkk::or_fallback(std::get<0>(ssim_loss_map));
     p.B = B;
     p.H = H;
     p.W = W;
+    const auto rows = backend::vk::image_strip_rows(uint32_t(H));
+    p.owned_begin = rows.owned_begin;
+    p.owned_end = rows.owned_end;
+    p.row_begin = rows.work_begin;
+    p.row_end = rows.work_end;
     if (_has(mask)) {
         const auto& ms = std::get<2>(mask);
         if (ms.size() >= 3) {
@@ -369,8 +528,12 @@ void launch_fused_ssim_inplace(
         cp.B = B; cp.H = H; cp.W = W;
         cp.Bm = p.Bm; cp.Hm = p.Hm; cp.Wm = p.Wm;
         cp.sat = saturation_threshold;
-        dispatch_tiles("fused_ssim.ssim_mask_cov_x", W, H, B, &cp, sizeof(cp));
-        dispatch_tiles("fused_ssim.ssim_mask_cov_y", W, H, B, &cp, sizeof(cp));
+        cp.row_begin = rows.work_begin;
+        cp.row_end = rows.work_end;
+        dispatch_tiles("fused_ssim.ssim_mask_cov_x", W,
+                       cp.row_end - cp.row_begin, B, &cp, sizeof(cp));
+        dispatch_tiles("fused_ssim.ssim_mask_cov_y", W,
+                       cp.row_end - cp.row_begin, B, &cp, sizeof(cp));
         p.mask_w = (uint64_t)cov;
         p.flags |= kSsimHasCov;
     }
@@ -381,7 +544,7 @@ void launch_fused_ssim_inplace(
     if (_has(dL_dimg1)) p.flags |= kSsimWriteGrad;
     if (_has(ssim_loss_map)) p.flags |= kSsimHasLossMap;
 
-    dispatch_ssim("fused_ssim.ssim_bwd_inplace", W, H, B, &p, sizeof(p));
+    dispatch_ssim(p, ssim_buf);
 }
 
 float fused_ssim_inplace_vk(
@@ -401,6 +564,7 @@ float fused_ssim_inplace_vk(
                               ssim_loss_map, ssim_loss_map_weight,
                               ssim_loss_map_mode, saturation_threshold);
     if (return_ssim_val) {
+        sum_ssim(ssim_buf);
         float val;
         backend::memcpy_sync(&val, ssim_buf, sizeof(float),
                              MemcpyKind::DeviceToHost);
@@ -421,6 +585,7 @@ float fused_ssim_inplace_async_vk(
     launch_fused_ssim_inplace(img1, img2, mask, dL_dmap, dL_dimg1, ssim_buf,
                               ssim_loss_map, ssim_loss_map_weight,
                               ssim_loss_map_mode, saturation_threshold);
+    sum_ssim(ssim_buf);
     const float* prev = readout.read_previous();
     float val = prev ? prev[0] : 0.0f;
     readout.issue(ssim_buf);
@@ -512,8 +677,11 @@ void avg_pool_downsample_float_vk(const TorchTensorView& src,
     p.lsH = (int32_t)ds[1];
     p.lsW = (int32_t)ds[2];
     p.scale = 1;
-    dispatch_tiles("multi_scale_loss.ms_downsample_f", p.lsW, p.lsH, p.B, &p,
-                   sizeof(p));
+    const auto rows = backend::vk::image_strip_rows(uint32_t(p.lsH));
+    p.row_begin = rows.work_begin;
+    p.row_end = rows.work_end;
+    dispatch_tiles("multi_scale_loss.ms_downsample_f", p.lsW,
+                   p.row_end - p.row_begin, p.B, &p, sizeof(p));
 }
 
 void avg_pool_downsample_masked_float_vk(const TorchTensorView& src,
@@ -531,8 +699,11 @@ void avg_pool_downsample_masked_float_vk(const TorchTensorView& src,
     p.hsW = (int32_t)ss[2];
     p.lsH = (int32_t)ds[1];
     p.lsW = (int32_t)ds[2];
-    dispatch_tiles("multi_scale_loss.ms_downsample_masked_f", p.lsW, p.lsH,
-                   p.B, &p, sizeof(p));
+    const auto rows = backend::vk::image_strip_rows(uint32_t(p.lsH));
+    p.row_begin = rows.work_begin;
+    p.row_end = rows.work_end;
+    dispatch_tiles("multi_scale_loss.ms_downsample_masked_f", p.lsW,
+                   p.row_end - p.row_begin, p.B, &p, sizeof(p));
 }
 
 void zero_masked_grad_vk(const TorchTensorView& grad,
@@ -545,8 +716,11 @@ void zero_masked_grad_vk(const TorchTensorView& grad,
     p.C = (int32_t)gs[3];
     p.H = (int32_t)gs[1];
     p.W = (int32_t)gs[2];
-    dispatch_tiles("multi_scale_loss.ms_zero_masked_grad", p.W, p.H, p.B, &p,
-                   sizeof(p));
+    const auto rows = backend::vk::image_strip_rows(uint32_t(p.H));
+    p.row_begin = rows.owned_begin;
+    p.row_end = rows.owned_end;
+    dispatch_tiles("multi_scale_loss.ms_zero_masked_grad", p.W,
+                   p.row_end - p.row_begin, p.B, &p, sizeof(p));
 }
 
 void avg_pool_downsample_gt_geometry_vk(const TorchTensorView& src,
@@ -563,12 +737,13 @@ void avg_pool_downsample_gt_geometry_vk(const TorchTensorView& src,
     p.lsH = (int32_t)ds[1];
     p.lsW = (int32_t)ds[2];
     p.scale = 1;
+    p.row_end = uint32_t(p.lsH);
     dispatch_tiles("multi_scale_loss.ms_downsample_gt_geo", p.lsW, p.lsH, p.B,
                    &p, sizeof(p));
 }
 
 void avg_pool_downsample_bool_vk(const TorchTensorView& src,
-                                 const TorchTensorView& dst) {
+                                 const TorchTensorView& dst, bool same_shape) {
     const auto& ss = std::get<2>(src);
     const auto& ds = std::get<2>(dst);
     MsPoolBoolParams p{};
@@ -580,6 +755,14 @@ void avg_pool_downsample_bool_vk(const TorchTensorView& src,
     p.lsH = (int32_t)ds[1];
     p.lsW = (int32_t)ds[2];
     int64_t words = ((int64_t)ds[0] * ds[1] * ds[2] + 3) / 4;
+    if (backend::vk::image_strip().full_height && same_shape) {
+        const auto rows = backend::vk::image_strip_rows(uint32_t(p.lsH));
+        p.row_begin = rows.work_begin;
+        p.row_end = rows.work_end;
+        if (p.row_begin == p.row_end) return;
+        p.words_per_batch = (uint32_t((p.row_end - p.row_begin) * p.lsW) + 3) / 4 + 1;
+        words = int64_t(p.B) * p.words_per_batch;
+    }
     vkk::dispatch_flat("multi_scale_loss.ms_downsample_b", {}, words, 256, &p,
                        sizeof(p), &p.wgs_per_row);
 }
@@ -600,7 +783,11 @@ void avg_pool_upsample_float_vk(const TorchTensorView& hs_dst,
     p.scale = scale;
     p.a = a;
     p.b = b;
-    dispatch_tiles("multi_scale_loss.ms_upsample_f", dW, dH, dB, &p, sizeof(p));
+    const auto rows = backend::vk::image_strip_rows(uint32_t(dH));
+    p.row_begin = rows.owned_begin;
+    p.row_end = rows.owned_end;
+    dispatch_tiles("multi_scale_loss.ms_upsample_f", dW,
+                   p.row_end - p.row_begin, dB, &p, sizeof(p));
 }
 
 // Mirrors MsNmsParams in shaders/multi_scale_loss.slang.
@@ -608,8 +795,9 @@ struct MsNmsParams {
     uint64_t img, fails;
     int32_t B, H, W;
     float falloff;
+    uint32_t row_begin, row_end;
 };
-static_assert(sizeof(MsNmsParams) == 2 * 8 + 4 * 4, "layout");
+static_assert(sizeof(MsNmsParams) == 2 * 8 + 6 * 4, "layout");
 
 // Two passes so the suppression is in place; see PerPixelLoss.cu.
 void loss_map_nms_inplace_vk(const TorchTensorView& img,
@@ -625,8 +813,13 @@ void loss_map_nms_inplace_vk(const TorchTensorView& img,
     p.B = (int32_t)B;
     p.H = (int32_t)H;
     p.W = (int32_t)W;
-    dispatch_tiles("multi_scale_loss.ms_nms_mask", W, H, B, &p, sizeof(p));
-    dispatch_tiles("multi_scale_loss.ms_nms_apply", W, H, B, &p, sizeof(p));
+    const auto rows = backend::vk::image_strip_rows(uint32_t(H));
+    p.row_begin = rows.work_begin;
+    p.row_end = rows.work_end;
+    dispatch_tiles("multi_scale_loss.ms_nms_mask", W,
+                   p.row_end - p.row_begin, B, &p, sizeof(p));
+    dispatch_tiles("multi_scale_loss.ms_nms_apply", W,
+                   p.row_end - p.row_begin, B, &p, sizeof(p));
 }
 
 void vector_add_scaled_vk(float* dst, const float* src, float scale, int n) {
@@ -689,9 +882,42 @@ LossValues compute_multi_scale_per_pixel_losses(
         }
     }();
     const auto& s = std::get<2>(render_rgb);
+    const auto& strip = backend::vk::image_strip();
+    if (strip.full_height) {
+        const int64_t max_elements = std::numeric_limits<int32_t>::max();
+        if (!_has(render_rgb) || !_has(ref_rgb) || s.size() != 4 ||
+            s[0] <= 0 || s[0] > 65535 ||
+            s[1] != strip.full_height || s[2] <= 0 || s[3] != 3 ||
+            s[2] > max_elements / 3 / s[1] / s[0] ||
+            std::get<2>(ref_rgb) != s || needs_input_grad.size() < 11)
+            throw std::runtime_error("image strip: invalid loss image shape or dispatch product");
+        if (_has(ref_depth) || _has(ref_normal) || _has(depth_normal) ||
+            _has(median_normal))
+            throw std::runtime_error("image strip: GT geometry and depth-normal losses are unsupported");
+        if (_mode == DensifyLossMapMode::EdgeAware ||
+            _mode == DensifyLossMapMode::RobustEdgeAware)
+            throw std::runtime_error("image strip: edge-aware loss maps are unsupported");
+        if (strip.halo < backend::vk::image_strip_halo(uint32_t(num_loss_scales)))
+            throw std::runtime_error("image strip: insufficient multi-scale SSIM halo");
+        uint32_t height = strip.full_height;
+        for (int scale = 0; scale < num_loss_scales; ++scale) {
+            backend::vk::image_strip_rows(height);
+            height = std::max(1u, height / 2);
+        }
+        if (_has(ref_alpha)) {
+            const auto& mask = std::get<2>(ref_alpha);
+            if (mask.size() != 4 || mask[0] != s[0] || mask[1] <= 0 ||
+                mask[2] <= 0 || mask[3] != 1 ||
+                mask[2] > max_elements / mask[1] / mask[0])
+                throw std::runtime_error("image strip: invalid alpha mask extent");
+        }
+    }
     long B = s[0], H = s[1], W = s[2];
 
     if (!_has(camera_indices)) num_train_images = B;
+    if (strip.full_height && (num_train_images <= 0 ||
+        num_train_images >= 65535L * 32L))
+        throw std::runtime_error("image strip: loss reduction grid exceeds 65535");
 
     constexpr int MAX_SCALES = 4;
     if (num_loss_scales > MAX_SCALES)
@@ -753,7 +979,9 @@ LossValues compute_multi_scale_per_pixel_losses(
                 long nH = std::max((long)1, (long)pps[1] / 2);
                 long nW = std::max((long)1, (long)pps[2] / 2);
                 curr = _pool_alloc_b(pfx + name, B, nH, nW);
-                avg_pool_downsample_bool_vk(prev, curr);
+                const auto& rgb_shape = std::get<2>(render_rgb_s[sc - 1]);
+                avg_pool_downsample_bool_vk(prev, curr,
+                    pps[1] == rgb_shape[1] && pps[2] == rgb_shape[2]);
             }
         };
 
@@ -807,10 +1035,6 @@ LossValues compute_multi_scale_per_pixel_losses(
 
         float* raw_losses_ptr = DevicePool::global().acquire<float>(
             PoolSlot::PplRawLosses, (size_t)(num_train_images + 1) * kNRaw);
-        backend::memset_async(raw_losses_ptr, 0,
-                              (size_t)(num_train_images + 1) * kNRaw *
-                                  sizeof(float),
-                              backend::kDefaultStream);
 
         float* losses_ptr =
             DevicePool::global().acquire<float>(PoolSlot::PplLosses, kNL);
@@ -838,8 +1062,11 @@ LossValues compute_multi_scale_per_pixel_losses(
             fp.loss_map = (uint64_t)loss_map_ptr;
             fp.in_flags |= kInLossMap;
         }
-        fp.losses = (uint64_t)raw_losses_ptr;
-        dispatch_ppl("multi_scale_loss.ppl_fwd", ppi, B, fp);
+        if (!(fp.in_flags & kInLossMap)) {
+            fp.row_begin = fp.stat_begin;
+            fp.row_end = fp.stat_end;
+        }
+        dispatch_ppl_forward(fp, num_train_images, raw_losses_ptr);
 
         reduce_dispatch("multi_scale_loss.ppl_reduce_fwd", num_train_images,
                         raw_losses_ptr, losses_ptr, nullptr, loss_weights_0);
@@ -861,6 +1088,7 @@ LossValues compute_multi_scale_per_pixel_losses(
                     "ppl.g." + name + ".s" + std::to_string(scale), is[0],
                     is[1], is[2], C);
             }
+            zero_nonowned(out);
         };
         alloc_grad_f(scale_grads.v_render_rgb, grads_out.v_render_rgb,     needs_input_grad[0],  render_rgb_s[scale],   "vrgb",  3);
         alloc_grad_f(scale_grads.v_ref_rgb,    grads_out.v_ref_rgb,        needs_input_grad[1],  ref_rgb_s[scale],      "vfrgb", 3);
@@ -909,6 +1137,8 @@ LossValues compute_multi_scale_per_pixel_losses(
                 ref_alpha_s[scale], has_mask, saturation_threshold,
                 loss_weights_0, camera_indices);
             bp.losses = (uint64_t)v_raw_losses;
+            bp.row_begin = bp.stat_begin;
+            bp.row_end = bp.stat_end;
             uint32_t out_flags = 0;
             const TorchTensorView* gs[13] = {
                 &scale_grads.v_render_rgb, &scale_grads.v_ref_rgb,
@@ -923,7 +1153,7 @@ LossValues compute_multi_scale_per_pixel_losses(
                 (&bp.v_render_rgb)[i] = vkk::or_fallback(std::get<0>(*gs[i]));
             }
             bp.out_flags = out_flags;
-            dispatch_ppl("multi_scale_loss.ppl_bwd", ppi, B, bp);
+            dispatch_ppl_backward(bp);
         }
 
         // SSIM backward (fused forward+backward); scalar routed through an
@@ -962,6 +1192,7 @@ LossValues compute_multi_scale_per_pixel_losses(
             loss_map_nms_inplace_vk(loss_map_scale,
                                     "ppl.nms.s" + std::to_string(scale),
                                     nms_falloff);
+        zero_nonowned(loss_map_scale);
 
         if (scale == 0) ssim_val = ssim;
 

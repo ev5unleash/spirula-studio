@@ -19,6 +19,7 @@
 #include <core/Tensor.h>
 
 #include "backend/vulkan/kernels/KernelCommon.h"
+#include "backend/vulkan/kernels/ImageStrip.h"
 
 namespace {
 
@@ -58,6 +59,33 @@ void v1_mults(int W, int H, int w_eff, int h_eff, int target_tile_size,
         mult_x = std::max(mult_x, 1) * (int)kBwdV1BlockX;
         mult_y = std::max(mult_y, 1) * (int)kBwdV1BlockY;
     }
+}
+
+template <typename P>
+struct PpispStripParams {
+    P image;
+    uint32_t row_begin, row_end;
+};
+
+template <typename P>
+PpispStripParams<P> ppisp_rows(const P& image, int height, bool backward) {
+    const auto rows = backend::vk::image_strip_rows(uint32_t(height));
+    return {image, backward ? rows.owned_begin : rows.work_begin,
+                   backward ? rows.owned_end : rows.work_end};
+}
+
+template <typename P>
+void dispatch_ppisp_flat(const char* entry, const backend::vk::SpecList& spec,
+                         int64_t total, P& image, int height, bool backward) {
+    auto p = ppisp_rows(image, height, backward);
+    vkk::dispatch_flat(entry, spec, total, 256, &p, sizeof(p),
+                       &p.image.wgs_per_row);
+}
+
+void reject_strip_layout(bool unsupported) {
+    if (unsupported && backend::vk::image_strip().full_height != 0)
+        throw std::runtime_error(
+            "image strip: packed/patched bilagrid has no global row layout");
 }
 
 // ---- param struct mirrors (see the corresponding slang modules) ----
@@ -484,6 +512,7 @@ void launch_ppisp_sample_fwd_bwd(
     float* v_coords, float* v_rgb, int N, int L, int H, int W, int m, int h,
     int w, int64_t total, bool packed, bool bwd
 ) {
+    reject_strip_layout(packed);
     ReaderPtrs r = unpack_reader(bilagrid);
     BpSampleParams p{};
     p.fp32 = r.fp32; p.q16 = r.q16; p.vbounds = r.vbounds;
@@ -498,9 +527,9 @@ void launch_ppisp_sample_fwd_bwd(
     p.total = (uint32_t)total;
     uint32_t coords_grad = (bwd && v_coords != nullptr) ? 1u : 0u;
     backend::vk::SpecList spec{r.vq, 0u, coords_grad, packed ? 1u : 0u};
-    vkk::dispatch_flat(bwd ? "bilagrid_ppisp.bilagrid_ppisp_sample_bwd"
-                           : "bilagrid_ppisp.bilagrid_ppisp_sample_fwd",
-                       spec, total, 256, &p, sizeof(p), &p.wgs_per_row);
+    dispatch_ppisp_flat(bwd ? "bilagrid_ppisp.bilagrid_ppisp_sample_bwd"
+                            : "bilagrid_ppisp.bilagrid_ppisp_sample_fwd",
+                        spec, total, p, h, bwd);
 }
 
 }  // namespace
@@ -565,6 +594,8 @@ void launch_family_fwd(
     float* output, const int* offsets, const int* grid_indices, int N, int L,
     int H, int W, int m, int h, int w, int h0, int w0, bool patched
 ) {
+    const bool is_ppisp = std::string(e.fwd).rfind("bilagrid_ppisp.", 0) == 0;
+    reject_strip_layout(patched);
     int64_t total = patched ? (int64_t)N * m * h * w : (int64_t)N * h * w;
     BgUniformParams p{};
     fill_uniform(p, bilagrid, in_buf, output, offsets, grid_indices, N, L, H,
@@ -578,8 +609,11 @@ void launch_family_fwd(
         std::string(e.fwd).rfind("bilagrid_ppisp.", 0) == 0
             ? backend::vk::SpecList{r.vq, patched ? 1u : 0u, 0u, 0u}
             : backend::vk::SpecList{r.vq, patched ? 1u : 0u};
-    vkk::dispatch_flat(e.fwd, spec, total, 256, &p, sizeof(p),
-                       &p.wgs_per_row);
+    if (is_ppisp)
+        dispatch_ppisp_flat(e.fwd, spec, total, p, h, false);
+    else
+        vkk::dispatch_flat(e.fwd, spec, total, 256, &p, sizeof(p),
+                           &p.wgs_per_row);
 }
 
 void launch_family_bwd_v1(
@@ -589,6 +623,7 @@ void launch_family_bwd_v1(
     int w0, int target_tile_size, int mi_batch_size, const int* grid_indices,
     bool patched
 ) {
+    reject_strip_layout(patched);
     ReaderPtrs r = unpack_reader(bilagrid);
     bool is_ppisp = std::string(e.v1_grid).rfind("bilagrid_ppisp.", 0) == 0;
     backend::vk::SpecList spec =
@@ -622,7 +657,12 @@ void launch_family_bwd_v1(
         p.mult_y = mult_y;
         p.m_batch_stride = num_m_batches;
         p.has_grid_indices = (!patched && grid_indices != nullptr) ? 1 : 0;
-        vkk::dispatch(e.v1_grid, spec, gx, gy, gz, &p, sizeof(p));
+        if (is_ppisp) {
+            auto strip = ppisp_rows(p, h, true);
+            vkk::dispatch(e.v1_grid, spec, gx, gy, gz, &strip, sizeof(strip));
+        } else {
+            vkk::dispatch(e.v1_grid, spec, gx, gy, gz, &p, sizeof(p));
+        }
     }
     // input-grad kernel. null v_in = skip (the engine's depth/normal hooks
     // discard the GT-side grad; the CUDA launchers guard the same way) --
@@ -644,8 +684,11 @@ void launch_family_bwd_v1(
         p.w0 = patched ? w0 : 1;
         p.has_grid_indices = (!patched && grid_indices != nullptr) ? 1 : 0;
         p.total = (uint32_t)total;
-        vkk::dispatch_flat(e.v1_rgb, spec, total, 256, &p, sizeof(p),
-                           &p.wgs_per_row);
+        if (is_ppisp)
+            dispatch_ppisp_flat(e.v1_rgb, spec, total, p, h, true);
+        else
+            vkk::dispatch_flat(e.v1_rgb, spec, total, 256, &p, sizeof(p),
+                               &p.wgs_per_row);
     }
 }
 
@@ -717,9 +760,8 @@ void bilagrid_ppisp_uniform_sample_backward_v2(
     p.N = N; p.L = L; p.H = H; p.W = W; p.h = h; p.w = w;
     p.has_grid_indices = (grid_indices != nullptr) ? 1 : 0;
     p.total = (uint32_t)total;
-    vkk::dispatch_flat("bilagrid_ppisp.bilagrid_ppisp_bwd_v2",
-                       backend::vk::SpecList{r.vq}, total, 256, &p, sizeof(p),
-                       &p.wgs_per_row);
+    dispatch_ppisp_flat("bilagrid_ppisp.bilagrid_ppisp_bwd_v2",
+                        backend::vk::SpecList{r.vq}, total, p, h, true);
 }
 
 void bilagrid_ppisp_patched_sample_backward_v1(

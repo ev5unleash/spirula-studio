@@ -22,6 +22,7 @@
 #include "core/ColorSpace.h"
 #include "data/DatasetParser.h"
 #include "app/OutputLease.h"
+#include "app/ImageStripExecutor.h"
 #include "app/webviewer/RenderWorker.h"
 #include "config/TrainConfig.h"
 #include "i18n/TimeFormat.h"
@@ -175,6 +176,7 @@ struct TrainerCallbacks {
 class TrainerSession {
 public:
     TrainerSession() = default;
+    ~TrainerSession();
     TrainerSession(const TrainerSession&) = delete;
     TrainerSession& operator=(const TrainerSession&) = delete;
 
@@ -221,6 +223,7 @@ public:
     std::mutex engine_mutex;
     std::atomic<bool> paused{false};
     std::atomic<bool> stop_requested{false};
+    std::atomic<bool> controller_disconnected{false};
     // Clear before stop_requested to end the run without writing the final
     // checkpoint: whatever the last periodic save left on disk is the result.
     std::atomic<bool> save_on_stop{true};
@@ -303,6 +306,8 @@ private:
     mutable std::mutex _progress_mutex;    // guards the latency window
     std::deque<double> _step_latencies;    // last 100, seconds
     bool _diverged_loss_reported = false;
+    std::unique_ptr<app::ImageStripExecutor> _image_strip;
+    bool _image_strip_poisoned = false;
 };
 
 }  // namespace spirula

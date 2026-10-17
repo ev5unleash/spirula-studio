@@ -9,6 +9,7 @@
 #include <core/Common.cuh>
 
 #include "backend/vulkan/kernels/KernelCommon.h"
+#include "backend/vulkan/kernels/ImageStrip.h"
 
 namespace {
 
@@ -112,6 +113,8 @@ void blend_background_backward(
     DeviceTensor3D<float> v_transmittance,
     DeviceTensor3D<float3> v_background
 ) {
+    if (backend::vk::image_strip().full_height)
+        throw std::runtime_error("image strip: learned background backward is unsupported");
     const int64_t total = rgb.size<0>() * rgb.size<1>() * rgb.size<2>();
     BlendBgBwdParams p{};
     p.overexposure_scale = overexposure_scale(
@@ -145,6 +148,8 @@ void blend_background_noise_backward(
     DeviceTensor3D<float3> v_rgb,
     DeviceTensor3D<float> v_transmittance
 ) {
+    if (backend::vk::image_strip().full_height)
+        throw std::runtime_error("image strip: noise background backward is unsupported");
     const int64_t hw = rgb.size<1>() * rgb.size<2>();
     const int64_t total = rgb.size<0>() * hw;
     BlendBgNoiseBwdParams p{};
@@ -193,6 +198,27 @@ void blend_background_color_backward(
     p.bg_g = background.y;
     p.bg_b = background.z;
     p.total = (uint32_t)total;
+    if (backend::vk::image_strip().full_height) {
+        const int64_t B = rgb.size<0>(), H = rgb.size<1>(), W = rgb.size<2>();
+        backend::vk::image_strip_zero_outside(
+            reinterpret_cast<float*>(v_rgb.data_ptr()), B, H, W, 3, true);
+        backend::vk::image_strip_zero_outside(v_transmittance.data_ptr(), B, H, W, 1, true);
+        const auto rows = backend::vk::image_strip_rows(uint32_t(H));
+        const uint32_t count = uint32_t((rows.owned_end - rows.owned_begin) * W);
+        for (int64_t b = 0; b < B; ++b) {
+            const uint64_t offset = uint64_t((b * H + rows.owned_begin) * W) * sizeof(float);
+            auto strip = p;
+            strip.rgb += 3 * offset;
+            strip.transmittance += offset;
+            strip.v_out_rgb += 3 * offset;
+            strip.v_rgb += 3 * offset;
+            strip.v_transmittance += offset;
+            strip.total = count;
+            vkk::dispatch_flat("pixel_wise_train.blend_bg_color_bwd", {},
+                              count, 128, &strip, sizeof(strip), &strip.wgs_per_row);
+        }
+        return;
+    }
     vkk::dispatch_flat("pixel_wise_train.blend_bg_color_bwd",
                        backend::vk::SpecList{}, total, 128, &p, sizeof(p),
                        &p.wgs_per_row);
@@ -213,6 +239,25 @@ void working_to_display_backward(
     p.v_out_rgb = (uint64_t)v_out_rgb.data_ptr();
     p.v_rgb = (uint64_t)v_rgb.data_ptr();
     p.total = (uint32_t)total;
+    if (backend::vk::image_strip().full_height) {
+        const int64_t B = rgb.size<0>(), H = rgb.size<1>(), W = rgb.size<2>();
+        backend::vk::image_strip_zero_outside(
+            reinterpret_cast<float*>(v_rgb.data_ptr()), B, H, W, 3, true);
+        const auto rows = backend::vk::image_strip_rows(uint32_t(H));
+        const uint32_t count = uint32_t((rows.owned_end - rows.owned_begin) * W);
+        for (int64_t b = 0; b < B; ++b) {
+            const uint64_t offset = uint64_t((b * H + rows.owned_begin) * W) * sizeof(float);
+            auto strip = p;
+            strip.rgb += 3 * offset;
+            strip.v_out_rgb += 3 * offset;
+            strip.v_rgb += 3 * offset;
+            strip.total = count;
+            vkk::dispatch_flat("pixel_wise_train.working_to_display_bwd_k",
+                {(uint32_t)transfer, is_linear ? 1u : 0u}, count, 128,
+                &strip, sizeof(strip), &strip.wgs_per_row);
+        }
+        return;
+    }
     vkk::dispatch_flat("pixel_wise_train.working_to_display_bwd_k",
                        backend::vk::SpecList{(uint32_t)transfer,
                                              is_linear ? 1u : 0u},
@@ -231,6 +276,22 @@ void overexposure_grad_add(
     p.v_rgb = (uint64_t)v_rgb.data_ptr();
     p.scale = overexposure_scale(b, h, w, weight);
     p.total = (uint32_t)(b * h * w);
+    if (backend::vk::image_strip().full_height) {
+        backend::vk::image_strip_zero_outside(
+            reinterpret_cast<float*>(v_rgb.data_ptr()), b, h, w, 3, true);
+        const auto rows = backend::vk::image_strip_rows(uint32_t(h));
+        const uint32_t count = uint32_t((rows.owned_end - rows.owned_begin) * w);
+        for (int64_t batch = 0; batch < b; ++batch) {
+            const uint64_t offset = uint64_t((batch * h + rows.owned_begin) * w) * sizeof(float);
+            auto strip = p;
+            strip.rgb += 3 * offset;
+            strip.v_rgb += 3 * offset;
+            strip.total = count;
+            vkk::dispatch_flat("pixel_wise_train.overexposure_add", {},
+                              count, 128, &strip, sizeof(strip), &strip.wgs_per_row);
+        }
+        return;
+    }
     vkk::dispatch_flat("pixel_wise_train.overexposure_add",
                        backend::vk::SpecList{}, b * h * w, 128, &p, sizeof(p),
                        &p.wgs_per_row);
@@ -246,6 +307,8 @@ void depth_to_normal_backward(
     DeviceTensor3D<float3> v_normals,
     DeviceTensor3D<float> v_depths
 ) {
+    if (backend::vk::image_strip().full_height)
+        throw std::runtime_error("image strip: depth-to-normal backward is unsupported");
     const uint32_t B = (uint32_t)depths.size<0>();
     const uint32_t H = (uint32_t)depths.size<1>();
     const uint32_t W = (uint32_t)depths.size<2>();
@@ -294,6 +357,8 @@ void linear_depth_to_ray_depth_inplace(
 ) {
     int64_t b = depths.size<0>(), h = depths.size<1>(), w = depths.size<2>();
     if (b <= 0 || h <= 0 || w <= 0) return;
+    if (backend::vk::image_strip().full_height)
+        throw std::runtime_error("image strip: GT depth conversion is unsupported");
     LinToRayDepthParams p{};
     p.intrins = std::get<0>(intrins);
     p.dist_coeffs = vkk::or_fallback(std::get<0>(dist_coeffs));
@@ -328,6 +393,8 @@ void color_shift_reg_step(
     (void)stream;  // single queue; default-stream submission order suffices
     if (weight <= 0.0f || N_pixels <= 0) return;
     if (!shift_reg_ema || !shift_reg_batch_sum) return;
+    if (backend::vk::image_strip().full_height)
+        throw std::runtime_error("image strip: color-shift EMA is unsupported");
 
     float bc = 1.0f - std::pow(beta, (float)(step + 1));
     if (bc < 1e-30f) bc = 1.0f;

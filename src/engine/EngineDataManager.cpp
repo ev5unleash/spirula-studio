@@ -292,7 +292,8 @@ std::map<std::string, float> engine_train_step_managed(
     // Accumulation and unequal face sizes cannot use FPBO.
     EngineStepConfig cfg = engine_resolve_managed_step_config(cfg_in);
 
-    const TrainStep& stp = engine().dm->next_train_step();
+    const TrainStep* replay = engine_diagnostic_replay_step();
+    const TrainStep& stp = replay ? *replay : engine().dm->next_train_step();
     engine_diagnostic_input(stp, step);
     if (stp.subs.empty())
         throw std::runtime_error("engine_train_step_managed: empty training step");

@@ -73,6 +73,35 @@ for A/B testing):
   `WavePrefixSum` and size-agnostic reductions; AMD wave64 and Intel
   variable-width are first-class.
 
+## Experimental same-view image strips
+
+Windows Vulkan only; native single-device training remains the default.
+Select authority A with ordinary `train --device uuid:A` and opt in to a
+persistent worker on a distinct supported non-NVIDIA Vulkan device with
+`SS_IMAGE_STRIP_WORKER_DEVICE=uuid:B`. Leave that variable unset for native
+training. The authority projects/bins once; both devices process complementary
+rows of the same view, with loss-pyramid halos and shared raw statistics.
+Reduced screen/density/appearance gradients feed one authority optimizer update,
+preserving the logical batch and objective rather than training separate views.
+
+The admitted lane is packed `3dgs` with native FPBO, one camera/pass, RGB GT
+with optional mask, fixed black background, optional PPISP and optional native
+`ppisp` RGB bilagrid. Quantized grid camera slices must align to 256-value blocks.
+It refuses BVH, B1/B2/debug execution modes, multi-camera/multi-pass batches,
+depth/normal GT or grids, learned/nonblack backgrounds, color-shift/overexposure
+regularizers, edge-aware loss maps and distortion/depth-normal loss lanes.
+Stale/incomplete worker results and nonfinite merged gradients fail rather than
+being applied; partial or poisoned sessions cannot publish a checkpoint.
+
+`SS_PPISP_REDUCTION=staged` independently opts into the two-dispatch PPISP
+parameter-gradient reduction used for the efficient single-device control;
+unset or `native` retains native reduction. Global addition order differs, so
+the strip contract uses checked numerics, not native canonical byte equality.
+See [focused commands](../../../docs/testing.md#experimental-same-view-image-strips)
+and the [investigation](../../../docs/notes/multi-gpu-image-strip-investigation.md)
+for evidence and limits; this is not runtime, quality/recovery or speedup
+qualification.
+
 ## Memory model
 
 `backend::device_malloc` = one `VkBuffer` (+ dedicated `VkDeviceMemory`,

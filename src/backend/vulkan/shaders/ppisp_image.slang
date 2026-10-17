@@ -66,7 +66,7 @@ struct PpispImageParams {
     float actual_image_height;
     int has_cam_indices;
     uint wgs_per_row;  // pixel axis folds across (wg.x, wg.z); wg.y = batch
-    int _pad0;
+    uint row_begin, row_end;
 };
 
 [ForceInline]
@@ -151,6 +151,7 @@ void ppisp_image_fwd(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
     if (bid >= uint(p.B) || gid >= uint(p.H * p.W)) return;
     uint y = gid / uint(p.W);
     uint x = gid % uint(p.W);
+    if (y < p.row_begin || y >= p.row_end) return;
 
     int p_id = p.has_cam_indices != 0 ? p.cam_indices[bid] : int(bid);
     int np = _pp_num_params();
@@ -197,8 +198,10 @@ void ppisp_image_bwd(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
 
     if (inside) {
         uint pix = (bid * uint(p.H) + y) * uint(p.W) + x;
-        float3 v_out = float3(p.out_image[3 * pix], p.out_image[3 * pix + 1],
-                              p.out_image[3 * pix + 2]);
+        float3 v_out = float3(0.0f);
+        if (y >= p.row_begin && y < p.row_end)
+            v_out = float3(p.out_image[3 * pix], p.out_image[3 * pix + 1],
+                           p.out_image[3 * pix + 2]);
         // Both gradients are linear in the incoming one, so a zero one -- a
         // masked pixel, mostly -- has no transform to differentiate. Not a
         // return: the block reduction below needs every thread.
@@ -233,6 +236,101 @@ void ppisp_image_bwd(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
                 atomic_add_f32(&p.v_ppisp_params[p_id * np + i], _pp_red64[0]);
         }
     }
+}
+
+struct PpispStagedParams {
+    PpispImageParams image;
+    float* partials;  // [B, ceil(H*W/64), P]
+    uint groups_per_image, num_cameras;
+};
+
+// Native entry remains independent so the diagnostic has an unchanged oracle.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void ppisp_image_bwd_staged(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
+                            uniform PpispStagedParams s) {
+    PpispImageParams p = s.image;
+    uint group = wg.z * p.wgs_per_row + wg.x;
+    uint bid = wg.y;
+    if (bid >= uint(p.B) || group >= s.groups_per_image) return;
+    uint gid = group * 64 + tid;
+    bool inside = gid < uint(p.H * p.W);
+    uint y = inside ? gid / uint(p.W) : 0u;
+    uint x = inside ? gid % uint(p.W) : 0u;
+    int p_id = p.has_cam_indices != 0 ? p.cam_indices[bid] : int(bid);
+    int np = _pp_num_params();
+    float pbuf[kMaxParams];
+    for (int i = 0; i < kMaxParams; i++)
+        pbuf[i] = i < np ? p.ppisp_params[p_id * np + i] : 0.0f;
+    float vbuf[kMaxParams];
+    [ForceUnroll]
+    for (int i = 0; i < kMaxParams; i++) vbuf[i] = 0.0f;
+    if (inside) {
+        uint pix = (bid * uint(p.H) + y) * uint(p.W) + x;
+        float3 v_out = float3(0.0f);
+        if (y >= p.row_begin && y < p.row_end)
+            v_out = float3(p.out_image[3 * pix], p.out_image[3 * pix + 1],
+                           p.out_image[3 * pix + 2]);
+        float3 v_pixel = float3(0.0f);
+        if (any(v_out != float3(0.0f))) {
+            float3 pixel = float3(p.in_image[3 * pix], p.in_image[3 * pix + 1],
+                                  p.in_image[3 * pix + 2]);
+            float4 intr = p.intrins[bid];
+            _pp_apply_vjp(pixel, float2(float(x), float(y)),
+                          float2(intr.z, intr.w),
+                          float2(p.actual_image_width, p.actual_image_height),
+                          pbuf, v_out, v_pixel, vbuf);
+        }
+        p.v_in_image[3 * pix] = v_pixel.x;
+        p.v_in_image[3 * pix + 1] = v_pixel.y;
+        p.v_in_image[3 * pix + 2] = v_pixel.z;
+    }
+    for (int i = 0; i < np; i++) {
+        float param = _pp_finite(vbuf[i]) ? vbuf[i] : 0.0f;
+        GroupMemoryBarrierWithGroupSync();
+        _pp_red64[tid] = param;
+        GroupMemoryBarrierWithGroupSync();
+        [ForceUnroll]
+        for (uint stride = 32; stride > 0; stride >>= 1) {
+            if (tid < stride) _pp_red64[tid] += _pp_red64[tid + stride];
+            GroupMemoryBarrierWithGroupSync();
+        }
+        if (tid == 0)
+            s.partials[(bid * s.groups_per_image + group) * uint(np) + uint(i)]
+                = _pp_red64[0];
+    }
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void ppisp_image_bwd_staged_reduce(
+    uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
+    uniform PpispStagedParams s
+) {
+    PpispImageParams p = s.image;
+    uint np = uint(_pp_num_params());
+    uint row = wg.y * p.wgs_per_row + wg.x;
+    if (row >= s.num_cameras * np) return;
+    uint camera = row / np;
+    uint param = row % np;
+    float sum = 0.0f;
+    // Experimental order: ascending batch, then lane-strided pixel groups,
+    // followed by the 64-lane 32,16,...,1 tree. Duplicate cameras share a row.
+    for (uint bid = 0; bid < uint(p.B); bid++) {
+        uint p_id = p.has_cam_indices != 0 ? uint(p.cam_indices[bid]) : bid;
+        if (p_id != camera) continue;
+        for (uint group = tid; group < s.groups_per_image; group += 64)
+            sum += s.partials[(bid * s.groups_per_image + group) * np + param];
+    }
+    _pp_red64[tid] = sum;
+    GroupMemoryBarrierWithGroupSync();
+    [ForceUnroll]
+    for (uint stride = 32; stride > 0; stride >>= 1) {
+        if (tid < stride) _pp_red64[tid] += _pp_red64[tid + stride];
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (tid == 0 && _pp_red64[0] != 0.0f)
+        p.v_ppisp_params[row] += _pp_red64[0];
 }
 
 // ---------------------------------------------------------------------------

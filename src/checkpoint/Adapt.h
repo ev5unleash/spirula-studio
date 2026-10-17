@@ -55,4 +55,14 @@ bool adapt_checkpoint(const std::filesystem::path& ckpt_dir,
                       const TargetLayout& t,
                       const std::filesystem::path& out_dir);
 
+// CPU-only descriptive update/noise metrics in a fresh directory's
+// native-checkpoint-updates.jsonl. Throws on malformed/incompatible state.
+// Slot correspondence and run lineage are not established by checkpoint counts.
+void compare_native_checkpoint_updates(
+    const std::filesystem::path& source,
+    const std::filesystem::path& reference,
+    const std::filesystem::path& actual,
+    const std::filesystem::path& native_repeat,
+    const std::filesystem::path& output_directory);
+
 }  // namespace ckpt

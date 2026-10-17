@@ -13,6 +13,13 @@ The subsequent [synchronous raster investigation](multi-gpu-training-synchronous
 also closed, at its native speed-ceiling gate, before partition/IPC implementation.
 It did not reopen B2 or produce a new multi-GPU quality/speedup result.
 
+The subsequent [same-view image-strip implementation](multi-gpu-image-strip-investigation.md)
+is **complete and experimental**: checked source gradients and lite lifecycle
+checks passed, but fixed-input dual training was about **75.4% slower** than the
+mean native control. Native remains recommended; staged PPISP is a strong
+standalone operator optimization, not a two-GPU speedup. Full-update equivalence,
+long-run quality and recovery are not certified; no full suite was run.
+
 ## 2026-10-16 synchronous raster — closed at Gate 0
 
 The proposed decomposition kept native forward/loss, appearance, projection,
@@ -248,14 +255,12 @@ gradient set at SH3 and 1M capacity rows, before caches, replicas and staging.
 `B1Merge.cpp` publishes only a bound inference PLY, so an "8k B2 + 2k native"
 schedule is not currently a drop-in continuation with retained optimizer state.
 
-Recommended first investigation: profile native stage cost and transfer
-volume, then prototype **same-view raster-backward partitioning with one
-optimizer authority**. Keep the complete native forward, loss and appearance
-derivatives authoritative initially; partition tile contributions, reduce
-float gradients and execute the existing update once. Prove the same-input
-gradient/update/state behavior and measure compute plus all communication
-before expanding to distributed forward or another long quality campaign.
-This targets coherent optimization rather than another refresh-cadence sweep.
+The recommended first investigation was native stage/transfer profiling, then
+**same-view raster-backward partitioning with one optimizer authority**. Its
+native speed-ceiling screen subsequently closed at Gate 0 before transport
+implementation; see the completed result above. The broader same-view
+image-space strip path was then implemented experimentally, as linked below,
+without changing the logical batch or freezing appearance/topology.
 
 Correctness constraints include complete depth-ordered contributors per
 pixel, SSIM/multiscale neighborhood semantics, correct normalization,
@@ -273,11 +278,11 @@ Local AMD/Vulkan transport performance and any multi-machine extension remain
 unmeasured. Independent spatial blocks are a capacity-oriented alternative
 with their own quality objective, not a reason to relax the completed gate.
 
-The accepted next investigation is specified in
-[the synchronous raster-backward plan](multi-gpu-training-synchronous-plan.md).
-Its initial scope is two GPUs on one Windows host, with one native update
-authority and numerical/communication gates before long comparisons.
-The plan is not implemented or qualified; the B2 outcome above remains **closed**.
+The [completed image-strip investigation](multi-gpu-image-strip-investigation.md)
+records two-GPU Windows Vulkan implementation, exact opt-in/refusals, targeted
+source-gradient/lifecycle checks and slower fixed-input training. It recommends
+native, not a speedup or full-update/quality/recovery qualification. The earlier
+synchronous raster and B2 outcomes above remain **closed**.
 
 ## Historical record — not current execution authority
 

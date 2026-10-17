@@ -8,6 +8,7 @@
 #include <core/Common.cuh>
 
 #include "backend/vulkan/kernels/KernelCommon.h"
+#include "backend/vulkan/kernels/ImageStrip.h"
 
 namespace {
 
@@ -61,6 +62,8 @@ void blend_background_forward(
     DeviceTensor3D<float3> background,
     DeviceTensor3D<float3> out_rgb
 ) {
+    if (backend::vk::image_strip().full_height)
+        throw std::runtime_error("image strip: learned background blend is unsupported");
     const int64_t total = rgb.size<0>() * rgb.size<1>() * rgb.size<2>();
     BlendBgParams p{};
     p.rgb = (uint64_t)rgb.data_ptr();
@@ -86,6 +89,8 @@ void blend_background_noise_forward(
     const int32_t* cam_indices,
     DeviceTensor3D<float3> out_rgb
 ) {
+    if (backend::vk::image_strip().full_height)
+        throw std::runtime_error("image strip: noise background blend is unsupported");
     const int64_t hw = rgb.size<1>() * rgb.size<2>();
     const int64_t total = rgb.size<0>() * hw;
     BlendBgNoiseParams p{};
@@ -123,6 +128,24 @@ void blend_background_color_forward(
     p.bg_g = background.y;
     p.bg_b = background.z;
     p.total = (uint32_t)total;
+    if (backend::vk::image_strip().full_height) {
+        const int64_t B = rgb.size<0>(), H = rgb.size<1>(), W = rgb.size<2>();
+        backend::vk::image_strip_zero_outside(
+            reinterpret_cast<float*>(out_rgb.data_ptr()), B, H, W, 3, false);
+        const auto rows = backend::vk::image_strip_rows(uint32_t(H));
+        const uint32_t count = uint32_t((rows.work_end - rows.work_begin) * W);
+        for (int64_t b = 0; b < B; ++b) {
+            const uint64_t offset = uint64_t((b * H + rows.work_begin) * W) * sizeof(float);
+            auto strip = p;
+            strip.rgb += 3 * offset;
+            strip.transmittance += offset;
+            strip.out_rgb += 3 * offset;
+            strip.total = count;
+            vkk::dispatch_flat("pixel_wise_render.blend_background_color_fwd", {},
+                              count, 128, &strip, sizeof(strip), &strip.wgs_per_row);
+        }
+        return;
+    }
     vkk::dispatch_flat("pixel_wise_render.blend_background_color_fwd",
                        backend::vk::SpecList{}, total, 128, &p, sizeof(p),
                        &p.wgs_per_row);
@@ -141,6 +164,24 @@ void working_to_display_forward(
     p.color_matrix = (uint64_t)color_matrix.data_ptr();
     p.out_rgb = (uint64_t)out_rgb.data_ptr();
     p.total = (uint32_t)total;
+    if (backend::vk::image_strip().full_height) {
+        const int64_t B = rgb.size<0>(), H = rgb.size<1>(), W = rgb.size<2>();
+        backend::vk::image_strip_zero_outside(
+            reinterpret_cast<float*>(out_rgb.data_ptr()), B, H, W, 3, false);
+        const auto rows = backend::vk::image_strip_rows(uint32_t(H));
+        const uint32_t count = uint32_t((rows.work_end - rows.work_begin) * W);
+        for (int64_t b = 0; b < B; ++b) {
+            const uint64_t offset = uint64_t((b * H + rows.work_begin) * W) * sizeof(float);
+            auto strip = p;
+            strip.rgb += 3 * offset;
+            strip.out_rgb += 3 * offset;
+            strip.total = count;
+            vkk::dispatch_flat("pixel_wise_render.working_to_display_fwd",
+                {(uint32_t)transfer, is_linear ? 1u : 0u}, count, 128,
+                &strip, sizeof(strip), &strip.wgs_per_row);
+        }
+        return;
+    }
     vkk::dispatch_flat("pixel_wise_render.working_to_display_fwd",
                        backend::vk::SpecList{(uint32_t)transfer,
                                              is_linear ? 1u : 0u},
@@ -156,6 +197,8 @@ void depth_to_normal_forward(
     DeviceTensor3D<float> depths,
     DeviceTensor3D<float3> normals
 ) {
+    if (backend::vk::image_strip().full_height)
+        throw std::runtime_error("image strip: depth-to-normal forward is unsupported");
     const uint32_t B = (uint32_t)depths.size<0>();
     const uint32_t H = (uint32_t)depths.size<1>();
     const uint32_t W = (uint32_t)depths.size<2>();

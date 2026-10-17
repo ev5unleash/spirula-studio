@@ -543,6 +543,8 @@ int spirula_train_main(int argc, char** argv) {
                     return;
                 }
 #endif
+                if (!app::ImageStripExecutor::requested_device().empty())
+                    session.controller_disconnected.store(true);
                 session.save_on_stop.store(true);
                 session.stop_requested.store(true);
             });
