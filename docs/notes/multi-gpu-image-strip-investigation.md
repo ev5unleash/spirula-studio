@@ -5,6 +5,9 @@ two-device fixed-input training interval was about **75.4% slower** than the mea
 of its two native controls. Checked operator/source gradients and lite lifecycle
 checks passed; full-update equivalence, quality and recovery are not certified.
 
+For the next design discussion, start with the
+[overall-plan brainstorming handoff](multi-gpu-training-brainstorm-handoff.md).
+
 ## Decision and numerical contract
 
 The user requested lightweight option tests, not a full suite, then explicitly
