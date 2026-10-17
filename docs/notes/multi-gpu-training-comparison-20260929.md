@@ -217,6 +217,12 @@ Local AMD/Vulkan transport performance and any multi-machine extension remain
 unmeasured. Independent spatial blocks are a capacity-oriented alternative
 with their own quality objective, not a reason to relax the completed gate.
 
+The accepted next investigation is specified in
+[the synchronous raster-backward plan](multi-gpu-training-synchronous-plan.md).
+Its initial scope is two GPUs on one Windows host, with one native update
+authority and numerical/communication gates before long comparisons.
+The plan is not implemented or qualified; the B2 outcome above remains **closed**.
+
 ## Historical record — not current execution authority
 
 Everything below is historical. Its admission, custody, budget and approval
