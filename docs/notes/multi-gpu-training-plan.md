@@ -248,36 +248,35 @@ below (a). Final selection is the frozen rules above, never this threshold.
 | 3 | Neither is promising, but (b) vs (c) vs (d) names one cause (e.g. refresh closes the gap but not enough → cadence 500; split cost, not refresh → A4 reconciliation stage) | One predeclared variant, then back to this table once. |
 | 4 | Otherwise | Close the tested schedules. Record the numbers. |
 
-Current execution: row 2 matched for both B2 arms; all pilot configurations
-and timing boundaries are unchanged. Required repeats remain incomplete:
+Completed execution: row 2 matched for both B2 arms; three repeats of native,
+B2 frozen and B2 refresh 1000 used unchanged configurations and boundaries.
 
-| Completed repeat | Complete wall (s) | Mean PSNR | Mean CC PSNR |
+| Additional completed repeat | Complete wall (s) | Mean PSNR | Mean CC PSNR |
 |---|---:|---:|---:|
 | native 2 | 2614.295323 | 18.951683 | 20.639723 |
+| native 3 | 2605.292171 | 18.953360 | 20.641679 |
 | B2 frozen 2 | 1323.576282 | 19.028731 | 20.634828 |
+| B2 frozen 3 | 1316.036778 | 19.027596 | 20.634706 |
+| B2 refresh 2 replacement | 1624.831338 | 18.920056 | 20.387788 |
+| B2 refresh 3 | 1619.962679 | 18.922141 | 20.388800 |
 
-**Blocked by share capacity, not a qualified outcome.** Refresh repeat 2
-started with 30.383 GiB free against a source-derived 4 GiB peak-output
-reserve. Both workers exited 1 while writing the step-18,000 staging PLY;
-the group exited 2 after 1,284.611717 s, with no completed merged endpoint.
-The last committed generation and both retained owner checkpoints are 17,000.
-After failure, share free space was 0.517 GiB; no Spirula processes remained.
-The disappearing space is not attributed: the campaign's entire container
-was 25.787 GiB logical before this attempt, including hardlinked image names.
+**Outcome: closed.** Both candidates passed timing with non-overlapping ranges
+against native; neither passed quality. B2 frozen failed 3 aggregate and
+197 named-view metric checks; refresh failed 8 aggregate and 351 named-view
+metric checks. All 1,320 checks, including every failure, are reported in
+`<NET>\runs\quality-checks.csv`; the frozen envelope was not widened.
+The [final scorecard](multi-gpu-training-comparison-20260929.md#2026-10-16-original-derived-subset--closed)
+contains the six-metric thresholds, medians, spread and release limits.
 
-Preserve `<NET>\runs\b2-ref-2` and `<NET>\logs\step4-b2-ref-2.log`, including
-both scheduler worker logs/results. No attempt was killed or bypassed.
-Do not write new run outputs to this volume until the 10 GiB post-growth
-floor is reachable again. About 25 GiB free covers the current remaining
-repeat batch with the established conservative per-run growth bounds;
-unrelated volume growth must also leave the floor intact.
-
-Next: resolve the storage prerequisite (row 1), rerun refresh repeat 2 from
-the explicit step-10,000 source into a fresh output directory, then complete
-native 3, B2 frozen 3 and B2 refresh 3. Preserve the failed attempt; its
-interrupted/resumed wall is not a qualifying repeat. Compute the frozen
-envelope only after all three native repeats. Steps 5 and 6 are not complete,
-and no selected/experimental-win/closed decision has been made.
+The first refresh repeat-2 attempt failed during step-18,000 staging PLY
+writes (both workers exit 1, group exit 2, 1,284.611717 s). Share free space
+fell from 30.383 GiB at launch to 0.517 GiB after failure; the last committed
+generation was 17,000. Space loss remains unattributed. Preserve that failure
+in `<NET>\runs\b2-ref-2` and `<NET>\logs\step4-b2-ref-2.log`.
+After storage was restored, `b2-ref-2-retry` ran fresh from step 10,000 and
+completed; only the complete replacement counts. No run was killed.
+B2 frozen repeat 3's timed training completed before a controller interruption;
+its untimed evaluation was confirmed in `b2-ctl-3-eval-confirm`, exit 0.
 
 ### 5. Settle and document
 
