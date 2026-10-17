@@ -152,6 +152,71 @@ scaffold was established. `EngineDiagnostic*`, `ObservationSchurDispatch.h`
 and `g1_native_proof.cpp` retain live build/runtime or manual-test consumers
 and remain. The native default, protected originals and corpus are unchanged.
 
+### Prospective alternatives — research, not measured results
+
+The closed result rejects the tested B2 schedules, not distributed 3DGS.
+No implementation or new experiment was launched for this assessment.
+The options and recommendation below are **engineering inferences**, not
+local speed/quality guarantees; the completed comparison and its rules remain
+unchanged.
+
+Primary architectural references:
+
+- [Grendel, sections 3–4](https://arxiv.org/html/2406.18533v2):
+  Gaussian/optimizer-state sharding, pixel partitions, sparse forward/reverse
+  communication and dynamic load balancing. Its larger-batch optimizer
+  scaling is an approximation, not sequential Adam trajectory equivalence.
+- [gsplat distributed rasterization](https://docs.gsplat.studio/main/apis/rasterization.html):
+  ranks jointly render a global scene and return gradients to remote
+  Gaussian owners. Its [version-pinned implementation](https://docs.gsplat.studio/versions/1.5.3/_modules/gsplat/rendering.html)
+  gathers cameras and redistributes projected attributes to image-owning ranks.
+- [VastGaussian, section 4](https://arxiv.org/html/2402.17427v1):
+  overlapping spatial cells, visibility-based observation selection,
+  independent optimization and merge. This is a different optimization
+  algorithm, not a synchronous substitute for monolithic native training.
+
+| Option | Purpose | Missing work or limitation |
+|---|---|---|
+| Synchronous same-view tile work | Preserve the original view/global batch and one logical native update while distributing raster work | Tile-range dispatch, resident exchange, gradient reduction, shared-state/statistic synchronization; no local speed proof |
+| Same-global-model multi-view data parallelism | Distribute a fixed global batch's work rather than independently evolve scene blocks | Enlarging a batch-one step changes Adam/sampling semantics and needs a separately evaluated schedule; FPBO cannot simply enable existing subbatch accumulation |
+| B2 prefix plus ordinary-native global finish | Test whether a coupled final stage repairs approximation error while retaining some prefix time saving | Production B2 merge is PLY-only, not a full native resume point; optimizer/clocks/codec state must be reunified first; quality recovery is unproved |
+| Gaussian plus pixel sharding | Scale model/optimizer capacity as well as compute, following the mixed-parallel design | Sparse routing, reverse reduction, ownership/topology migration and balancing; more work than replicated-model tile distribution |
+
+Native reuse is substantial but incomplete. `EngineOptim.cpp` already
+provides `engine_fpbo_capture_data_gradients` and
+`engine_fpbo_step_from_data_gradients`, sharing the native FPBO update.
+The seam requires initialized packed 3DGS, matching codec/layout/forward
+state and `split_batch=false`; it is not a complete shared-appearance or
+densification interface. Its six dense fp32 arrays contain 236 MB per
+gradient set at SH3 and 1M capacity rows, before caches, replicas and staging.
+`B1Merge.cpp` publishes only a bound inference PLY, so an "8k B2 + 2k native"
+schedule is not currently a drop-in continuation with retained optimizer state.
+
+Recommended first investigation: profile native stage cost and transfer
+volume, then prototype **same-view raster-backward partitioning with one
+optimizer authority**. Keep the complete native forward, loss and appearance
+derivatives authoritative initially; partition tile contributions, reduce
+float gradients and execute the existing update once. Prove the same-input
+gradient/update/state behavior and measure compute plus all communication
+before expanding to distributed forward or another long quality campaign.
+This targets coherent optimization rather than another refresh-cadence sweep.
+
+Correctness constraints include complete depth-ordered contributors per
+pixel, SSIM/multiscale neighborhood semantics, correct normalization,
+regularizers applied once, shared appearance updates, densification
+sum/max semantics, stable row IDs, codec blocks/bounds and optimizer clocks.
+Mathematical equivalence alone does not establish floating-point or
+quantized-state agreement. Reuse G1's native seam, state comparisons and
+failure replay, but retain its unordered numerical failures and adverse
+file-staged/resident-cost timings as evidence. Faster transport alone is
+not a numerical repair or a demonstrated speedup.
+
+These papers are algorithm references, not a proposal to add PyTorch/CUDA,
+replace the native Vulkan engine, or borrow published hardware speed claims.
+Local AMD/Vulkan transport performance and any multi-machine extension remain
+unmeasured. Independent spatial blocks are a capacity-oriented alternative
+with their own quality objective, not a reason to relax the completed gate.
+
 ## Historical record — not current execution authority
 
 Everything below is historical. Its admission, custody, budget and approval
