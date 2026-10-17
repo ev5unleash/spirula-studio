@@ -304,6 +304,11 @@ failure in `docs/testing.md` ("Experimental live context refresh") is the
 bar; short smokes do not clear it. Pass → **selected**; otherwise
 **experimental win**, with the failure recorded. Final commit.
 
+Disposition: **not applicable**. Both candidates failed the frozen quality
+rule, so neither is a finalist and no recovery workload was launched.
+The final outcome is **closed**; native stays the default and recovery,
+durability and large-scene capacity remain unqualified.
+
 ## Parked, deliberately
 
 GPU bundle-adjustment optimization (Source19 shared-pair), the 4,416-view
