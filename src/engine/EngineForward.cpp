@@ -5,6 +5,7 @@
 #include "engine/EngineInternal.h"
 #include "engine/EngineState.h"
 #include "engine/EngineDiagnostic.h"
+#include "backend/common/Profiler.h"
 
 #include "core/Env.h"
 
@@ -373,6 +374,21 @@ void forward_3dgs(
 
     engine().fwd.tile_offsets = tile_offsets;
     engine().fwd.flatten_ids = flatten_ids;
+    if (backend::prof::enabled()) {
+        size_t screen_payload_bytes = 0;
+        for (const auto& tensor : engine().fwd.splats_s)
+            screen_payload_bytes += (size_t)tensor.numel() * sizeof(float);
+        std::fprintf(stderr,
+            "[spirula-profile-raster] primitive=%s packed=%d cameras=%d width=%d height=%d "
+            "projected_rows=%lld intersections=%lld macro_log2=%d "
+            "median=%d dist_rgb=%d dist_depth=%d dist_normal=%d screen_payload_bytes=%zu\n",
+            primitive.c_str(), (int)packed, engine().camera.num,
+            engine().camera.width, engine().camera.height,
+            (long long)depths_nd.numel(), (long long)flatten_ids.size(),
+            engine().fwd.macro_log2, (int)output_median,
+            (int)dist_has_rgb(dist_type), (int)dist_has_depth(dist_type),
+            (int)dist_has_normal(dist_type), screen_payload_bytes);
+    }
     // One shot: whoever wants tiles skipped sets the map immediately before
     // the forward, so a later preview or viewer render cannot inherit it.
     engine().fwd.tile_active = DeviceVector<int32_t>();

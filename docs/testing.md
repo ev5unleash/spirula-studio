@@ -946,6 +946,16 @@ condition-variable lost-wake regression found by concurrent headless runs.
 backends — the right first tool when a backend is unexpectedly slow rather
 than wrong.
 
+Each forward also emits one machine-readable `[spirula-profile-raster]`
+key/value row on stderr after tile intersection: `primitive`, `packed`,
+`cameras`, `width`, `height`, `projected_rows`, `intersections`, actual
+`macro_log2`, `median`, `dist_rgb`, `dist_depth`, `dist_normal`, and
+`screen_payload_bytes`. Rows count all cameras (dense rows are camera/splat
+pairs); bytes sum the actual fp32 screen tensor shapes, not pool capacity.
+For packed 3DGS this is `40 * projected_rows`; other primitives retain their
+own layout. Inventory uses host metadata only, with no added GPU readback or
+synchronization; aggregate observed maxima externally.
+
 Above that table both backends print **GPU time by kernel**, so the two are
 directly comparable without a profiler. Vulkan brackets each dispatch with
 timestamp queries; CUDA does the same with a CUDA event pair, injected by
@@ -954,14 +964,13 @@ launch site is instrumented by hand and CUB's kernels are covered too. Rows
 aggregate over template arguments / specialization constants, which is what
 makes a CUDA row and a Vulkan row the same thing.
 
-Two caveats on reading those numbers against each other. The intervals
-include the gap before each kernel starts, so their sum runs a little over
-the device-wait total. And a training run is **not** reproducible: atomic
-order moves the trajectory, and the rasterization and sort kernels then see a
-different scene — `rasterize_fwd` has been seen to move 70% between two runs
-of the same binary. The image-sized kernels (losses, bilagrid, PPISP, FPBO)
-hold to ~1%, so they can be A/B'd from a training run directly; for the rest
-use the benchmark tools, which fix the workload:
+Vulkan uses nonoverlapping bottom-of-pipe dispatch intervals. Their sum is GPU
+work over the whole process, not training-loop or critical-path wall time.
+It can exceed CPU device-wait time because GPU work also runs while the host
+is busy; a negative `submit/queue lat.` residual is not a measured negative
+latency. Exhausted timestamp queries omit dispatches and print a warning.
+Atomic order also moves a training trajectory, so rasterization and sort can
+see different scenes between runs. Use fixed-workload tools for kernel A/Bs:
 
 ```bash
 ./build_vulkan/raster_bench [num_splats] [iters] [macro_log2]   # raster fwd/bwd, binning
@@ -969,8 +978,7 @@ use the benchmark tools, which fix the workload:
 ```
 
 A run that trains also prints a VRAM breakdown after the timing table: pool
-capacity per `VramCategory` (`src/core/PoolSlots.h`), the scratch buffer, the
-driver's process figure, and the twelve largest buffers. The pool never
-shrinks, so those are training peaks, not the numbers at exit. Both front
-ends emit it — the CLI at the end of the process, the GUI when its window
-closes.
+capacity per `VramCategory` (`src/core/PoolSlots.h`), scratch, owned backing,
+sampled device usage and every nonzero buffer. Pool capacities are allocation
+high-water marks, not exact workload cardinalities or physical-residency peaks.
+The CLI captures this report before engine teardown; the GUI emits it at exit.
