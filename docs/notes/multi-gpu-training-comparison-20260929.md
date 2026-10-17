@@ -9,6 +9,62 @@ B2 refresh 1,000, with non-overlapping observed ranges. B2 frozen failed
 Native remains the default. No finalist recovery run was warranted;
 durability, large-scene capacity and production release remain unqualified.
 
+The subsequent [synchronous raster investigation](multi-gpu-training-synchronous-plan.md#gate-0-execution-result-2026-10-16)
+also closed, at its native speed-ceiling gate, before partition/IPC implementation.
+It did not reopen B2 or produce a new multi-GPU quality/speedup result.
+
+## 2026-10-16 synchronous raster — closed at Gate 0
+
+The proposed decomposition kept native forward/loss, appearance, projection,
+optimizer and topology on one authority, distributing only same-view raster
+backward to a second supported Windows Vulkan device. Tested source was
+committed as `007957a9`, based on `750cd7ad`; its only runtime addition was
+profile-only raster metadata. The pre-commit executable reports `750cd7a`.
+The native Vulkan dev build passed, followed by **17/17 headless tests in
+13.12 s** and separate runtime smokes on both AMD Radeon AI PRO R9700 UUIDs
+(`00000000020000000000000000000000` and `00000000010000000000000000`).
+Driver was 32.0.31036.15 / 26.Q3; Slang was 2026.12.0.1.
+
+The preserved full source at step 10,000 was verified as packed 3DGS with
+native FPBO, 1M splats, original 256-row codec blocks and horizon 30,000.
+The same 975-training / 108-held-out split, appearance and densification
+remained active. One profiled and three unprofiled continuations targeted
+the full step-10,100 checkpoint with the existing held-pipe stop launcher.
+Every run also saved step 10,101: **101 actual updates**, cooperative exit 42.
+
+| Arm | Complete launcher wall, s | Training ms/update |
+|---|---:|---:|
+| Profile, diagnostic only | 68.210977 | 358.178218 |
+| Native short 1 | 62.260272 | 350.702970 |
+| Native short 2 | 68.066282 | 350.287129 |
+| Native short 3 | 63.087702 | 354.980198 |
+
+Native median/range was **63.087702 [62.260272, 68.066282] s**, a
+**5.806010 s spread**. Raster backward cost **6.996249 s** over 101 updates:
+25.878991% of GPU timestamp totals / 19.339476% of profiled training elapsed.
+Even free, balanced two-way execution could save only **3.4981245 s**,
+below the observed spread by **2.3078855 s**. The screening rule therefore
+closes this backward-only decomposition before transport work. Timestamp sums
+are not critical-path wall. PPISP image backward alone took 13.196172 GPU s;
+the proposed serial front end contains more work than the distributed stage.
+
+Maximum observed rows/intersections were **966,037 / 10,459,280**. Returned
+screen cotangents alone reached **38,641,480 B**; full enabled raster inputs
+reached **605,276,972 B** and screen-plus-Avg-statistic results **46,641,480 B**.
+These are logical source-buffer shapes, not measured worker IPC traffic.
+Owned backing peaked at 2,461,713,824 B, sampled process working-set peak
+at 1,768,701,952 B, and sampled system commit at 23,659,786,240 B.
+Minimum free storage remained above 25.37 GiB local / 170.55 GiB output.
+Physical VRAM/private-byte/system peaks were not established.
+
+The plan retains detailed stage, byte and memory accounting. Evidence is
+`<NET>/logs/sync-raster-{profile,native-short-1,native-short-2,native-short-3}.log`,
+their resource/summary logs, `sync-raster-gate0-summary.json`, build/headless/device
+logs and corresponding `<NET>/runs/sync-raster-*` checkpoints. No GPU jobs
+remain. **Gates 1–5 were not reached**: no partition/IPC executor, new worker
+or eval-only flags, candidate metrics, timing win or recovery qualification.
+No new numerical equivalence claim is made. Native remains default.
+
 ## 2026-10-16 original-derived subset — closed
 
 ### Dataset, endpoint and timing

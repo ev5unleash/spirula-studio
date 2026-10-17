@@ -1,14 +1,17 @@
 # Synchronous same-view multi-GPU training
 
-Status: **planned; implementation and qualification not started**.
+Status: **closed at Gate 0 (2026-10-16)**. The optimistic backward-only saving
+did not exceed the observed native short-control wall spread. Gates 1–5 were
+not entered; no partition/IPC executor or new training/evaluation flags were
+implemented. See [execution result](#gate-0-execution-result-2026-10-16).
 
-This is the next investigation after the closed B2 comparison, not a reopening
-of its results. The target is faster ordinary-native training without freezing
+This investigation followed the closed B2 comparison without reopening its
+results. The target was faster ordinary-native training without freezing
 appearance or topology, changing the logical batch, or accepting weaker quality.
-Initial scope: **two supported non-NVIDIA Vulkan devices on one Windows host**.
-Remote hosts, model sharding, distributed forward/loss and other primitives are
-outside this implementation. No production speedup or bitwise equivalence is
-established by this plan.
+Scope was **two supported non-NVIDIA Vulkan devices on one Windows host**.
+Remote hosts, model sharding, distributed forward/loss and other primitives were
+outside this implementation. No production speedup or bitwise equivalence was
+established. The unentered implementation gates below retain their proposed scope.
 
 ## Decision and evidence
 
@@ -163,6 +166,129 @@ without implementing transport; retain the profile for the next design decision.
 
 Deliver: build/headless result, native ms/update, raster-backward fraction,
 optimistic ceiling, byte/memory inventory and local commit.
+
+### Gate 0 execution result (2026-10-16)
+
+**Outcome: closed by the specified ceiling rule.** Tested source was committed
+locally as `007957a9`, based on `750cd7ad`; the only runtime addition was
+profile-only raster tensor metadata. The executable was built before that
+commit and reports `750cd7a`. Both native builds used
+`build_develop.bat -DSS_BACKEND=vulkan` with MSVC 19.44.35229.0 Release and
+Slang 2026.12.0.1; the existing tree had GUI and patented video disabled.
+The post-change headless suite passed **17/17 in 13.12 s**. Native runtime
+smokes passed separately with each selected UUID.
+
+Fresh `vulkaninfo --summary` resolved two AMD Radeon AI PRO R9700 devices,
+vendor `0x1002`, device `0x7551`, driver 32.0.31036.15 / 26.Q3:
+
+- A: `uuid:00000000020000000000000000000000`
+- B: `uuid:00000000010000000000000000000000`
+
+The actual source `state.json` verified full step 10,000, 1M rows/capacity,
+packed 3DGS, active FPBO, `joint_u_log_sqrt_g2_v1`, 256-row blocks,
+SH optimizer/value bits 8/16, non-SH optimizer bits 16 and per-row bias clocks.
+The unchanged source config retained horizon 30,000, fraction split, 975
+training / 108 held-out inputs, bilagrid/PPISP and active densification.
+Input batch resolved to one; startup reported 975 cameras after splitting.
+All 101 observed raster calls had one camera, with 2880² or 3840² pixels,
+actual macro-log2 1/2/3, no median and no distortion lanes. The profile
+contained 101 ordinary backward and 101 FPBO calls, without a timestamp-pool
+exhaustion warning. No source layout, face policy or native optimizer was changed.
+
+All four continuations used the command above, the same explicit 10,100 target,
+100-step full-save cadence and held-open stdin stop launcher. Each published
+a readable full 10,100 checkpoint, then a full stop checkpoint at 10,101:
+**101 actual updates**, with cooperative exit 42 in every case.
+
+| Arm | Complete launcher wall, s | Training elapsed, s | Training ms/update |
+|---|---:|---:|---:|
+| Profile, diagnostic only | 68.210977 | 36.176 | 358.178218 |
+| Native short 1 | 62.260272 | 35.421 | 350.702970 |
+| Native short 2 | 68.066282 | 35.379 | 350.287129 |
+| Native short 3 | 63.087702 | 35.853 | 354.980198 |
+
+Native complete-wall median/range was **63.087702 [62.260272, 68.066282] s**;
+spread **5.806010 s**. Median native training cost was **350.702970 ms/update**.
+The launch boundary includes load, initial/target/stop saves and process exit.
+The outer resource observer recorded 62.326907 / 68.131990 / 63.154748 s
+for the controls; its own overhead is not substituted into launcher walls.
+The profile is excluded from control timing.
+
+Disjoint groups of printed GPU-entry totals, over the full profiled process:
+
+| Work | GPU ms | ms/actual update |
+|---|---:|---:|
+| Forward projection, raster and binning/sort/scan | 871.112 | 8.624871 |
+| Raster backward | 6996.249 | 69.269792 |
+| Projection reverse / FPBO and camera-ID bounds | 484.918 | 4.801168 |
+| PPISP image backward | 13196.172 | 130.655168 |
+| Other loss and appearance | 5233.577 | 51.817594 |
+| Shared optimization and densification | 218.543 | 2.163792 |
+| Image byte conversion | 33.901 | 0.335653 |
+
+The 52 entries cover 9,010 timestamped dispatches. Their rounded sum is
+27,034.472 ms; the unrounded aggregate prints 27,034.474 ms. Runtime source
+uses BOTTOM/BOTTOM timestamp brackets, not the obsolete TOP-start description.
+These are GPU-work costs, not additive CPU critical-path intervals. Transfer
+wall was 1,331.714 ms (upload 950.491, readback 380.931, D2D 0.293);
+CPU device waits were 21,755.481 ms, memset 1.831 ms and full-process host
+residual 45,079.179 ms. GPU execution can occur outside CPU wait scopes:
+the printed −5,278.993 ms queue residual is not physical negative latency.
+
+Raster backward was **25.878991% of timestamped GPU work**, or **19.339476%**
+of profiled training elapsed. Granting ideal halving with no transport,
+imbalance or added waits saves at most **3.4981245 s / 34.634896 ms per update**.
+Substituting into profiled training gives 32.6778755 s; applying the same
+optimistic saving to native median complete wall gives **59.5895775 s**.
+The saving is **2.3078855 s smaller than the observed control spread**.
+Gate 0 therefore fails even granting that optimistic subtraction. This is
+the plan's screening decision, not proof that every longer run would be slower.
+The dominant measured kernel was serial-authority PPISP image backward, not
+raster backward; no forward/backward or appearance redesign was added.
+
+Observed cardinality and logical-buffer inventory:
+
+| Quantity | Maximum observed bytes/count |
+|---|---:|
+| Projected rows | 966,037 |
+| Intersections | 10,459,280 |
+| Screen input or returned screen cotangents, `40 * rows` | 38,641,480 B each |
+| World-row mapping, `4 * rows` | 3,864,148 B |
+| Flatten IDs, `4 * intersections` | 41,837,120 B |
+| Tile offsets | 230,400 B |
+| Active pixel inputs, `36 * pixels` | 530,841,600 B |
+| Avg density numerator/denominator output, `8 * world_rows` | 8,000,000 B |
+
+Active pixel inputs are native transmittance, last IDs, rendered depth,
+post-hook RGB/depth/transmittance cotangents and the density weight map.
+RGB render storage adds 176,947,200 B at 3840² but is not read by the
+no-distortion specialization. Summing actual same-call shapes gives a maximum
+**605,276,972 B active input** and **46,641,480 B result** (their maxima occur
+on different calls). These are authority-side logical raster buffers and
+prospective executor payloads, not an implemented IPC packet or measured
+transfer volume. Optional lanes remain absent, not fabricated zero inputs.
+The existing ordered diagnostic would need up to 6,167,666,688 B of partials
+over these calls, plus sort arrays/scratch; it was not run.
+
+Profile pool capacity was 2,197.88 MiB including the 165.21 MiB alias arena;
+owned backing peaked at **2,461,713,824 B**, including device backing
+2,393,556,128 B, pinned 256 B, staging 67,108,864 B and params 1,048,576 B.
+Do not add backing to pool capacity. Sampled local budget usage was
+2,436,345,856 B; the report's device-wide usage was 3,237.58 MiB.
+Across all four runs the sampled process working-set peak was 1,768,701,952 B,
+private bytes peaked at 3,798,319,104 B, and system commit peaked at
+23,659,786,240 B against a 57,508,384,768 B limit.
+Minimum free storage stayed above 25.37 GiB local / 170.55 GiB output,
+including retained checkpoints. Samples are not guaranteed physical VRAM,
+whole-process private-byte or system peaks. No worker mapping was allocated.
+
+Evidence remains outside git under `<NET>`: `logs/sync-raster-profile.log`,
+`logs/sync-raster-native-short-{1,2,3}.log`, each `-resources.jsonl` and
+`-summary.json`, `logs/sync-raster-gate0-summary.json`, build/headless/device
+logs, and corresponding `runs/sync-raster-*` output directories. Full source,
+target and stop checkpoints remain preserved. No training processes remained
+after the batch. Gates 1–5, numerical equivalence, candidate quality/timing
+and finalist recovery are **not reached**, not passed. Native stays default.
 
 ## 1. Single-GPU partition proof before IPC
 
