@@ -7,6 +7,10 @@ checks passed; full-update equivalence, quality and recovery are not certified.
 
 For the next design discussion, start with the
 [overall-plan brainstorming handoff](multi-gpu-training-brainstorm-handoff.md).
+The subsequent [short-run execution](multi-gpu-training-short-run-plan.md#execution-result--2026-10-17)
+also rejected reversed physical roles (158.56 versus 96.88 ms/update). One
+common-clock diagnostic found no narrow result-tail/timer fix capable of
+closing that gap; no performance patch or default change was retained.
 
 ## Decision and numerical contract
 

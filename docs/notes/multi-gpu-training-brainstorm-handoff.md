@@ -2,10 +2,11 @@
 
 Updated 2026-10-17. Implementation baseline: **`d1a829af`**.
 
-**Next session is a design discussion, not an automatic experiment restart.**
-The latest implementation is finished and committed. The broader desire for a
-useful two-GPU training speedup is still unmet by a qualified candidate.
-Native remains the default and recommendation.
+**Executed follow-on: [short-run improvement plan](multi-gpu-training-short-run-plan.md#execution-result--2026-10-17).**
+Physical-role reversal averaged 158.56 ms/update versus 96.88 ms native in the
+matched 2+6 screen. One temporary timeline diagnostic rejected a result-tail/
+timer-only fix; instrumentation was removed and the native build restored.
+The single-model multi-GPU speedup goal remains unmet; native stays default.
 
 ## Read first
 
@@ -127,28 +128,29 @@ Historical B2 quality failures remain failures. A changed optimized-native
 baseline needs fresh matched quality controls before any later qualification;
 old metric envelopes and the latest short gradient proof are not interchangeable.
 
-## Brainstorm options — hypotheses, not selected work
+## Short-run follow-on disposition
 
-| Direction | Question to answer first | Smallest useful follow-on, if selected |
-|---|---|---|
-| Consolidate the single-GPU win | How much does staged PPISP improve representative end-to-end training, not just its operator? | Matched short ordinary-sampler controls; agree quality evidence before changing defaults. |
-| Salvage strips by cutting the critical path | Is enough wall actually removable to beat roughly 100 ms/native update, without changing the update semantics? | Use the retained timeline/traffic to identify one avoidable copy or wait; test only that hypothesis. Do not start a transport rewrite from nominal PCIe bandwidth. |
-| Resolve numerical qualification first | Which part of native-repeat variation prevents a meaningful optimizer/topology comparison? | Reuse actual source/checkpoints and the decoded report to design a controlled comparison with defensible row/state correspondence. Do not disable active topology in a candidate and call it the same method. |
-| Reconsider the product objective | Is the real value single-model latency, larger-scene capacity, or aggregate throughput of independent jobs? | Discuss explicitly. Independent jobs or larger batches are different objectives, not hidden wins under the current contract. |
+The [short-run plan](multi-gpu-training-short-run-plan.md#execution-result--2026-10-17)
+was executed without a longer campaign. Reversed authority `0100…` / worker
+`0200…` was decisively slower than native on authority `0100…`: measured
+updates 3–8 averaged 158.5575 / 96.8757 ms. All runs retained input 847,
+full resolution, source step 10000 and the 30000-step horizon.
 
-The current strip implementation does **not** pool model VRAM: the authority
-still owns the full model. Larger-scene capacity remains unqualified. Likewise,
-a pipeline that computes the next update against stale weights would violate the
-current contract, even if it keeps both GPUs busy.
+One eight-update common-host-clock diagnostic found worker finite validation
+18.19–19.98 ms and the subsequent entire authority post-worker join
+21.66–24.64 ms. Even hypothetically deleting both nonoverlapping result-tail
+intervals leaves 119.13 ms/update mean, above native. No measured narrow fix
+had a route to closing the gap; no cut sweep, longer run or permanent
+performance patch followed. This rejects the tested executor-tuning hypothesis,
+not every possible image-strip algorithm or transport.
 
-## Suggested opening for the next conversation
+Temporary instrumentation was removed, the Vulkan dev rebuild passed, and
+restored finite-result runtime checks passed on both supported AMD devices.
+No new numerical/ordinary-sampler/lifecycle qualification was reached, no
+defaults changed, and no trainer/proof processes remained. Exact evidence and
+limits are in the plan; private artifact locations remain in `PRIVATE-HANDOFF.txt`.
 
-> We have a working synchronous same-view split, but it loses to the efficient
-> native control. Before changing code, which direction has the strongest case:
-> establish the end-to-end single-GPU gain, identify a removable strip critical
-> path, resolve update/topology comparison, or explicitly change the product
-> objective? Use existing evidence first, separate facts from hypotheses, and
-> propose only the smallest distinguishing experiment after we choose.
-
-No new experiment, parameter change, cleanup or implementation is selected by
-this handoff. Completed runs and failed gates stay preserved.
+Larger batches, stale updates, independent-job throughput and capacity-only
+work are not substitutes for lower latency of one synchronous training job.
+The authority still owns the full model; larger-scene capacity is unqualified.
+Earlier failed gates and completed runs remain preserved, not pending work.
