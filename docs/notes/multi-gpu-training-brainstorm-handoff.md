@@ -1,6 +1,7 @@
-# Multi-GPU training: brainstorming handoff
+# Multi-GPU training: continuation handoff
 
-Updated 2026-10-17. Implementation baseline: **`d1a829af`**.
+Updated 2026-10-19. Implementation baseline: **`d1a829af`**.
+Completed short-run results and prior notes are committed at **`ef89ab3d`**.
 
 **Executed follow-on: [short-run improvement plan](multi-gpu-training-short-run-plan.md#execution-result--2026-10-17).**
 Physical-role reversal averaged 158.56 ms/update versus 96.88 ms native in the
@@ -8,22 +9,192 @@ matched 2+6 screen. One temporary timeline diagnostic rejected a result-tail/
 timer-only fix; instrumentation was removed and the native build restored.
 The single-model multi-GPU speedup goal remains unmet; native stays default.
 
+**Next action: inspect retained optimized-native profiling evidence, not another
+two-GPU run.** The Reviewer-2 consultation below supersedes the proposed
+projected-ID byte-count gate. This handoff authorizes no build, profile, training,
+packing implementation or restart of a closed campaign.
+
 ## Read first
 
-1. This handoff: current position and decisions worth discussing.
-2. [Image-strip investigation](multi-gpu-image-strip-investigation.md): latest
-   implementation, measurements, numerical contract, limitations and evidence.
-3. [Comparison scorecard](multi-gpu-training-comparison-20260929.md): closed B2
+1. This handoff: next decision, transfer prerequisites and settled constraints.
+2. [Short-run execution result](multi-gpu-training-short-run-plan.md#execution-result--2026-10-17):
+   the latest matched timing and common-clock diagnostic.
+3. [Image-strip investigation](multi-gpu-image-strip-investigation.md): implementation,
+   numerical contract, checks and evidence limits.
+4. [Comparison scorecard](multi-gpu-training-comparison-20260929.md): closed B2
    campaign and subsequent raster/strip outcomes.
-4. [Original campaign plan](multi-gpu-training-plan.md): consult its completed
-   execution results when needed. Its pilot questions and historical next-step
-   instructions are not an unfinished execution queue. Do not read or revive
-   its frozen ledger by default.
+5. [Original campaign plan](multi-gpu-training-plan.md): consult completed results
+   only when needed. Its old next-step instructions and frozen ledger are not
+   an unfinished execution queue.
 
 Private locations and retained run artifacts are indexed by the existing
 `PRIVATE-HANDOFF.txt` beside the preserved corpus. Do not copy those paths into
 this repository. Logs, output directories and commits are the evidence; the
 retired call ledger, admission process, deadlines and source snapshots stay retired.
+
+## Reviewer-2 advice and the next decision
+
+The 2026-10-18 consultation was read-only. No source changes, profile, training
+or GPU checks followed. Its corrected recommendation is:
+
+1. **Do not implement packing or run the proposed byte-count gate now.** No
+   measured net saving supports it. The missing quantity is critical-path time
+   after packing, transfers, remapping and merging, not just removable bytes.
+2. **Inspect retained native staged-PPISP per-stage profiles first.** Establish
+   source checkpoint/config, input 847 at 2880x2880, authority device, build,
+   measured update interval and profiler mode before reusing a record. The old
+   raster-only profile with unoptimized PPISP is not the fair control.
+3. **If suitable evidence is missing, propose one native eight-update profile
+   for approval.** Keep the full step-10000 source and 30000-step horizon,
+   staged PPISP and active appearance/topology; no worker. Use the existing
+   source-run mode and `SS_PROFILE=1`, not a new harness. Profiling changes
+   synchronization, so profiled wall is not a fresh unprofiled speed baseline.
+4. **Assess one stated split, not every possible multi-GPU algorithm.** Map
+   row-splittable GPU work, serial dependencies, state-dependent traffic and
+   synchronization. A balanced zero-cost split is only an optimistic model;
+   account for the destination devices and actual timing boundaries. Require
+   credible net headroom before a design/implementation decision. Otherwise
+   park this direction as unsupported or inconclusive, not physically impossible.
+
+Reviewer-2 withdrew its initial approximately 104.6 ms lower bound and "no
+reachable pass outcome" claim. Worker output D2H precedes the post-D2H finite
+validation tail ([executor](../../src/app/ImageStripExecutor.cpp)); deleting that
+tail and the authority join does not remove this transfer or all possible
+compaction savings. Scaling upload time by a byte fraction is an assumption,
+not a hard bound. Native range/IQR measures variation, not unavoidable runtime
+overhead; neither it nor the current collective timings rules out the whole
+image-space family. The recorded 119.13 ms tail-only counterfactual remains valid.
+
+GT/mask is already region-plus-halo limited and remains substantial traffic.
+No concrete replacement ownership/transport design or speedup candidate was
+selected. A later candidate still needs the unchanged numerical contract and
+a fresh matched native control before any win claim.
+
+## Continuing on another development machine
+
+### Transfer code and private artifacts separately
+
+The commits are local on branch `dull-baboon`; no push or PR was performed.
+Transfer the branch/history through an approved repository copy or Git bundle.
+Do not copy only this linked worktree's `.git` file: it points at another local
+checkout. The receiving checkout must contain `d1a829af`, `ef89ab3d` and this
+handoff's commit. Confirm its revision and working-tree state before continuing.
+Do not copy a configured build tree as a portable build; rebuild for the new host.
+
+Git contains source, generated source and public notes, **not the training
+inputs or private experimental evidence**:
+
+| Material | Required use |
+|---|---|
+| `PRIVATE-HANDOFF.txt` and its referenced identity/config/build records | Locate the exact source, dataset, run commands, hashes and retained logs; inspect for a matching native staged-PPISP profile before proposing a run. |
+| Full native `native-src/step-000010000.ckpt` and its associated `config.json` | The preserved starting state: 1M capacity, original 30000-step horizon, packed 3DGS/FPBO, active PPISP and quantized RGB grid/AdaGrad. Copy the full checkpoint, not just a PLY or inference-only export. |
+| Matching `ds-1104` dataset and all referenced images/masks/model files | Preserve the 1083 reconstructed views, 975 training / 108 held-out split and the identity of input 847 at 2880x2880. Do not reconstruct or replace it. |
+| `short-run-reversed-{native,dual,timeline}-8.{log,json}`, `short-run-screen-summary.json` and each run's `image-strip-source-run.jsonl` | Timing, configuration and common-clock evidence; see the [complete artifact index](multi-gpu-training-short-run-plan.md#checks-preservation-and-evidence-limits). |
+| Build identity logs, original/temporary executor copies, source-proof and decoded-update/lifecycle reports | Preserve numerical limitations, implementation identity and diagnostic provenance. The temporary protocol-6 executor is evidence, not code to restore. |
+
+Keep the full step-10008 endpoints, failed attempts, earlier campaign evidence,
+protected corpus and originals in the preserved archive. They need not all be
+duplicated to start a read-only profile inventory, but must remain accessible;
+step 10008 is **not** a replacement starting checkpoint. Ensure copied hardlinked
+or externally referenced data has its backing files on the receiving host.
+
+**Availability at this handoff:** the historical private inventory location was
+recovered from the archived execution session, but the private share could not
+be opened by filesystem tools or a native Windows file lookup. Its location is
+supplied privately, not committed here. Current artifact presence/checksums and
+a matching staged-PPISP profile remain **unverified, not absent**. No dataset,
+checkpoint or private log transfer was performed for this handoff. Restore
+access to that inventory, or obtain it and the listed files from the owner,
+before claiming the receiving machine can reproduce the experiment.
+
+### Resolve relocation without changing the experiment
+
+- Compare source `state.tar`, config and dataset identity against the private
+  records before execution; do not invent missing checksums or replace the
+  checkpoint with a freshly trained source.
+- Copy the checkpoint's `config.json`, or its run-level `config.json` when
+  that is the original source. Resume looks in the checkpoint directory first,
+  then the run directory ([resume implementation](../../src/checkpoint/Resume.cpp)).
+- Check embedded dataset/image/mask paths. The source-run interface has **no
+  `--data` override** and loads the saved config through `ordinary_source_setup`
+  ([source-run implementation](../../src/backend/tests/engine/g1_native_proof.cpp)).
+  Prefer a destination path mapping that preserves the original config. If
+  relocation requires path edits, use a separate working copy, retain the
+  original, record the exact path-only changes and old/new identities, and
+  verify all training settings, dataset ordering and image contents unchanged.
+  Do not silently claim the original config hash after editing it.
+- Check both build/output storage afresh and retain at least 10 GiB free after
+  planned growth. Keep one process per GPU; inspect for other jobs before any
+  later authorized execution.
+- Rediscover device UUIDs, driver/toolchain versions and topology on the new
+  host. Old `0100...`/`0200...` selectors and timings are not portable device
+  assignments or fresh native controls. A changed GPU, driver or host transfer
+  route requires new matched controls before a performance claim.
+
+### Build and command reference — execution requires approval
+
+The implemented **two-device strip executor is Windows-only**. Moving it to
+Linux/macOS would be a separate port, not ordinary setup. Use supported
+non-NVIDIA Vulkan hardware; do not substitute a CUDA or NVIDIA Vulkan run.
+
+For Windows, install the Visual Studio C++ tools and Windows SDK, CMake/Ninja
+(the dev script can use the VS-bundled copies), and Vulkan SDK. Use the committed
+Slang version pin; the earlier accepted build used MSVC 19.44.35229.0 Release and
+Slang 2026.12.0.1. CMake can fetch pinned Slang, or an offline setup can supply
+the matching compiler through `SS_SLANGC`. Generated C++ sources are committed;
+Python, PyTorch and CUDA are not Vulkan build dependencies. See
+[dev builds](../build.md#dev-builds) and [backend specifics](../build.md#backend-specifics);
+the current repository support policy overrides their legacy CUDA/PyTorch text.
+
+After build authorization, from a Windows command prompt:
+
+```bat
+build_develop.bat -DSS_BACKEND=vulkan -DSS_BUILD_GUI=OFF -DSS_ENABLE_PATENTED=OFF
+```
+
+The tools are `build_vulkan\spirula.exe` and
+`build_vulkan\g1_native_proof.exe`. Discover UUIDs from the destination CLI's
+device listing; do not reuse ordinals or assume the historical UUIDs identify
+the same physical cards. Clear inherited worker/B1/B2/debug overrides, including
+deprecated `SSPLAT_` aliases, before a native control. The source-run mode refuses
+an inherited worker selector; the native command below has no `--worker-device`.
+
+Only if a suitable retained profile is unavailable **and the proposed diagnostic
+is explicitly approved**, set `SS_HANDOFF_SOURCE` to the validated checkpoint,
+`SS_HANDOFF_AUTHORITY` to the destination UUID's 32 hex digits, and
+`SS_HANDOFF_OUTPUT` to a new, nonexistent output directory with an existing parent:
+
+```bat
+set "SS_PPISP_REDUCTION=staged"
+set "SS_PROFILE=1"
+build_vulkan\g1_native_proof.exe image-strip-source-run --resume "%SS_HANDOFF_SOURCE%" --device "uuid:%SS_HANDOFF_AUTHORITY%" --output "%SS_HANDOFF_OUTPUT%" --updates 8 --input-index 847
+set "SS_PROFILE="
+```
+
+Capture complete stdout/stderr and the actual exit code privately as well as the
+generated JSONL; per-stage profiler output is not promised in the JSONL. Preserve
+all eight updates and separate the first two from the six timing-screen updates.
+Inspect profiler scope: an aggregate including warm-up/setup cannot be relabelled
+as updates 3-8. A successful run must end at full step 10008 with the unchanged
+30000 horizon, expected source/config identities, input dimensions and native
+arm. This is fixed-input diagnostic evidence, not ordinary-sampler timing,
+numerical qualification or a speedup claim. Do not add a dual run, 20-update
+extension, parameter sweep or full suite automatically.
+
+### Prompt for the receiving session
+
+> Read `docs/notes/multi-gpu-training-brainstorm-handoff.md` and the short-run
+> plan's execution result. The tested two-GPU executor is slower; native remains
+> default. Do not restart B2/G1/O1/raster/strip campaigns, implement packing,
+> profile, train or build yet. First verify the transferred checkout revision
+> and private `PRIVATE-HANDOFF.txt`, source/dataset identity and artifact access.
+> Inspect retained native staged-PPISP profiles for a matching per-stage GPU
+> breakdown. Report what is reusable and what is missing; if no suitable profile
+> exists, propose one eight-update native diagnostic for approval. Assess causal
+> compute/transfer headroom for a stated split without converting byte fractions
+> or timing spread into hard impossibility bounds. Preserve the same logical
+> objective, active appearance/topology, authoritative native update and existing
+> numerical gates. No push or PR.
 
 ## Settled user decisions and constraints
 
