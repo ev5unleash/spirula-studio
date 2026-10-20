@@ -1,7 +1,9 @@
 # Multi-GPU training: continuation handoff
 
-Updated 2026-10-19. Implementation baseline: **`d1a829af`**.
-Completed short-run results and prior notes are committed at **`ef89ab3d`**.
+Updated 2026-10-20. Implementation baseline: **`d1a829af`**.
+Completed short-run results are committed at **`ef89ab3d`**; the first
+cross-machine handoff is **`ebefdde7`**. Publication destination:
+**[`ev5unleash/spirula-studio`, branch `dull-baboon`](https://github.com/ev5unleash/spirula-studio/tree/dull-baboon)**.
 
 **Executed follow-on: [short-run improvement plan](multi-gpu-training-short-run-plan.md#execution-result--2026-10-17).**
 Physical-role reversal averaged 158.56 ms/update versus 96.88 ms native in the
@@ -72,14 +74,70 @@ a fresh matched native control before any win claim.
 
 ## Continuing on another development machine
 
-### Transfer code and private artifacts separately
+### Fetch the branch and verify its history
 
-The commits are local on branch `dull-baboon`; no push or PR was performed.
-Transfer the branch/history through an approved repository copy or Git bundle.
+The user explicitly authorized publishing this branch to the fork's `origin`.
+The destination is **`https://github.com/ev5unleash/spirula-studio.git`**,
+branch **`dull-baboon`**. It is not a branch in the upstream
+`harry7557558/spirula-studio` repository. No PR, upstream push, force-push or
+experiment is authorized by this publication.
+
+The previous missing-history report was valid: these commits were local-only
+when the handoff was first supplied. Fetch the actual branch, not just copies
+of its Markdown documents. A fresh, non-shallow clone is the simplest route:
+
+```bash
+git clone --branch dull-baboon https://github.com/ev5unleash/spirula-studio.git spirula-multi-gpu
+```
+
+For an existing checkout, preserve local changes first. If its `origin` points
+elsewhere, leave it unchanged and add a distinct remote:
+
+```bash
+git remote add multi-gpu https://github.com/ev5unleash/spirula-studio.git
+git fetch multi-gpu
+git switch --create multi-gpu-continuation --track multi-gpu/dull-baboon
+```
+
+If `multi-gpu` already exists, verify its URL rather than replacing it. Use a
+fresh local branch name if `multi-gpu-continuation` already exists. If already
+on a clean local branch tracking this fork's `dull-baboon`, `git pull --ff-only`
+updates it without rewriting local history. Do not reset or force-update a
+destination branch to make the checkout succeed.
+
+Inside the receiving checkout, verify the implementation and document history:
+
+```bash
+git status --short --branch
+git rev-parse HEAD
+git cat-file -t d1a829af
+git cat-file -t ef89ab3d
+git cat-file -t ebefdde7
+git merge-base --is-ancestor d1a829af HEAD
+git merge-base --is-ancestor ef89ab3d HEAD
+git merge-base --is-ancestor ebefdde7 HEAD
+git log --oneline -- docs/notes/multi-gpu-training-short-run-plan.md docs/notes/multi-gpu-training-brainstorm-handoff.md
+```
+
+Each `cat-file` must print `commit`; each ancestry check must exit 0. The
+publication receipt supplies the pushed tip SHA to compare with `HEAD`.
+For a shallow checkout, obtain full history from the correct remote before
+interpreting missing ancestors. If a baseline or document history still cannot
+be resolved, stop and report the exact remote, fetched tip and missing object;
+do not treat the Markdown as proof that implementation exists locally.
+
+| Commit | Role |
+|---|---|
+| `d1a829af` | Opt-in synchronous image-strip implementation; production executor restored to this baseline after the diagnostic. |
+| `41e4e614` | Original brainstorming handoff and the checkout used to start the short-run evaluation. |
+| `ef89ab3d` | Completed short-run plan/results and associated note updates. |
+| `ebefdde7` | Cross-machine handoff with corrected Reviewer-2 advice and private-artifact prerequisites. |
+
 Do not copy only this linked worktree's `.git` file: it points at another local
-checkout. The receiving checkout must contain `d1a829af`, `ef89ab3d` and this
-handoff's commit. Confirm its revision and working-tree state before continuing.
-Do not copy a configured build tree as a portable build; rebuild for the new host.
+checkout. Do not copy a configured build tree as a portable build; rebuild for
+the new host only after build authorization.
+
+### Transfer private artifacts separately
 
 Git contains source, generated source and public notes, **not the training
 inputs or private experimental evidence**:
@@ -183,18 +241,22 @@ extension, parameter sweep or full suite automatically.
 
 ### Prompt for the receiving session
 
-> Read `docs/notes/multi-gpu-training-brainstorm-handoff.md` and the short-run
-> plan's execution result. The tested two-GPU executor is slower; native remains
-> default. Do not restart B2/G1/O1/raster/strip campaigns, implement packing,
-> profile, train or build yet. First verify the transferred checkout revision
-> and private `PRIVATE-HANDOFF.txt`, source/dataset identity and artifact access.
-> Inspect retained native staged-PPISP profiles for a matching per-stage GPU
-> breakdown. Report what is reusable and what is missing; if no suitable profile
-> exists, propose one eight-update native diagnostic for approval. Assess causal
+> Fetch branch `dull-baboon` from `https://github.com/ev5unleash/spirula-studio.git`
+> using the commands in `docs/notes/multi-gpu-training-brainstorm-handoff.md`.
+> Verify `d1a829af`, `ef89ab3d` and `ebefdde7` are ancestors and both handoff/plan
+> documents have history; preserve any unrelated local edits. Read the handoff
+> and the short-run plan's execution result. The tested two-GPU executor is
+> slower; native remains default. Do not restart B2/G1/O1/raster/strip campaigns,
+> implement packing, profile, train or build yet. Verify the private
+> `PRIVATE-HANDOFF.txt`, source/dataset identity and artifact access. Inspect
+> retained native staged-PPISP profiles for a matching per-stage GPU breakdown.
+> Report what is reusable and what is missing; if no suitable profile exists,
+> propose one eight-update native diagnostic for approval. Assess causal
 > compute/transfer headroom for a stated split without converting byte fractions
 > or timing spread into hard impossibility bounds. Preserve the same logical
 > objective, active appearance/topology, authoritative native update and existing
-> numerical gates. No push or PR.
+> numerical gates. This branch publication does not authorize new experiments,
+> further pushes or a PR.
 
 ## Settled user decisions and constraints
 
@@ -210,8 +272,9 @@ extension, parameter sweep or full suite automatically.
   NVIDIA/CUDA implementation, debugging or validation.
 - Lightweight targeted checks were requested, not a full suite or long campaign.
   Do not launch either merely to prepare this discussion.
-- Native stays default; experimental behavior is opt-in. Local commits only;
-  no push or PR without a new explicit request.
+- Native stays default; experimental behavior is opt-in. Publishing this handoff
+  and its branch history to the fork's `origin/dull-baboon` is explicitly
+  authorized. No PR, upstream publication or further push is implied.
 - Preserve originals, corpus, source checkpoint and failed evidence. Check
   resources afresh before future execution; retain the existing 10 GiB
   post-growth free-space floor and one process per GPU rule.
