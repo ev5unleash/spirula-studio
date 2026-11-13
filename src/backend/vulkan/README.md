@@ -718,6 +718,15 @@ the engine level.
     loose floats + 2.8M codes; 10 configs over sh_optim_bits 32/8/4 x
     sh_value_bits 32/16/8 x bounds layouts x non-SH quant x degree
     warmup). All three devices pass; validation clean.
+- **Local covariance regularization**: `kernels/PcaReg.cpp` uses the shared
+  Slang PCA math for centers, opacity-weighted centers, or Gaussian mixtures.
+  It supports PCAsplat eigenspectrum/normal/surfel losses, an effective-rank
+  upper bound, and transmittance along the PCA normal. Specialization IDs are
+  covariance mode 0, enabled-term mask 1, search mode 2; capacities and scale
+  modes have separate entries. `pca_reg_parity` checks double-precision values,
+  finite differences, neighbor search and degenerate inputs. `pca_reg_step`
+  checks optimizer integration, including opacity updates without false camera
+  visits. See [the math and tuning notes](../../../docs/notes/pca-reg.md).
 - **Projective depth**: `kernels/ProjectiveDepth.cpp` and
   `backend/vulkan/shaders/projective_depth.slang` observe existing raster
   gradients to update each splat's anchor and geometric information. FPBO and
@@ -814,6 +823,15 @@ the engine level.
     but remain opt-in because their atomic contention measured slower.
     Depth/normal v2 specializes away discarded input gradients; RGB PPISP
     v2 retains its image-gradient pass.
+  - **Uniform PPISP backward, Vulkan only**: wherever a 16x16 pixel tile
+    spans at most two cells per axis and L <= 8, every v1 arm runs
+    `bilagrid_ppisp_bwd_tile` instead. v1's grid kernel repeats each
+    pixel's PPISP backward for the ~4 grid nodes that gather it; the tile
+    kernel runs it once per pixel, stages the 9 parameter gradients in
+    groupshared, and sums one (cell, level) row per thread over 32-pixel
+    chunks. Garden at 2594x1681, 2.5M splats: grid + rgb 4.65 ms ->
+    1.31 ms a step. Reducing per subgroup instead cost more than v1 did:
+    a tile's pixels spread over most of the levels.
 - **Multi-scale per-pixel loss stack (phase 5, seventh slice)**:
   `kernels/PerPixelLoss.cpp` mirrors `compute_multi_scale_per_pixel_losses`
   (PerPixelLoss.cu) end to end — pyramid construction, per-scale grad

@@ -41,6 +41,7 @@ const ViewerCamModel kViewerCameraModels[] = {
     {"FISHEYE",         &msg::cam_fisheye_equidistant,  10, 360},
     {"EQUISOLID",       &msg::cam_fisheye_equisolid,    10, 360},
     {"EQUIRECTANGULAR", &msg::cam_equirectangular,       0, 0},
+    {"ORTHOGRAPHIC",    &msg::view_orthographic,        10, 150},
 };
 
 // fovToIntrinsics port: inverting the actual projection (not the pinhole tan
@@ -57,10 +58,6 @@ void fov_to_intrinsics(float fov_deg, int w, int h, const char* model,
     fy = fx;
 }
 
-// Orthographic as a pinhole this many times further off with a lens this
-// many times longer. At 256 a box as deep as the view distance changes size
-// by 0.4% front to back, and float still resolves 3e-5 of that distance.
-constexpr float kOrthoPull = 256.0f;
 // An axis snap turns the view over this long rather than jumping: the eye
 // keeps track of which way up the model is.
 constexpr double kSnapSeconds = 0.18;
@@ -200,13 +197,40 @@ bool ViewportPanel::maybe_frame(const spirula::TrainerSession& session) {
     _framed_key = key;
     const dsparse::CenterTable centers = dsparse::scene_centers(session.ds);
     set_centers(&centers, session.ds.num_cameras > 0);
-    _cam.mode = dsparse::navigation_hint(session.ds.c2w.data(), session.ds.num_cameras).orbit
-        ? NavCamera::Turntable : NavCamera::Fps;
-    _center_mode = (int)(_cam.mode == NavCamera::Turntable && session.ds.num_cameras > 0
-        ? dsparse::CenterMode::CameraFocus : dsparse::CenterMode::CameraMedian);
+    follow_navigation_hint(session.ds, true);
     compute_framing(session);
     _show_cams = true;   // default on for a fresh dataset preview
     return true;
+}
+
+void ViewportPanel::pivot_on_center() {
+    float c[3];
+    center_shared(c);
+    recenter_at(c);
+    const NavCamera live = _cam;
+    reset_pose(_home_dist);
+    _cam = live;
+}
+
+void ViewportPanel::follow_navigation_hint(const ParsedDataset& ds, bool first) {
+    if (first) _auto_nav_mode = _auto_center = true;
+    if (!_auto_nav_mode && !_auto_center) return;
+    const auto hint = dsparse::navigation_hint(ds.c2w.data(), ds.num_cameras);
+    bool repivot = false;
+    if (_auto_nav_mode) {
+        const NavCamera::Mode mode = hint.orbit ? NavCamera::Turntable : NavCamera::Fps;
+        // Looking around in first person leaves the target off the view axis.
+        repivot = hint.orbit && mode != _cam.mode;
+        _cam.mode = mode;
+    }
+    const int center = (int)(hint.pivot_focus ? dsparse::CenterMode::CameraFocus
+                                              : dsparse::CenterMode::CameraMedian);
+    if (_auto_center && center != _center_mode) {
+        _center_mode = center;
+        repivot = true;
+    }
+    // A new dataset is framed about the centre by the caller.
+    if (repivot && !first) pivot_on_center();
 }
 
 void ViewportPanel::reset_view() {
@@ -238,7 +262,7 @@ const char* ViewportPanel::camera_model_name() const {
     return kViewerCameraModels[_cam_model].name;
 }
 const char* ViewportPanel::camera_model_label(int model) {
-    return kViewerCameraModels[std::clamp(model, 0, 3)].label->get();
+    return kViewerCameraModels[std::clamp(model, 0, 4)].label->get();
 }
 float ViewportPanel::fov_min() const { return kViewerCameraModels[_cam_model].fov_min; }
 float ViewportPanel::fov_max() const { return kViewerCameraModels[_cam_model].fov_max; }
@@ -253,47 +277,23 @@ void ViewportPanel::compute_intrinsics(int W, int H, float& fx, float& fy) const
     } else {
         fov_to_intrinsics(_fov_deg[_cam_model], W, H, model, fx, fy);
     }
-    if (ortho_back() > 0.0f) {
-        fx *= kOrthoPull;
-        fy *= kOrthoPull;
+    if (_ortho) {
+        fx /= std::max(nav_dist(), 1e-6f);
+        fy /= std::max(nav_dist(), 1e-6f);
     }
-}
-
-// The distance the render camera stands behind the navigated one. The depth
-// that keeps its size is the pivot's, which is what an orbit turns about.
-float ViewportPanel::ortho_back() const {
-    if (!_ortho || _cam_model != 0) return 0.0f;
-    float f[3];
-    _cam.axis_forward(f);
-    float d = (_cam.target[0] - _cam.pos[0]) * f[0] +
-              (_cam.target[1] - _cam.pos[1]) * f[1] +
-              (_cam.target[2] - _cam.pos[2]) * f[2];
-    if (!(d > 1e-6f)) d = std::max(nav_dist(), 1e-6f);
-    return d * (kOrthoPull - 1.0f);
-}
-
-float ViewportPanel::ortho_pullback(bool shared) const {
-    const float b = ortho_back();
-    return shared ? b : b / _m2s_scale;
 }
 
 void ViewportPanel::render_c2w(float out[12]) const {
     _cam.c2w(out);
-    const float back = ortho_back();
-    if (back <= 0.0f) return;
-    float f[3];
-    _cam.axis_forward(f);
-    out[3] -= f[0] * back;
-    out[7] -= f[1] * back;
-    out[11] -= f[2] * back;
 }
 
 void ViewportPanel::set_ortho(bool on) {
-    if (on && _cam_model != 0) {
-        _cam_model = 0;
-        _fov_deg[0] = std::clamp(_fov_deg[0], fov_min(), fov_max());
+    if (on && !_ortho) {
+        _previous_cam_model = _cam_model;
+        _cam_model = 4;
+    } else if (!on && _ortho) {
+        _cam_model = _previous_cam_model == 4 ? 0 : _previous_cam_model;
     }
-    if (_ortho == on && !_ortho_auto) return;
     _ortho = on;
     _ortho_auto = false;
     _dirty = true;
@@ -317,8 +317,7 @@ void ViewportPanel::snap_view(int axis, bool negative) {
     std::memcpy(_anim_to, to.rot, sizeof _anim_to);
     _anim = true;
     _anim_t0 = ImGui::GetTime();
-    if (_cam_model != 0) _cam_model = 0;
-    _ortho = true;
+    set_ortho(true);
     _ortho_auto = true;
     _dirty = true;
 }
@@ -609,6 +608,7 @@ void ViewportPanel::build_request(ViewRequest& q, int W, int H) const {
     }
     model_c2w(q.c2w);
     compute_intrinsics(W, H, q.fx, q.fy);
+    if (_ortho) { q.fx *= _m2s_scale; q.fy *= _m2s_scale; }
     q.cx = 0.5f * (float)W;
     q.cy = 0.5f * (float)H;
     q.W = W;
@@ -689,6 +689,7 @@ void ViewportPanel::view_camera(int W, int H, float w2c[12], float& fx,
     model_c2w(m);
     cv_w2c(m, w2c, eye);
     compute_intrinsics(W, H, fx, fy);
+    if (_ortho) { fx *= _m2s_scale; fy *= _m2s_scale; }
     camera_model = _cam_model;
 }
 
@@ -715,13 +716,15 @@ void ViewportPanel::set_nav_pose(const float c2w[12], const float target[3]) {
     _cam.look_at(eye, ahead, up);
     for (int i = 0; i < 3; i++) _cam.target[i] = target[i];
     _anim = false;
-    if (_ortho) _ortho = _ortho_auto = false;
+    if (_ortho) set_ortho(false);
     _dirty = true;
 }
 
 void ViewportPanel::set_view_lens(int model, float fov_deg) {
-    model = std::clamp(model, 0, 3);
-    if (model != 0) _ortho = _ortho_auto = false;
+    model = std::clamp(model, 0, 4);
+    _previous_cam_model = model == 4 ? 0 : model;
+    _ortho = model == 4;
+    _ortho_auto = false;
     _cam_model = model;
     if (fov_max() > 0) _fov_deg[model] = std::clamp(fov_deg, fov_min(), fov_max());
     _dirty = true;
@@ -796,17 +799,29 @@ void ViewportPanel::attach_preview_data(const ParsedDataset& ds,
         _last_error = "preview renderer unavailable (OpenGL 3.2 required)";
         return;
     }
+    // A live model is renormalized on its own cameras at every snapshot and
+    // re-gauged at the end: the pivot follows the centre to stay on the subject.
+    // Not the scale, which jumps where 2 cameras are framed by points, 3 by baseline.
+    const bool reframed = !first && _centers_known && ds.train_to_normalized != _preview_frame;
+    _preview_frame = ds.train_to_normalized;
+    float was[3];
+    center_shared(was);
     {
         const dsparse::CenterTable centers = dsparse::scene_centers(ds);
         set_centers(&centers, ds.num_cameras > 0);
     }
     adopt_gauge(ds, first);
+    if (reframed) {
+        float now[3];
+        center_shared(now);
+        const float S[12] = {1, 0, 0, now[0] - was[0], 0, 1, 0, now[1] - was[1],
+                             0, 0, 1, now[2] - was[2]};
+        move_view(S);
+    }
+    // A live reconstruction refreshes under one key; its mode follows it.
+    follow_navigation_hint(ds, first);
     if (first) {
         _framed_key = key;
-        _cam.mode = dsparse::navigation_hint(ds.c2w.data(), ds.num_cameras).orbit
-            ? NavCamera::Turntable : NavCamera::Fps;
-        _center_mode = (int)(_cam.mode == NavCamera::Turntable && ds.num_cameras > 0
-            ? dsparse::CenterMode::CameraFocus : dsparse::CenterMode::CameraMedian);
         reset_pose(radius);
     }
     _last_error.clear();
@@ -1042,7 +1057,7 @@ void ViewportPanel::handle_input(float /*item_h*/) {
                         _cam.look(dx, dy);
                     // An axis view is orthographic because it is an axis
                     // view; turned away from the axis it is a view again.
-                    if (_ortho_auto) _ortho = _ortho_auto = false;
+                    if (_ortho_auto) set_ortho(false);
                     _anim = false;
                 }
                 _dirty = true;
@@ -1070,7 +1085,7 @@ void ViewportPanel::handle_input(float /*item_h*/) {
     // +-1 with the opposite sign convention).
     if (hovered && io.MouseWheel != 0.0f) {
         _frame_anim = false;
-        if (ortho_back() > 0.0f) {
+        if (_ortho) {
             // Moving forward changes nothing about an orthographic image, so
             // every mode zooms the way the orbiting ones do.
             const float k = std::exp(-io.MouseWheel * 100.0f * 0.004f *
@@ -1269,7 +1284,7 @@ bool ViewportPanel::gizmo_input(bool hovered_image) {
                 _cam.orbit(dx * 1.5f, dy * 1.5f);
             else
                 _cam.look(dx * 1.5f, dy * 1.5f);
-            if (_ortho_auto) _ortho = _ortho_auto = false;
+            if (_ortho_auto) set_ortho(false);
             _anim = false;
         }
         _dirty = true;
@@ -1348,7 +1363,7 @@ void ViewportPanel::draw_gizmo() const {
                     dl->AddLine(tip, ImVec2(tip.x + a, tip.y + by), ink, t);
                 }
             }
-        } else if (ortho_back() > 0.0f) {
+        } else if (_ortho) {
             // Parallel edges: a square grid.
             dl->AddRect(ImVec2(c.x - u, c.y - u), ImVec2(c.x + u, c.y + u), ink, 0.0f, 0, t);
             dl->AddLine(ImVec2(c.x, c.y - u), ImVec2(c.x, c.y + u), ink, t);
@@ -1376,7 +1391,7 @@ void ViewportPanel::draw_gizmo() const {
         if (_giz_hot == 6) ui::SetTooltip(msg::gizmo_zoom_help);
         else if (_giz_hot == 7) ui::SetTooltip(msg::gizmo_pan_help);
         else if (_giz_hot == 8)
-            ui::SetTooltip(ortho_back() > 0.0f ? msg::gizmo_to_perspective
+            ui::SetTooltip(_ortho ? msg::gizmo_to_perspective
                                                : msg::gizmo_to_ortho);
         else if (_giz_hover) ui::SetTooltip(msg::gizmo_help);
     }
@@ -1389,12 +1404,11 @@ void ViewportPanel::draw_overlays() {
     int model;
     nav_camera((int)_img_w, (int)_img_h, w2c, fx, fy, model, eye);
     auto project = [&](const float p[3], ImVec2& pixel) {
-        double ray[3], uv[2];
+        float ray[3], u, v;
         for (int r = 0; r < 3; r++)
             ray[r] = w2c[r*4]*p[0] + w2c[r*4+1]*p[1] + w2c[r*4+2]*p[2] + w2c[r*4+3];
-        const float distortion[8] = {};
-        if (!camhost::project_ray(ray, model, 0, distortion, uv)) return false;
-        pixel = ImVec2(_img_x + _img_w/2 + fx*uv[0], _img_y + _img_h/2 + fy*uv[1]);
+        if (!viewer_ray_pixel(model, ray, u, v)) return false;
+        pixel = ImVec2(_img_x + _img_w/2 + fx*u, _img_y + _img_h/2 + fy*v);
         return std::isfinite(pixel.x) && std::isfinite(pixel.y);
     };
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -1419,10 +1433,11 @@ void ViewportPanel::draw_overlays() {
             float pose[12]; saved.c2w(pose);
             const int w = 1000, h = (int)(w / (b.aspect > 0 ? b.aspect : 1.0f));
             float sx, sy;
-            fov_to_intrinsics(b.fov_deg, w, h, kViewerCameraModels[std::clamp(b.cam_model, 0, 3)].name, sx, sy);
-            if (b.cam_model == 3) { sx = w/(2*3.14159265f); sy = h/3.14159265f; }
+            const int saved_model = b.ortho ? 4 : std::clamp(b.cam_model, 0, 4);
+            fov_to_intrinsics(b.fov_deg, w, h, kViewerCameraModels[saved_model].name, sx, sy);
+            if (saved_model == 3) { sx = w/(2*3.14159265f); sy = h/3.14159265f; }
             const float dist[8] = {};
-            auto shape = camhost::frustum_template(b.cam_model, 0, w, h, sx, sy, w/2.f, h/2.f, dist);
+            auto shape = camhost::frustum_template(saved_model, 0, w, h, sx, sy, w/2.f, h/2.f, dist);
             auto mapped = [&](camhost::FrustumPoint p) {
                 double local[3], world[3];
                 for (int r = 0; r < 3; r++)
@@ -1590,6 +1605,7 @@ void ViewportPanel::draw_controls(bool engine) {
                 if (ui::SelectableRaw(center_label(i), i == _center_mode) &&
                     i != _center_mode) {
                     _center_mode = i;
+                    _auto_center = false;
                     // What is live now, not what the file held.
                     if (_center_provider) {
                         dsparse::CenterTable live;
@@ -1597,12 +1613,7 @@ void ViewportPanel::draw_controls(bool engine) {
                     }
                     // The model stays where it is; the pivot moves to the new
                     // centre, and so does the pose Reset view returns to.
-                    float c[3];
-                    center_shared(c);
-                    recenter_at(c);
-                    const NavCamera live = _cam;
-                    reset_pose(_home_dist);
-                    _cam = live;
+                    pivot_on_center();
                 }
             }
             ImGui::EndCombo();
@@ -1746,8 +1757,10 @@ void ViewportPanel::draw_nav_controls() {
     place(px(150.0f));
     ImGui::SetNextItemWidth(px(150.0f));
     if (ui::ComboRaw("##navmode", &nav,
-                     {kNavModes[0], kNavModes[1], kNavModes[2], kNavModes[3]}))
+                     {kNavModes[0], kNavModes[1], kNavModes[2], kNavModes[3]})) {
         _cam.mode = (NavCamera::Mode)nav;
+        _auto_nav_mode = false;
+    }
     ui::help_on_hover(msg::viewport_nav_help,
                       {kNavModes[0]->get(), kNavModes[1]->get(),
                        kNavModes[2]->get(), kNavModes[3]->get()});
@@ -1758,15 +1771,9 @@ void ViewportPanel::draw_nav_controls() {
     place(px(160.0f));
     ImGui::SetNextItemWidth(px(160.0f));
     if (ui::BeginComboRaw("##cammodel", kViewerCameraModels[_cam_model].label->get())) {
-        for (int i = 0; i < 4; i++)
-            if (ui::Selectable(*kViewerCameraModels[i].label, i == _cam_model)) {
-                _cam_model = i;
-                // Clamp the remembered FOV into the new model's range
-                // (viewer.html _syncCameraModelUI).
-                if (fov_max() > 0)
-                    _fov_deg[i] = std::clamp(_fov_deg[i], fov_min(), fov_max());
-                _dirty = true;
-            }
+        for (int i : {4, 0, 1, 2, 3})
+            if (ui::Selectable(*kViewerCameraModels[i].label, i == _cam_model))
+                set_view_lens(i, _fov_deg[i]);
         ImGui::EndCombo();
     }
     ui::help_on_hover(msg::viewport_projection_help);
@@ -1836,9 +1843,9 @@ unsigned ViewportPanel::pump_preview(const ImVec2& avail, int& W, int& H) {
     H = (int)std::clamp(avail.y, 64.0f, 4096.0f);
     float view[16];
     view_matrix(view);
-    // Same intrinsics as the engine render request -> seamless transition.
     float fx, fy;
     compute_intrinsics(W, H, fx, fy);
+    if (_ortho) { fx *= _m2s_scale; fy *= _m2s_scale; }
     float target[3];
     model_point(_cam.target, target);
     _preview.set_overlay(_roi_preview, _show_roi);
@@ -1851,7 +1858,7 @@ unsigned ViewportPanel::pump_preview(const ImVec2& avail, int& W, int& H) {
                                    _home_dist, nav_dist() / _m2s_scale, target,
                                    _show_cams, _frustum_scale,
                                    _show_grid && !external_grid(),
-                                   ortho_pullback(false), &style);
+                                   &style);
     return _preview_tex;
 }
 
@@ -1860,6 +1867,7 @@ void ViewportPanel::draw_preview(const ImVec2& avail) {
     const unsigned tex = pump_preview(avail, W, H);
     float fx, fy;
     compute_intrinsics(W, H, fx, fy);
+    if (_ortho) { fx *= _m2s_scale; fy *= _m2s_scale; }
     if (!tex) {
         ui::TextDisabled(msg::viewport_render_failed);
         return;
@@ -1884,6 +1892,8 @@ void ViewportPanel::draw_preview(const ImVec2& avail) {
             float ro[3] = {m[3], m[7], m[11]}, rd[3], p[3];
             for (int r = 0; r < 3; r++)
                 rd[r] = m[r*4+0]*dcv[0] - m[r*4+1]*dcv[1] - m[r*4+2]*dcv[2];
+            if (_ortho)
+                for (int r = 0; r < 3; r++) ro[r] += m[r*4]*u - m[r*4+1]*v;
             if (_preview.pick_point(ro, rd, p)) {
                 shared_point(p, _tool_pick_at);
                 _tool_pick_hit = true;
@@ -1906,6 +1916,8 @@ void ViewportPanel::draw_preview(const ImVec2& avail) {
             for (int r = 0; r < 3; r++)
                 rd[r] = m[r*4+0]*dcv[0] - m[r*4+1]*dcv[1] - m[r*4+2]*dcv[2];
             float hit[3];
+            if (_ortho)
+                for (int r = 0; r < 3; r++) ro[r] += m[r*4]*u - m[r*4+1]*v;
             if (_preview.pick_point(ro, rd, p)) {
                 shared_point(p, hit);
                 recenter_at(hit);
@@ -1973,13 +1985,15 @@ void ViewportPanel::sync_view_from(const ViewportPanel& src) {
     if (&src == this) return;
     if (std::memcmp(&_cam, &src._cam, sizeof(NavCamera)) == 0 &&
         _cam_model == src._cam_model && _ortho == src._ortho &&
+        _previous_cam_model == src._previous_cam_model &&
         _fov_deg[_cam_model] == src._fov_deg[src._cam_model])
         return;
     _cam = src._cam;
     _cam_model = src._cam_model;
+    _previous_cam_model = src._previous_cam_model;
     _ortho = src._ortho;
     _ortho_auto = src._ortho_auto;
-    for (int i = 0; i < 4; i++) _fov_deg[i] = src._fov_deg[i];
+    for (int i = 0; i < 5; i++) _fov_deg[i] = src._fov_deg[i];
     _home = src._home;
     _home_dist = src._home_dist;
     // A glide travels too: the master is picked a frame late, so a pane left

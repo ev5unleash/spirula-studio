@@ -697,6 +697,18 @@ images' own size. This is the "train smaller to go faster" knob — the GUI's
 Image resolution combo writes it — and it is relative to the images, not to the
 reconstruction.
 
+When the divisor is a whole number above 1, `cache_downscaled_images` (on by
+default) keeps the shrunk colour images beside the originals, at
+`<image_dir>_<d>/<same relative path>` (`data/DownscaleCache.h`), and later
+loads decode those, so a run over large images stops being bound by decoding
+them. JPEG and PNG only (8/16-bit, grey, RGB, RGBA; RGBA is filtered with
+premultiplied alpha), each in its own format, JPEG at quality 95. A file
+already there is used when its size is the original's divided by `d` under any
+rounding mode and it ends like a whole file; otherwise the original loads, and
+that file is never overwritten. Masks, depths and normals are not affected:
+they load at their own size whatever the divisor. On 60 MP JPEGs at divisor 8,
+500 steps took 49 s uncached, 10 s on the run that writes the cache, 5 s after.
+
 A caller with no image decoders leaves `probe_image_size` null and gets the
 reconstruction's resolution unchanged; the WebAssembly viewer does exactly that.
 
@@ -937,6 +949,35 @@ consent: they fail without changing the existing frames or dataset record, so
 rebuild interactively first or choose a fresh output folder for the batch.
 Changing the clip also re-extracts.
 See docs/notes/source-preview.md and docs/notes/dataset-rerun.md.
+
+### The exposure each frame records
+
+Several cameras log their exposure per frame beside their IMU
+(`sfm/core/Telemetry.h`): a GoPro's `SHUT` and `ISOE`, the Insta360 trailer's
+shutter record, a DJI Avata 360's ISO and shutter, a QooCam's `EXP`. Shared
+extraction writes the one nearest each frame into that frame's JPEG as EXIF
+`ExposureTime` / `ISOSpeedRatings`, timed `index / fps` exactly as SfM times
+the frame, so the `hdr` preset's `--ppisp-exposure-from-exif` seeds PPISP from
+video as it does from photos. Nothing else goes into the block: no focal, no
+orientation, no GPS (SfM reads a video's GPS from the video itself). It needs
+the telemetry reader and shared extraction, so a build without `SS_BUILD_SFM`
+or `SS_BUILD_SAM` writes none, and a PNG frame carries none.
+
+No video logs an aperture, and only some log an ISO, so the trainer compares
+images across sources only when each records shutter, aperture **and** ISO.
+An image missing any is compared only with its own folder's images that record
+the same factors, and each such group starts at its own mean. A night video
+locked at 1/500 s with an unlogged auto ISO is as bright as photos taken at
+1/50 s; compared on shutter alone, the photos would count as over three
+stops brighter.
+
+A 360 photograph -- an Insta360 `.insp`, cut into one JPEG per lens -- keeps
+its own EXIF through the cut: exposure and GPS as written, the focal cleared
+because it describes the whole frame, not one lens.
+
+The input preview's Sensors tab plots what a video logged or a folder's EXIF
+records, in stops about its mean, before anything is extracted
+(`docs/notes/source-preview.md`); so does `viewer/telemetry.html`.
 
 ### Colour LUTs
 

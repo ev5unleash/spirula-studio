@@ -261,6 +261,16 @@ void engine_ppisp_forward(TorchTensorView cam_indices);
 // in PPISPRegLossIndex order.
 void engine_ppisp_optim_step(int step, const PpispStepConfig& cfg);
 
+// Per-image warp of the ground truth onto the render (docs/notes/calib-warp.md);
+// one table row per post camera, none when n_cams is 0.
+void engine_init_calib_warp(int n_cams, const CalibWarpConfig& cfg);
+bool engine_calib_warp_wants_depth();
+// After engine_eval_forward: `src` (the view's render, host [C,H,W,3]) warped onto
+// the staged GT into `out`, by a flow fitted on `est` (it colour-corrected), the
+// staged mask's pixels left out with `use_mask`; outside pixels take the GT.
+void engine_calib_warp_align_to_gt(const float* est, const float* src, float* out,
+                                   bool use_mask);
+
 // --- Background blending (applied BEFORE bilagrid/PPISP) ---
 // Exactly one of these init calls activates it; `--background-mode` picks.
 
@@ -487,13 +497,13 @@ void engine_resolve_data_error(bool retry);
 // The installed GT remains available to the host-copy functions. Returns face count.
 int engine_eval_forward(int index, std::string primitive, int sh_degree, bool packed);
 
-// Same, for ONE image by dataset index (the GUI's compare view), rendering one
-// pass of its faces as step `cfg` would: returns that pass's views, `out_passes`
-// the image's count. Overwrites a step's GT and camera -- BETWEEN steps, under its mutex.
+// Same, for ONE image (the GUI's compare view), one pass of its faces as step `cfg`
+// renders it: returns its views, `out_passes` the image's count. `apply_calib_warp`
+// stages the GT the loss reads. Overwrites a step's GT and camera -- BETWEEN steps.
 int engine_preview_forward(int index, std::string primitive, int sh_degree,
                            bool packed, bool apply_color_correction,
-                           const EngineStepConfig& cfg, int pass = 0,
-                           int* out_passes = nullptr);
+                           bool apply_calib_warp, const EngineStepConfig& cfg,
+                           int pass = 0, int* out_passes = nullptr);
 
 // --- Debug rendering ---
 
@@ -626,6 +636,7 @@ void engine_blit_view(
     TorchTensorView render_buffer,   // [H,W,1|3] float (channel matches buffer_key)
     TorchTensorView render_depth,    // [H,W,1] float, may be null when buffer_key=="alpha"
     TorchTensorView render_alpha,    // [H,W,1] float
+    bool            alpha_is_transmittance,  // render_alpha holds 1 - alpha
     int             view_camera_model,
     std::string     distortion,
     TorchTensorView view_intrins,    // [1,4]   float
@@ -642,12 +653,28 @@ void engine_blit_view(
     TorchTensorView out_rgb          // [H,W,3] uint8, pre-allocated CUDA
 );
 
+// engine_blit_view of the last forward_3dgs's own rgb, depth and coverage,
+// read where they are: no host round trip. False, drawing nothing, when that
+// render is not one float32 rgb image (a training step's half images).
+bool engine_blit_render(int view_camera_model, std::string distortion,
+                        TorchTensorView view_intrins, TorchTensorView view_viewmat,
+                        TorchTensorView view_dist_coeffs, bool show_training_cameras,
+                        bool show_overlay, float grid_dist, float grid_target_x,
+                        float grid_target_y, float grid_target_z,
+                        TorchTensorView out_rgb);
+// Ray depth (not normalized by coverage) and coverage of the last render at
+// one pixel; false outside it or without a depth channel.
+bool engine_render_sample(int x, int y, float& depth, float& alpha);
+
 // --- Viewer scenes (docs/notes/compare-view.md) ---
 //
 // Several splat sets resident at once, one bound at a time; activating one is
 // a pointer swap. Viewer-only: a slot has no optimizer or densify state.
 constexpr int kMaxEngineScenes = 8;
 
+// sh_value_bits is the slot's SH storage: 32, or 16 / 8 packed
+// (docs/notes/sh-quant-layout.md). 0 picks 16, or 8 when the free VRAM
+// could not also hold a render of every splat.
 void engine_scene_set_data_3dgs(
     int slot,
     int64_t num_splats,
@@ -657,8 +684,18 @@ void engine_scene_set_data_3dgs(
     TorchTensorView opacities,
     TorchTensorView features_dc,
     TorchTensorView features_sh,
-    int sb_lobes
+    int sb_lobes,
+    int sh_value_bits = 0
 );
+// The same upload in pieces, for a model too big to hold on the host whole:
+// begin sizes the slot, then runs of rows follow, each starting on a multiple
+// of 256 splats. The slot activates once every row has arrived.
+void engine_scene_begin_3dgs(int slot, int64_t num_splats, int num_sh, int sb_lobes,
+                             int sh_value_bits = 0);
+void engine_scene_upload_3dgs(int slot, int64_t first, TorchTensorView means,
+                              TorchTensorView quats, TorchTensorView scales,
+                              TorchTensorView opacities, TorchTensorView features_dc,
+                              TorchTensorView features_sh);
 
 // The model's own colour space, applied by engine_scene_activate. Two models
 // trained in different spaces are converted each its own way, which is the

@@ -12,6 +12,7 @@
 #include "external/stb_image.h"
 
 #include "i18n/catalog/Gui.h"
+#include "i18n/catalog/SourcePreview.h"
 
 #include "imgui.h"
 
@@ -24,10 +25,14 @@
 #include <filesystem>
 
 namespace msg = spirula::i18n::msg::gui;
+namespace pmsg = spirula::i18n::msg::preview;
 
 namespace gui {
 
 namespace {
+
+// Blend playback: end-to-end sweeps per second (one there-and-back cycle every 2/kBlendSweepHz s).
+constexpr float kBlendSweepHz = 2.5f;
 
 enum BlendPair { PhotoRender, PhotoError, RenderError, DepthRender, NormalRender, BlendPairCount };
 
@@ -69,6 +74,24 @@ void blend_slider(float* amount, float width) {
     ImGui::PopStyleColor(3);
     if (ImGui::IsItemHovered() || ImGui::IsItemActive())
         ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+}
+
+bool play_button(const char* id, bool playing) {
+    const float h = ImGui::GetFrameHeight();
+    const bool pressed = ui::ButtonRaw(id, ImVec2(h, h));
+    const ImVec2 o = ImGui::GetItemRectMin();
+    const float cx = o.x + h * 0.5f, cy = o.y + h * 0.5f, r = h * 0.25f;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImU32 col = ImGui::GetColorU32(ImGuiCol_Text);
+    if (playing) {
+        const float bw = r * 0.6f;
+        dl->AddRectFilled(ImVec2(cx - r, cy - r), ImVec2(cx - r + bw, cy + r), col);
+        dl->AddRectFilled(ImVec2(cx + r - bw, cy - r), ImVec2(cx + r, cy + r), col);
+    } else {
+        dl->AddTriangleFilled(ImVec2(cx - r * 0.8f, cy - r), ImVec2(cx - r * 0.8f, cy + r),
+                              ImVec2(cx + r, cy), col);
+    }
+    return pressed;
 }
 
 uint8_t to_byte(float v) {
@@ -359,7 +382,7 @@ void ImageCompare::run_job(const Job& j, Shot& out) {
         std::lock_guard<std::mutex> lk(s.engine_mutex);
         const int views = engine_preview_forward(
             j.index, s.cfg.primitive, sh_deg, s.cfg.packed,
-            j.color_correct, step_cfg, pi, &npass);
+            j.color_correct, j.calib_warp && !j.source_gt, step_cfg, pi, &npass);
         auto shape = engine_get_render_rgb_shape();
         Pass q;
         q.views = (int)std::get<0>(shape);
@@ -808,7 +831,7 @@ void ImageCompare::place(float w) {
     }
 }
 
-void ImageCompare::draw_toolbar(bool training) {
+void ImageCompare::draw_toolbar() {
     const ImGuiStyle& st = ImGui::GetStyle();
     _row_w = ImGui::GetContentRegionAvail().x;
     _row_used = 0.0f;
@@ -850,6 +873,15 @@ void ImageCompare::draw_toolbar(bool training) {
     // A split image has no single source frame its views line up with, so
     // there is nothing to offer there.
     const bool split = faces() > 1;
+
+    if (_session->cfg.use_calib_warp) {
+        place(check_w(msg::compare_calib_warp));
+        ImGui::BeginDisabled(_source_gt && !split);
+        if (ui::Checkbox(msg::compare_calib_warp, &_calib_warp)) _dirty = true;
+        ImGui::EndDisabled();
+        ui::help_on_hover(msg::compare_calib_warp_help);
+    }
+
     place(check_w(msg::compare_source_gt));
     ImGui::BeginDisabled(split);
     if (ui::Checkbox(msg::compare_source_gt, &_source_gt)) _dirty = true;
@@ -872,30 +904,6 @@ void ImageCompare::draw_toolbar(bool training) {
         ui::Checkbox(msg::compare_show_error, &_show_error);
         ui::help_on_hover(msg::compare_show_error_help);
     }
-
-    place(check_w(msg::compare_smooth));
-    ui::Checkbox(msg::compare_smooth, &_smooth);
-    ui::help_on_hover(msg::compare_smooth_help);
-
-    if (training) {
-        place(check_w(msg::viewport_live));
-        ui::Checkbox(msg::viewport_live, &_live);
-        ui::help_on_hover(msg::compare_live_help);
-    }
-
-    // A percentage is a percentage in every language.
-    char z[16];
-    std::snprintf(z, sizeof z, "%d%%", (int)std::lround(_zoom * 100.0f));
-    place(ImGui::CalcTextSize(msg::compare_reset_zoom.get()).x +
-          2.0f * st.FramePadding.x + st.ItemSpacing.x +
-          ImGui::CalcTextSize(z).x);
-    if (ui::Button(msg::compare_reset_zoom)) {
-        _zoom = 1.0f;
-        _cx = _cy = 0.5f;
-    }
-    ImGui::SameLine();
-    ui::TextDisabledRaw(z);
-    ui::help_on_hover(msg::compare_zoom_help);
 
     if (_blend) {
         static_assert(sizeof(_blend_amount) / sizeof(*_blend_amount) == BlendPairCount);
@@ -925,20 +933,29 @@ void ImageCompare::draw_toolbar(bool training) {
         const auto& right = *kBlendPairs[_blend_pair][1];
         const int right_share = (int)std::lround(_blend_amount[_blend_pair]);
         const float value_w = ImGui::CalcTextSize("100%").x;
-        const float labels_w = ImGui::CalcTextSize(left.get()).x +
-                               ImGui::CalcTextSize(right.get()).x + 2.0f * value_w +
-                               4.0f * st.ItemSpacing.x;
         ImGui::SameLine();
         ui::TextDisabled(left);
         ImGui::SameLine();
         ui::TextDisabledRaw(std::to_string(100 - right_share) + "%");
         ImGui::SameLine(0.0f, st.ItemSpacing.x + value_w - ImGui::GetItemRectSize().x);
-        blend_slider(&_blend_amount[_blend_pair],
-                      std::max(px(60.0f), _row_w - pair_w - st.ItemSpacing.x - labels_w));
+        blend_slider(&_blend_amount[_blend_pair], px(160.0f));
+        if (ImGui::IsItemActive()) _blend_playing = false;
         ImGui::SameLine();
         ui::TextDisabledRaw(std::to_string(right_share) + "%");
         ImGui::SameLine(0.0f, st.ItemSpacing.x + value_w - ImGui::GetItemRectSize().x);
         ui::TextDisabled(right);
+        ImGui::SameLine();
+        if (play_button("##blendplay", _blend_playing)) {
+            _blend_playing = !_blend_playing;
+            _blend_phase = _blend_amount[_blend_pair] / 100.0f;
+        }
+        ui::help_on_hover(_blend_playing ? pmsg::pause : pmsg::play);
+        if (_blend_playing) {
+            _blend_phase = std::fmod(_blend_phase + ImGui::GetIO().DeltaTime * kBlendSweepHz, 2.0f);
+            _blend_amount[_blend_pair] =
+                100.0f * (_blend_phase < 1.0f ? _blend_phase : 2.0f - _blend_phase);
+            _blend_play_frame = ImGui::GetFrameCount();
+        }
     }
 }
 
@@ -971,6 +988,16 @@ void ImageCompare::handle_view_input() {
     }
 }
 
+void ImageCompare::draw_view_menu() {
+    ui::MenuItem(msg::compare_smooth, nullptr, &_smooth);
+    ui::help_on_hover(msg::compare_smooth_help);
+    if (ui::MenuItem(msg::compare_reset_zoom, nullptr, false, _zoom != 1.0f)) {
+        _zoom = 1.0f;
+        _cx = _cy = 0.5f;
+    }
+    ui::help_on_hover(msg::compare_zoom_help);
+}
+
 void ImageCompare::draw_pane(const Pane& p, const ImVec2& box,
                              const char* id, const char* caption,
                              const Pane* overlay, float opacity) {
@@ -999,6 +1026,10 @@ void ImageCompare::draw_pane(const Pane& p, const ImVec2& box,
                    ImGui::GetCursorPosY() + (avail.y - vh) * 0.5f));
         const ImVec2 org = ImGui::GetCursorScreenPos();
         ImGui::Dummy(ImVec2(vw, vh));
+        if (ImGui::BeginPopupContextItem("##viewmenu")) {
+            draw_view_menu();
+            ImGui::EndPopup();
+        }
 
         const float ox = org.x - (_cx - fu * 0.5f) * disp_w;
         const float oy = org.y - (_cy - fv * 0.5f) * disp_h;
@@ -1204,14 +1235,14 @@ void ImageCompare::draw(bool training, int step) {
     }
 
     poll();
-    draw_toolbar(training);
+    draw_toolbar();
     handle_keys();
 
     // Pace refreshes in iterations, keeping preview work near 8% of training time.
-    const Job want{_index, _color_correct, _source_gt && faces() == 1,
+    const Job want{_index, _color_correct, _source_gt && faces() == 1, _calib_warp,
                    _has_error_map && (_blend ? blends_error(_blend_pair) : _show_error)};
     bool follow = false;
-    if (training && _live && _rendered_step >= 0 && step >= 0) {
+    if (training && _rendered_step >= 0 && step >= 0) {
         const int interval = (_job_secs > 0 && _step_secs > 0)
             ? (int)std::clamp(std::ceil(_job_secs / (0.08 * _step_secs)),
                               25.0, 2000.0)

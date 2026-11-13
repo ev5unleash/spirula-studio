@@ -52,6 +52,14 @@ support, and masked color fitting. See
 [projective depth optimization](notes/projective-depth.md) for the update and
 evaluation definitions.
 
+`checkpoint_ply` checks checkpoint filtering, row order, partial output chunks,
+empty output, and 8/16/32-bit SH with both packed layouts; Vulkan also covers
+spherical-beta lobes. Run with `OMP_NUM_THREADS=1` to check serial packing.
+`./build_vulkan/checkpoint_ply . 2000000 8 1` times three saves of two million
+synthetic splats with 8-bit SH and FPBO storage (last argument: 0 for per-cell
+storage). Temporary outputs are removed. Timings include device readback and
+buffered file writes, but not a durability flush to the physical drive.
+
 **The same source builds under both backends.** Each file only touches
 `backend::`, the generated launch declarations, and `Tensor.h`. The workflow
 is dump-then-compare:
@@ -264,6 +272,7 @@ as GPU image caching. It runs without a GPU on either backend.
 | H.265 reference handling | `hevc_reference_retention_test` on a non-NVIDIA Vulkan video-decode device with `SS_ENABLE_PATENTED=ON` |
 | H.265 encode dimensions or HEIF image correctness | `hevc_sps_crop_test` (CPU) and `heif_test` (non-NVIDIA Vulkan encode/decode); fixtures are generated at runtime |
 | `run_process`, `ProcessPipe`, `ProcessReader` or `ProcessDuplex` | `subprocess_lifecycle_test` (CPU): cancellation and owner death stop nested children too |
+| the web viewer's `HttpServer` | `http_server_test` (CPU, not Windows): a connection that never sends stalls neither other requests nor `stop()` |
 | how masking or depth/normal work is split across GPUs | `inference_worker_test`, `inference_worker_devices_test`, `mask_worker_manifest_test`, `geometry_model_budget_test` (CPU); `mask_worker_parity_test` with a cached model on one GPU, then two |
 | anything | one short training run per backend on a public scene |
 
