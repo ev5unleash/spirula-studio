@@ -24,6 +24,7 @@
 
 #include "data/DataManager.h"
 #include "engine/EngineConfig.h"
+#include "engine/StepTiming.h"
 
 #include <map>
 #include <string>
@@ -727,12 +728,27 @@ std::vector<std::tuple<std::string, size_t, size_t>> engine_get_pool_breakdown()
 std::vector<std::tuple<std::string, std::string, size_t, size_t>>
 engine_get_pool_breakdown_categorized();
 size_t engine_get_scratch_bytes();
+// The most visible and splat-tile pairs one forward has made since the reset,
+// and the splat-tile pairs of the last one.
+void engine_get_isect_peaks(int64_t& pairs, int64_t& isects, int64_t& last_isects);
+// That peak at the finest binning tile the search may still try from here
+// (one size down, or two), or 0 when it cannot go finer: a forced size, the
+// floor, a size that keeps losing, too little free device memory.
+int64_t engine_bin_finer_isects();
+// A timed pass of the PCA regularizer whose device time is now known: the
+// seconds one pass over `splats` takes -- a probe's per-splat slope times
+// them, before the start step. False when there is none to report.
+bool engine_pca_reg_take_timing(double& seconds, int64_t& splats, bool& probed);
 
 // GPU seconds the next step spends in its splat stages (forward, raster and
 // projection backward, optimizer, densify) for the trainer's ETA model. Arm
 // before the step, read after; < 0 if not armed or the device has no timer.
 void engine_step_timing_arm();
 double engine_step_timing_read();
+// Every kernel, fill and copy from arm to read, classified by StepTiming.h;
+// false when the backend timed nothing (CUDA, or no device timestamps).
+void engine_dispatch_timing_arm();
+bool engine_dispatch_timing_read(StepCells& out);
 
 // Formatted per-category pool report (SS_PROFILE). Reads the pool's
 // high-water capacities, so it is a peak, not an instantaneous figure.

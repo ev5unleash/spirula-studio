@@ -284,6 +284,9 @@ struct DensifyConfig {
     // Split events (revivals + growth) per refine step, as a fraction of the
     // live count; revivals draw first. >= 1 leaves both uncapped.
     float max_split_fraction            = 1.0f;
+    // A splat under this opacity is not drawn as a split source, so no split
+    // makes halves fainter than k times it. 0 = off.
+    float min_split_opacity             = 0.0f;
     // Draw weight for splits scales with renders since the last split.
     bool  split_weight_by_renders       = false;
     // A splat unrendered for this many steps is relocated as dead; 0 = off.
@@ -389,6 +392,12 @@ struct PcaRegConfig {
     // The scale-agnostic mean step cannot take a gradient on a splat this step
     // did not project (OptimConfig::use_scale_agnostic_mean).
     bool      rendered_means_only = false;
+    // Before the start step: reserve the scratch a pass will take and add no
+    // gradient. `probe` also times a pass on a prefix of the splats, `timed`
+    // a real one (engine_pca_reg_take_timing).
+    bool      wait  = false;
+    bool      probe = false;
+    bool      timed = false;
 };
 
 // Bundle passed to engine_train_step covering all per-step config groups.

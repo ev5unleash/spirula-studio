@@ -166,9 +166,16 @@ dropped for now and noted as a limitation).
   applied with profiling, not by default.
 - `Event` = {timeline value at record, optional timestamp-query slot}.
   `event_elapsed_ms` reads the two timestamps × `timestampPeriod`.
+- Step breakdown: while `dispatch_timing_arm()` is in force, every
+  dispatch, fill and copy is bracketed by its own pair of timestamps in a
+  separate query pool, tagged with the recording thread's scope
+  (docs/notes/step-timing.md).
 - Errors: sticky `VkResult` + message; `last_error()` returns-and-clears
-  (cudaGetLastError semantics). Nothing is compiled out: failures always
-  set the sticky error, and allocation failures return nullptr.
+  (cudaGetLastError semantics). Allocation failures return nullptr.
+  A no-progress timeout is fatal: it prints the configured stall limit and
+  exits with failure without running destructors or exit handlers. A timeout
+  does not cancel queued work; driver teardown can otherwise wait forever.
+  `vk_stall_exit_test` checks this with an unsignaled queue semaphore.
 
 ## Kernel ABI
 
@@ -254,6 +261,8 @@ custom command per blob so the build's `-j` bounds how many run at once
 (each blob is a normal Ninja edge, printed `[n/m] SPIR-V <name>`, and only
 stale blobs recompile). The same tool then `embed`s the blobs into one
 generated TU (byte arrays + name registry), so binaries are self-contained.
+The embed also fails on an entry with no row in `engine/StepTimingTable.h`,
+the step-time breakdown's table, and on a row that names no entry.
 CMake locates slangc in PATH / `-DSS_SLANGC=`, checks
 `slangc -v` against the pinned `SS_SLANG_VERSION`, and on miss or
 mismatch downloads + extracts the pinned GitHub release into the build tree
@@ -459,7 +468,10 @@ Vulkan.
 - `kernels/IntersectTile.cpp` + `backend/vulkan/shaders/intersect_tile.slang`:
   `do_intersect_tile_generic` = count -> `backend::inclusive_sum<int32>` ->
   4-byte n_isects readback -> key write -> `backend::sort_pairs<int64,int32>`
-  (begin 0, end 32 + tile bits, exactly the CUB call) -> offset kernel.
+  (begin 0, end 32 + tile bits, exactly the CUB call) -> offset kernel, per
+  band of tile rows when the pairs are many (docs/notes/vram-splat-x-img.md,
+  "Sorting in bands"). The sort starts in the payload buffer that leaves its
+  result in the caller's list: one swap per 8 key bits.
   Ellipse-vs-AABB mode is a runtime null-check on proj_conic (the CUDA
   template bool only folds that check).
 - `kernels/RasterizeFwd.cpp` + `backend/vulkan/shaders/rasterize_fwd.slang`: closely

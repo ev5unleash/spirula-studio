@@ -1,6 +1,7 @@
 // TrainerCore.cpp -- see TrainerCore.h.
 
 #include "app/TrainerCore.h"
+#include "app/ForecastTrace.h"
 #include "backend/api/BackendRuntime.h"
 #include "core/Env.h"
 #include "core/HardwareThreads.h"
@@ -231,8 +232,104 @@ private:
     Mat3f to_709_, from_709_;
 };
 
+// Suppress initial scales in sparse areas by capping against projected footprint.
+static void suppress_initial_scales(SeedSplats& s, int64_t n_distinct,
+                                    const PostSplitCameras& post) {
+    if (post.n_post <= 0 || n_distinct <= 0 || s.num <= 0) return;
+    const int64_t num = s.num;
+    constexpr double kPi = 3.14159265358979323846;
+    const int EQUIRECT_V = (int)CameraModelType::EQUIRECTANGULAR;
+    std::vector<float> log_scales((size_t)n_distinct, -1e30f);
+    std::vector<bool> has_camera((size_t)n_distinct, false);
+
+    #pragma omp parallel for schedule(dynamic, 256)
+    for (int64_t i = 0; i < n_distinct; i++) {
+        const float x = s.means[(size_t)i * 3 + 0];
+        const float y = s.means[(size_t)i * 3 + 1];
+        const float z = s.means[(size_t)i * 3 + 2];
+        float max_sc = -1e30f;
+        bool visible = false;
+        for (int64_t c = 0; c < post.n_post; c++) {
+            const float* vm = &post.viewmats[(size_t)c * 16];
+            const float* intr = &post.intrins[(size_t)c * 4];
+            const int W = post.post_widths[(size_t)c];
+            const int H = post.post_heights[(size_t)c];
+            if (W <= 0 || H <= 0) continue;
+
+            const float px = vm[0]*x + vm[1]*y + vm[2]*z + vm[3];
+            const float py = vm[4]*x + vm[5]*y + vm[6]*z + vm[7];
+            const float pz = vm[8]*x + vm[9]*y + vm[10]*z + vm[11];
+
+            if (post.post_models[(size_t)c] == EQUIRECT_V) {
+                const float D2 = px*px + py*py + pz*pz;
+                if (D2 <= 1e-8f) continue;
+                const float det = ((float)W * (float)H) / (4.0f * (float)kPi * D2);
+                if (det <= 1e-12f) continue;
+                const float sc = 0.5f * std::log(((float)W * (float)H) / (det * det));
+                if (sc > max_sc) { max_sc = sc; visible = true; }
+                continue;
+            }
+
+            if (pz <= 1e-4f) continue;
+            const float rz = 1.0f / pz;
+            const float u = px * rz;
+            const float v = py * rz;
+            const float fx = intr[0], fy = intr[1], cx = intr[2], cy = intr[3];
+            if (fx <= 0.0f || fy <= 0.0f) continue;
+            const float x_px = fx * u + cx;
+            const float y_px = fy * v + cy;
+            const float margin_x = 0.15f * (float)W;
+            const float margin_y = 0.15f * (float)H;
+            if (x_px < -margin_x || x_px > (float)W + margin_x ||
+                y_px < -margin_y || y_px > (float)H + margin_y)
+                continue;
+
+            const float det = (fx * fy * rz * rz) * (fx * fy * rz * rz) * (1.0f + u * u + v * v);
+            if (det <= 1e-12f) continue;
+            const float sc = 0.5f * std::log(((float)W * (float)H) / det);
+            if (sc > max_sc) { max_sc = sc; visible = true; }
+        }
+        if (visible) {
+            log_scales[(size_t)i] = -max_sc;
+            has_camera[(size_t)i] = true;
+        }
+    }
+
+    double sum_orig = 0.0;
+    for (int64_t i = 0; i < num; i++) sum_orig += s.scales[(size_t)i * 3];
+    const double original_mean = sum_orig / (double)num;
+
+    double sum_ls = 0.0;
+    int64_t count_ls = 0;
+    for (int64_t i = 0; i < n_distinct; i++) {
+        if (has_camera[(size_t)i]) {
+            sum_ls += log_scales[(size_t)i];
+            count_ls++;
+        }
+    }
+    if (count_ls == 0) return;
+
+    const float offset = (float)(original_mean - (sum_ls / (double)count_ls));
+    for (int64_t i = 0; i < n_distinct; i++)
+        if (has_camera[(size_t)i]) log_scales[(size_t)i] += offset;
+
+    for (int64_t i = 0; i < num; i++) {
+        const int64_t src = i % n_distinct;
+        if (has_camera[(size_t)src])
+            for (int d = 0; d < 3; d++)
+                s.scales[(size_t)i * 3 + d] =
+                    std::min(s.scales[(size_t)i * 3 + d], log_scales[(size_t)src]);
+    }
+
+    double sum_new = 0.0;
+    for (int64_t i = 0; i < num; i++) sum_new += s.scales[(size_t)i * 3];
+    const float re_offset = (float)(original_mean - (sum_new / (double)num));
+    for (int64_t i = 0; i < num * 3; i++) s.scales[(size_t)i] += re_offset;
+}
+
 SeedSplats seed_splats(const ColmapPoints3D& pts, const TrainConfig& cfg,
-                       const ColorResolution& color) {
+                       const ColorResolution& color,
+                       const PostSplitCameras* post) {
     std::mt19937 rng(42);
     std::normal_distribution<float> gauss(0.f, 1.f);
     std::uniform_real_distribution<float> uni(0.f, 1.f);
@@ -284,7 +381,7 @@ SeedSplats seed_splats(const ColmapPoints3D& pts, const TrainConfig& cfg,
 
     // log(scale_init * sqrt(mean d^2 of 4-NN)) over xyz, over the DISTINCT
     // points: a repeat is its own zero-distance neighbor, and would seed
-    // every splat at log(1e-8). TODO: suppress_initial_scales.
+    // every splat at log(1e-8).
     std::vector<float> nn = knn::mean_knn_dist(s.means, n_distinct, 4);
     for (int64_t i = 0; i < num; i++) {
         float d = nn[i % n_distinct];
@@ -295,6 +392,8 @@ SeedSplats seed_splats(const ColmapPoints3D& pts, const TrainConfig& cfg,
         float v = std::log(scale_init * d + 1e-8f);
         s.scales[i*3+0] = s.scales[i*3+1] = s.scales[i*3+2] = v;
     }
+    if (cfg.suppress_initial_scales && post && post->n_post > 0)
+        suppress_initial_scales(s, n_distinct, *post);
 
     for (int64_t i = 0; i < num; i++) {
         float q[4] = {gauss(rng), gauss(rng), gauss(rng), gauss(rng)};
@@ -415,7 +514,8 @@ SeedSplats seed_splats_from_ply(const std::string& path, const TrainConfig& cfg,
 }
 
 void append_point_seeds(SeedSplats& s, const ColmapPoints3D& pts,
-                        const TrainConfig& cfg, const ColorResolution& color) {
+                        const TrainConfig& cfg, const ColorResolution& color,
+                        const PostSplitCameras* post) {
     const int64_t room = (int64_t)cfg.cap_max - s.num;
     if (room <= 0 || pts.num() == 0) return;
 
@@ -424,7 +524,7 @@ void append_point_seeds(SeedSplats& s, const ColmapPoints3D& pts,
     TrainConfig sub = cfg;
     sub.cap_max = (int)room;
     sub.preallocate_splat_tensors = false;
-    SeedSplats p = seed_splats(pts, sub, color);
+    SeedSplats p = seed_splats(pts, sub, color, post);
 
     const int64_t K = ColorBasis{cfg.sh_degree, cfg.sb_lobes}.coeffs();
     const int64_t at = s.num, total = s.num + p.num;
@@ -500,6 +600,9 @@ DeadCriterion dead_criterion_enum(const std::string& c) {
     if (c == "either")     return DeadCriterion::Either;
     throw std::runtime_error("unknown dead_criterion: " + c);
 }
+
+// Steps between two probes of the PCA regularizer before it starts.
+constexpr int kPcaRegProbeEvery = 50;
 
 PcaRegKnn pca_reg_knn_enum(const std::string& m) {
     if (m == "exact")              return PcaRegKnn::Exact;
@@ -695,6 +798,7 @@ EngineStepConfig build_step_config(const TrainConfig& c, const RunState& st, int
     cfg.densify.las_split_opacity_k_final  = c.long_axis_split_opacity_k[1];
     cfg.densify.las_split_opacity_k_warmup = (int)c.long_axis_split_opacity_k[2];
     cfg.densify.max_split_fraction = c.max_split_fraction;
+    cfg.densify.min_split_opacity = c.densify_min_split_opacity;
     cfg.densify.split_weight_by_renders = c.split_weight_by_renders;
     cfg.densify.dead_after_steps = c.dead_after_epochs > 0.0f
         ? (int)std::min(65535.0, std::max(1.0, std::round(
@@ -703,7 +807,12 @@ EngineStepConfig build_step_config(const TrainConfig& c, const RunState& st, int
     cfg.densify.growth_caps = st.growth_caps;
 
     // ---- local-PCA regularizer ------------------------------------------
-    if (c.pca_reg_neighbors > 0 && step >= c.pca_reg_start_iter) {
+    if (c.pca_reg_neighbors > 0) {
+        // Before the start step the engine only reserves, and now and then
+        // times a pass for the ETA; after it, the pass of one step in ten.
+        cfg.pca_reg.wait = step < c.pca_reg_start_iter;
+        cfg.pca_reg.probe = cfg.pca_reg.wait && step % kPcaRegProbeEvery == 10;
+        cfg.pca_reg.timed = !cfg.pca_reg.wait && step % 10 == 0;
         cfg.pca_reg.neighbors = c.pca_reg_neighbors;
         cfg.pca_reg.knn = pca_reg_knn_enum(c.pca_reg_knn);
         cfg.pca_reg.window = c.pca_reg_window;
@@ -858,6 +967,9 @@ std::string train_config_error(const TrainConfig& c) {
         !error.empty()) return error;
     SS_CONFIG_FIELDS(SS_CHECK_CHOICE)
 #undef SS_CHECK_CHOICE
+    if (c.max_resolution < 0 || c.max_resolution > 32768)
+        return lfmt(lmsg::err_bad_flag_value,
+                    {"--max-resolution", std::to_string(c.max_resolution)});
     if (c.background_export_height < 1 || c.background_export_height > 8192)
         return lfmt(lmsg::err_bad_flag_value,
                     {"--background-export-height", std::to_string(c.background_export_height)});
@@ -1049,7 +1161,7 @@ void TrainerSession::load_dataset() {
         if (!cfg.seed_pointcloud.empty())
             log(lfmt(lmsg::dense_seed_automatic, {cfg.seed_pointcloud}));
     }
-    cfg.seed_pointcloud = spirula::dense::verified_seed_path(cfg.data, cfg.seed_pointcloud);
+    cfg.seed_pointcloud = spirula::dense::resolve_seed_path(cfg.data, cfg.seed_pointcloud);
     DatasetParserConfig pcfg;
     pcfg.recon_dir            = cfg.colmap_recon_dir;
     pcfg.seed_pointcloud      = parser_seed(cfg.seed_pointcloud);
@@ -1070,6 +1182,7 @@ void TrainerSession::load_dataset() {
     pcfg.auto_scale_poses     = cfg.auto_scale_poses;
     pcfg.probe_image_size        = probe_image_size;
     pcfg.train_resolution_divisor = cfg.train_resolution_divisor;
+    pcfg.max_resolution = cfg.max_resolution;
     pcfg.downscale_rounding_mode = cfg.downscale_rounding_mode;
     pcfg.metashape_xml           = cfg.metashape_xml;
     pcfg.metashape_ply           = cfg.metashape_ply;
@@ -1494,6 +1607,9 @@ void TrainerSession::setup_engine() {
     if (cfg.progressive_resolution) {
         for (const auto& [epoch, divisor] : progressive::to_epochs(resolution_setpoints(cfg), _batches_per_epoch))
             dm.resolution_stages.emplace_back(epoch * _batches_per_epoch, divisor);
+        _resolution_stages.clear();
+        for (const auto& [from, divisor] : dm.resolution_stages)
+            _resolution_stages.emplace_back((int)std::min<int64_t>(from, INT_MAX), divisor);
         if (!cfg.resume.empty()) {
             try {
                 const JsonValue state = ckpt::read_state_json(ckpt::resolve_checkpoint(cfg.resume).ckpt_dir);
@@ -1641,13 +1757,13 @@ void TrainerSession::setup_engine() {
 // --init-ply warm start, or both. A resume overwrites them either way.
 SeedSplats TrainerSession::seed_world(const ColorResolution& color) {
     if (cfg.init_ply.empty() || !cfg.resume.empty())
-        return seed_splats(ds.points, cfg, color);
+        return seed_splats(ds.points, cfg, color, &post);
 
     // A run or checkpoint directory resolves to its splat.ply, as --resume does.
     const std::string ply = find_splat_ply(cfg.init_ply).first;
     SeedSplats s = seed_splats_from_ply(ply, cfg, color);
     const int64_t from_ply = s.num;
-    if (cfg.init_ply_add_points) append_point_seeds(s, ds.points, cfg, color);
+    if (cfg.init_ply_add_points) append_point_seeds(s, ds.points, cfg, color, &post);
     log(lfmt(lmsg::seeded_from_ply,
              {ply, (long long)from_ply, (long long)(s.num - from_ply)}));
     return s;
@@ -1818,6 +1934,11 @@ double TrainerSession::eta_seconds() const {
     return _forecast.eta(step, _live_splats.load()).seconds;
 }
 
+TimeBreakdown TrainerSession::time_breakdown(bool whole_run) const {
+    return whole_run ? _forecast.time_forecast(cur_step.load(), _live_splats.load())
+                     : _forecast.time_measured();
+}
+
 void TrainerSession::observe_memory(int step, int64_t splats_ran) {
     MemorySample m;
     m.step = step;
@@ -1829,6 +1950,15 @@ void TrainerSession::observe_memory(int step, int64_t splats_ran) {
         m.pool_cap[c] = pool.cap[c];
     }
     m.scratch = engine_get_scratch_bytes();
+    const DevicePool::ArenaPhases arena = DevicePool::global().arena_phases();
+    m.arena_cap = arena.cap;
+    for (int p = 0; p < (int)PoolPhase::Count; ++p) {
+        m.phase_pixels[p] = arena.peak[p].pixels;
+        m.phase_splats[p] = arena.peak[p].splats;
+        m.phase_capped[p] = arena.peak[p].capped;
+    }
+    engine_get_isect_peaks(m.isect_pairs, m.isect_count, m.isect_step);
+    m.isect_finer = engine_bin_finer_isects();
     const backend::MemoryUsage mu = backend::memory_usage();
     m.has_process = mu.has_process;
     m.has_used = mu.has_used;
@@ -1839,7 +1969,23 @@ void TrainerSession::observe_memory(int step, int64_t splats_ran) {
     m.process_peak_bytes = mu.process_peak_bytes;
     m.has_commit = mu.has_commit;
     m.commit_free_bytes = mu.commit_free_bytes;
+    // The SH rows and their optimizer state, quantized or not: what a lower SH
+    // degree frees. Buffer names, so once a window rather than every step.
+    if (step % 100 == 0 || _sh_bytes == 0) {
+        size_t sh = 0;
+        for (const auto& [name, used, cap] : engine_get_pool_breakdown())
+            if (name.find("features_sh") != std::string::npos ||
+                name.find("sh_quant") != std::string::npos ||
+                name.find("world.sh_vq") != std::string::npos)
+                sh += cap;
+        _sh_bytes = sh;
+    }
+    m.sh_bytes = _sh_bytes;
     backend::memory_peak_reset();
+    if (_forecast_dump) {
+        forecast_trace_sample(_forecast_dump.get(), m);
+        if (step % 100 == 0) std::fflush(_forecast_dump.get());
+    }
     _forecast.add_memory(m);
 
     // Once per level, so a run that stays at risk says it once.
@@ -1875,14 +2021,14 @@ void TrainerSession::train(const TrainerCallbacks& cb) {
         fs.distinct_batches = _batches_per_epoch;
         fs.sh_degree = cfg.sh_degree;
         fs.sh_degree_every = cfg.sh_degree_warmup_every;
-        if (cfg.pca_reg_neighbors > 0 && cfg.pca_reg_knn.find("-cached") != std::string::npos) {
-            const uint64_t k = (uint64_t)std::min(cfg.pca_reg_neighbors, kPcaRegMaxNeighbors - 1);
-            const bool lists = cfg.pca_reg_knn != "morton-cached";
-            fs.deferred_bytes =
-                (uint64_t)engine_get_max_num_splats() * 4u * (1u + (lists ? k : 0u));
-            fs.deferred_step = std::max(cfg.pca_reg_start_iter, start_step);
-        }
+        fs.resolution_stages = _resolution_stages;
+        if (cfg.pca_reg_neighbors > 0) fs.reg_start_step = cfg.pca_reg_start_iter;
         _forecast.reset(fs);
+        // SS_FORECAST_DUMP=<file>: the run's memory samples, for train_forecast_replay.
+        if (const char* dump = spirula::env("FORECAST_DUMP"); dump && *dump && !_forecast_dump) {
+            _forecast_dump.reset(std::fopen(dump, "w"));
+            if (_forecast_dump) forecast_trace_setup(_forecast_dump.get(), fs);
+        }
         _live_splats = engine_get_cur_num_splats();
         _warned_risk = OomRisk::Low;
         backend::memory_peak_reset();  // setup's transients are not the run's
@@ -1904,18 +2050,32 @@ void TrainerSession::train(const TrainerCallbacks& cb) {
         // is time this step took. Timing only the work below reported 6 ms on
         // a step the run was actually spending 24 ms on.
         auto step_start = std::chrono::steady_clock::now();
+        // One step in ten: on Vulkan each bracket is a queue submission.
+        const bool timed = step % 10 == 0;
+        // The breakdown also times every densify step, a stratum of its own.
+        // SS_STEP_TIMING=0 turns it off, the A/B lever for what it costs.
+        static const bool step_timing = [] {
+            const char* v = spirula::env("STEP_TIMING");
+            return !(v && v[0] == '0');
+        }();
+        const bool densify_step = cfg.refine_every > 0 && step % cfg.refine_every == 0;
+        const bool kernels_timed = step_timing && (timed || densify_step);
+        // Armed before the yield, so a viewer render the step waits for is in it.
+        if (kernels_timed) engine_dispatch_timing_arm();
         while (render_pending.load())
             std::this_thread::sleep_for(std::chrono::microseconds(500));
 
         std::map<std::string, float> losses;
         std::string data_error;
         double save_s = 0.0, splat_gpu_s = -1.0, data_wait_s = 0.0;
-        int64_t splats_ran = 0;
-        // One step in ten: on Vulkan each bracket is a queue submission.
-        const bool timed = step % 10 == 0;
+        int64_t splats_ran = 0, reg_splats = 0;
+        bool reg_probed = false;
+        ForecastTraceStep traced;
+        StepSample sample;
         {
             std::lock_guard<std::mutex> lk(engine_mutex);
             if (step > start_step && cfg.steps_per_save > 0 && step % cfg.steps_per_save == 0) {
+                StepTimingScope saving(StepPart::Saving, StepScale::Splats);
                 const auto t0 = std::chrono::steady_clock::now();
                 // The one checkpoint kept is what a crash resumes from, so it carries the optimizer.
                 save_checkpoint(step, cfg.save_full_checkpoint || cfg.save_only_latest_checkpoint);
@@ -1930,6 +2090,9 @@ void TrainerSession::train(const TrainerCallbacks& cb) {
                 data_error = e.what();
             }
             if (timed) splat_gpu_s = engine_step_timing_read();
+            if (kernels_timed) sample.timed = engine_dispatch_timing_read(sample.gpu);
+            traced.reg_kind = engine_pca_reg_take_timing(traced.reg, reg_splats, reg_probed)
+                                  ? (reg_probed ? 1 : 2) : 0;
             _live_splats = engine_get_cur_num_splats();
             data_wait_s = engine_take_data_wait_seconds();
         }
@@ -1957,7 +2120,27 @@ void TrainerSession::train(const TrainerCallbacks& cb) {
             _step_latencies.push_back(latency);
             if (_step_latencies.size() > 100) _step_latencies.pop_front();
         }
-        _forecast.add_step(step, latency - save_s, splats_ran, splat_gpu_s);
+        // The regularizer's own time, a step or more after the pass it is of.
+        // A step that probed is not what a step costs: it stays out of the ETA.
+        if (traced.reg_kind) _forecast.add_regularizer(traced.reg, reg_splats, reg_probed);
+        const bool probe_step = cfg.pca_reg_neighbors > 0 && step < cfg.pca_reg_start_iter &&
+                                step % kPcaRegProbeEvery == 10;
+        if (probe_step) sample.gpu.at(StepPart::Regularizer, StepScale::Splats) = 0.0;
+        else _forecast.add_step(step, latency - save_s, splats_ran, splat_gpu_s);
+        sample.step = step;
+        sample.wall_s = latency;
+        sample.save_s = save_s;
+        sample.data_wait_s = data_wait_s;
+        sample.densify = densify_step;
+        _forecast.add_breakdown(sample);
+        if (_forecast_dump) {
+            traced.wall = probe_step ? -1.0 : latency - save_s;
+            traced.gpu = splat_gpu_s;
+            traced.splats = splats_ran;
+            traced.reg_splats = reg_splats;
+            traced.sample = sample;
+            forecast_trace_step(_forecast_dump.get(), traced);
+        }
         if (_perf.enabled()) {
             _perf.add_step(latency, data_wait_s, splat_gpu_s, save_s);
             _perf.tick(step + 1, engine_train_resolution_divisor(), _live_splats.load(), paused.load(), [this] {
@@ -1971,15 +2154,54 @@ void TrainerSession::train(const TrainerCallbacks& cb) {
         observe_memory(step, splats_ran);
         // SS_FORECAST_LOG=1: the forecast's state every 100 steps, English,
         // for checking it against how the run actually ends.
+        // SS_STEP_TIMING_LOG=1: the measured step breakdown every 100 steps.
+        static const bool timing_log = spirula::env("STEP_TIMING_LOG") != nullptr;
+        if (timing_log && (step + 1) % 100 == 0) {
+            const TimeBreakdown b = _forecast.time_measured();
+            if (b.known) {
+                std::string line = "[step-timing] step " + std::to_string(step + 1);
+                char buf[160];
+                const DevicePool::CategoryBytes pool = DevicePool::global().category_bytes();
+                std::snprintf(buf, sizeof buf, "  splats %lld  splat_x_img %.1f MiB",
+                              (long long)_live_splats.load(),
+                              pool.cap[(int)VramCategory::SplatXImg] / 1048576.0);
+                line += buf;
+                std::snprintf(buf, sizeof buf, "  total %.2f ms  unaccounted %.2f", b.total() * 1e3,
+                              b.unaccounted * 1e3);
+                line += buf;
+                for (int c = 0; c < kStepScales; ++c) {
+                    std::snprintf(buf, sizeof buf, "  %s %.2f", step_scale_name((StepScale)c),
+                                  b.cells.scale((StepScale)c) * 1e3);
+                    line += buf;
+                }
+                line += "\n   ";
+                for (int p = 0; p < kStepParts; ++p) {
+                    const double t = b.cells.part((StepPart)p);
+                    if (t <= 0.0) continue;
+                    std::snprintf(buf, sizeof buf, " %s %.2f", step_part_name((StepPart)p), t * 1e3);
+                    line += buf;
+                }
+                line += "\n   ";
+                for (int p = 0; p < kStepParts; ++p)
+                    for (int c = 0; c < kStepScales; ++c) {
+                        const double t = b.cells.s[p][c];
+                        if (t < 1e-5) continue;
+                        std::snprintf(buf, sizeof buf, " %s/%s %.3f", step_part_name((StepPart)p),
+                                      step_scale_name((StepScale)c), t * 1e3);
+                        line += buf;
+                    }
+                std::fprintf(stderr, "%s\n", line.c_str());
+            }
+        }
         static const bool forecast_log = spirula::env("FORECAST_LOG") != nullptr;
         if (forecast_log && (step + 1) % 100 == 0) {
             const EtaForecast e = _forecast.eta(step + 1, _live_splats.load());
             const VramForecast v = _forecast.vram(false);
             const double gib = 1024.0 * 1024.0 * 1024.0;
             std::fprintf(stderr,
-                "[forecast] step %d  eta %.1f +- %.1f s  ours %.3f GiB  peak %.3f +- %.3f GiB"
-                "  others %.3f  total %.3f  limit %.3f%s  p_oom %.3f\n",
-                step + 1, e.seconds, e.sigma,
+                "[forecast] step %d  eta %.1f +- %.1f s (regularizer %.1f)  ours %.3f GiB"
+                "  peak %.3f +- %.3f GiB  others %.3f  total %.3f  limit %.3f%s  p_oom %.3f\n",
+                step + 1, e.seconds, e.sigma, e.regularizer,
                 v.ours / gib,
                 v.peak_mean / gib, v.peak_sigma / gib, v.others / gib,
                 v.capacity / gib, v.limit / gib,
@@ -2154,6 +2376,7 @@ void TrainerSession::eval(const std::function<void(const EvalProgress&)>& on_pro
     pcfg.auto_scale_poses     = cfg.auto_scale_poses;
     pcfg.probe_image_size        = probe_image_size;
     pcfg.train_resolution_divisor = cfg.train_resolution_divisor;
+    pcfg.max_resolution = cfg.max_resolution;
     pcfg.downscale_rounding_mode = cfg.downscale_rounding_mode;
     pcfg.metashape_xml           = cfg.metashape_xml;
     pcfg.metashape_ply           = cfg.metashape_ply;

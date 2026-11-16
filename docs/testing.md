@@ -22,11 +22,15 @@ linear splat colour are held together),
 meshing (activation, LBVH, occupancy/bisection/color, moment raster, the
 per-camera samplers and the visibility cull), plus
 `backend/tests/engine/` which drives the *real* engine end to end
-(render parity, train parity, and two self-checking tools rather than
+(render parity, train parity, and three self-checking tools rather than
 dump-then-compare: `engine_reset_state` trains the same scene twice across an
-`engine_reset()` and the two must land in the same place, and
+`engine_reset()` and the two must land in the same place,
 `gt_bilagrid_sentinels` pins the GT bilateral grids' invariants -- one depth
-scalar per camera, and the no-GT sentinels passing through untouched).
+scalar per camera, and the no-GT sentinels passing through untouched -- and
+`bilagrid_split_batch` trains the same batches split and unsplit: every
+camera's grid must move, and its grid and PPISP row must land in the same
+place either way -- which holds only while both weigh a camera's image
+gradient against its regularizers at the scale of one batch's mean loss).
 `backend/vulkan/tests/` adds 3 Vulkan-only smoke tests (runtime, pipeline,
 sort/scan).
 
@@ -474,6 +478,11 @@ use the benchmark tools, which fix the workload:
 ./build_vulkan/fpbo_bench [num_splats] [iters] [sh_degree] [sb_lobes] [fpbo|qgrad|adam]
 ./build_vulkan/image_loss_bench [mode] [width] [height] [iters] [dump]
 ```
+
+`train_forecast_replay <trace> [every_steps]` is not a test either: it runs
+the trainer's VRAM forecast and its ETA over a run recorded with
+`SS_FORECAST_DUMP=<file>` and prints what each projected against the peak the
+run reached and the time the rest of it took (docs/notes/train-forecast.md).
 
 `fpbo_bench` defaults to fused projection backward and Adam. `qgrad` measures
 the separate quantized projection backward, including gradient clears and

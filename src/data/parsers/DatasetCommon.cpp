@@ -33,7 +33,13 @@ namespace dsparse {
 ColmapPoints3D read_seed_pointcloud(const std::string& dataset_dir,
                                    const std::string& path) {
     const std::string resolved = (fs::path(dataset_dir) / fs::path(path)).string();
-    ColmapPoints3D points = read_ply_points(resolved);
+    // A model folder seeds with its own points: an edited copy of the
+    // reconstruction saved beside the original in sparse/.
+    std::error_code ec;
+    ColmapPoints3D points =
+        !fs::is_directory(resolved, ec)                              ? read_ply_points(resolved)
+        : fs::is_regular_file(fs::path(resolved) / "points3D.bin", ec) ? read_points3D_binary(resolved)
+                                                                       : read_points3D_text(resolved);
     if (points.num() == 0)
         throw std::runtime_error(spirula::i18n::format(
             spirula::i18n::msg::data::seed_cloud_empty, {resolved}));
@@ -1153,6 +1159,17 @@ void fit_camera_resolution(const DatasetParserConfig& cfg,
         };
         tw = std::max(1.0, round_dim(tw));
         th = std::max(1.0, round_dim(th));
+    }
+    if (cfg.max_resolution > 0 && std::max(tw, th) > cfg.max_resolution) {
+        const double k = cfg.max_resolution / std::max(tw, th);
+        auto capped_dim = [&](double v) {
+            v *= k;
+            if (cfg.downscale_rounding_mode == "ceil") return std::ceil(v);
+            if (cfg.downscale_rounding_mode == "round") return std::round(v);
+            return std::floor(v);
+        };
+        tw = std::clamp(capped_dim(tw), 1.0, (double)cfg.max_resolution);
+        th = std::clamp(capped_dim(th), 1.0, (double)cfg.max_resolution);
     }
     if (tw == W && th == H) return;
 

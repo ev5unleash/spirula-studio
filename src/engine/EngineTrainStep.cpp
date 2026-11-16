@@ -152,6 +152,7 @@ static std::map<std::string, float> _engine_step_fwd_bwd_only(
     // this returns are read back from the device, so the call already ends on
     // a sync and the wall time here is the step's device time.
     const auto step_t0 = std::chrono::steady_clock::now();
+    const double alloc_t0 = DevicePool::global().alloc_seconds();
     engine_bin_tile_claim();
     engine().optim.use_fused_proj_bwd_optim = cfg.optim.use_fused_proj_bwd_optim;
     // Block-wise quantized gradient accumulation: only on the non-FPBO path
@@ -185,8 +186,9 @@ static std::map<std::string, float> _engine_step_fwd_bwd_only(
     const bool alpha_reads_masked = no_tile_skip ||
         cfg.loss.weights[(int)LossWeightIndex::AlphaSup] != 0.0f ||
         cfg.loss.weights[(int)LossWeightIndex::AlphaSupUnder] != 0.0f;
-    if (engine().gt.has_mask && engine().gt.alpha.data_ptr() != nullptr &&
-        !alpha_reads_masked) {
+    const bool skip_tiles = engine().gt.has_mask && engine().gt.alpha.data_ptr() != nullptr &&
+        !alpha_reads_masked;
+    if (skip_tiles) {
         const int macro_log2 = engine_bin_macro_log2();
         const int64_t per_image = intersect_tile_count(
             engine().camera.width, engine().camera.height, macro_log2);
@@ -228,7 +230,7 @@ static std::map<std::string, float> _engine_step_fwd_bwd_only(
         forward_3dgs(primitive, sh_degree, packed, /*output_median=*/false, (int)dist_type);
     }
     _engine_step_image_stages(bilagrid_cam_indices);
-    _engine_calib_warp_before_loss(step);
+    _engine_calib_warp_before_loss(step, skip_tiles);
 
     engine_prepare_projective_depth(cfg.optim);
     auto losses = engine_compute_loss_backward(
@@ -248,8 +250,11 @@ static std::map<std::string, float> _engine_step_fwd_bwd_only(
         cfg.loss.color_shift_reg_beta);
     _engine_calib_warp_restore_gt();
     engine().fwd.kernel_cut = 0.0f;
-    engine_bin_tile_observe(std::chrono::duration<double>(
-        std::chrono::steady_clock::now() - step_t0).count());
+    // Less the allocator's time: a buffer growing under a finer trial is not
+    // what that bin size costs, and counted against it the search flips.
+    engine_bin_tile_observe(
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - step_t0).count() -
+        (DevicePool::global().alloc_seconds() - alloc_t0));
     _visit_accumulate_camera_stats(primitive);
     return losses;
 }
@@ -374,6 +379,12 @@ std::map<std::string, float> _engine_train_step_after_setup(
 }
 
 
+// Keeps every pass's bilagrid gradient for the step's one optimizer step.
+struct BilagridRowsScope {
+    explicit BilagridRowsScope(int64_t total) { _engine_bilagrid_step_rows(total); }
+    ~BilagridRowsScope() { _engine_bilagrid_step_rows(0); }
+};
+
 // The mode this step's raster backward will use -- None when nothing asked
 // for a loss map, so the accumulator stays one lane wide.
 static DensifyAccumMode _step_accum_mode(const EngineStepConfig& cfg) {
@@ -386,6 +397,7 @@ static DensifyAccumMode _step_accum_mode(const EngineStepConfig& cfg) {
 // Avg with atomicAdd (Avg over both planar lanes, divided later).
 static void _fold_accum_weight(DeviceVector<float>& dst, int64_t num_splats) {
     if (engine().fwd.accum_weight.data_ptr() == nullptr) return;
+    StepTimingScope timing(StepPart::Densify, StepScale::Splats);
     const DensifyAccumMode mode = engine().fwd.accum_mode;
     const int64_t n = num_splats * accum_lanes(mode);
     if (mode == DensifyAccumMode::Max)
@@ -487,6 +499,7 @@ static std::map<std::string, float> _engine_train_step_split_one_per_camera(
     engine().fwd.accum_mode = DensifyAccumMode::None;
 
     std::map<std::string, float> agg;
+    BilagridRowsScope bilagrid_rows(B);
 
     for (int64_t k = 0; k < B; ++k) {
         // First sub-batch: zero grad. Subsequent: skip the zero so atomic
@@ -511,6 +524,7 @@ static std::map<std::string, float> _engine_train_step_split_one_per_camera(
         // B times per step is safe (and matches the unsplit behavior of
         // capturing once over all cams in the batch).
         _set_cur_cam_indices(bgi_k);
+        _engine_bilagrid_pass_rows(k, bgi_k);
         engine_viewer_capture_thumbnails(bgi_k);
 
         auto ld = _engine_step_fwd_bwd_only(
@@ -624,6 +638,7 @@ std::map<std::string, float> engine_train_step_hetero(
 
     std::map<std::string, float> agg;
     int64_t kcam = 0;   // global camera index across the whole step
+    BilagridRowsScope bilagrid_rows(total_cams);
 
     for (const auto& s : subs) {
         const auto& vs = std::get<2>(s.viewmats);
@@ -648,6 +663,7 @@ std::map<std::string, float> engine_train_step_hetero(
                               cfg.loss.input_depth_is_ray_depth);
 
             _set_cur_cam_indices(bgi_c);
+            _engine_bilagrid_pass_rows(kcam, bgi_c);
             engine_viewer_capture_thumbnails(bgi_c);
 
             auto ld = _engine_step_fwd_bwd_only(
@@ -814,6 +830,7 @@ static std::map<std::string, float> _engine_train_step_split_warped(
     engine().fwd.accum_mode = DensifyAccumMode::None;
 
     std::map<std::string, float> agg;
+    BilagridRowsScope bilagrid_rows((int64_t)B_in * K);
 
     for (int64_t j = 0; j < B_in; ++j) {
         // Per-input-image slices (B_in axis).
@@ -867,6 +884,7 @@ static std::map<std::string, float> _engine_train_step_split_warped(
                                      axes_k);
 
             _set_cur_cam_indices(bgi_k);
+            _engine_bilagrid_pass_rows(row, bgi_k);
             engine_viewer_capture_thumbnails(bgi_k);
 
             // Reported as they come: the pass weights average to 1, so the
