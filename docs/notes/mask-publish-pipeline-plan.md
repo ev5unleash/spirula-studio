@@ -314,7 +314,21 @@ Fable's alternative (larger groups) became D4, conditional on H3. Added beyond t
 
 ## Execution record
 
-Not started.
+2026-11-16: P0 started. Fetched `upstream/master`; work branch
+`perf/mask-publish-pipeline` starts exactly at `8949092e`. The anchor diff is
+empty. Original checkout edits are preserved; no push or PR is authorized.
+
+The owner approved creating an isolated SMB test folder and copying 60 frames
+from each production camera family; originals remain read-only. Fixture copies
+contain 120 JPEGs (536,942,206 bytes), with SHA-256 parity verified between local
+and SMB copies. Fisheye frames retain separate lens subfolders. Two R9700s,
+31.18 GiB RAM, accepted/cached SAM 3 q4_0 and approximately 94 GiB local free
+space are available. No Spirula process was running; sampled CPU load was 0%.
+
+The owner selected GPT-6.1 Sol high for execution workers. Temporary P0 timing
+instrumentation is in progress; no performance gate has passed and no permanent
+optimization is authorized by measurement yet. Private fixture paths and hashes
+remain in the local scratch evidence directory, not the work branch.
 
 ## Execution handoff
 
