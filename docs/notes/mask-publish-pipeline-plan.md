@@ -113,7 +113,7 @@ There are two production callers: masks and geometry (`geometry_main.cpp:1458-14
 **D1: pipelined dispatch for callers that supply a `prepare` step** (`InferenceWorker.{h,cpp}`).
 
 *Admission.*
-- `WorkerTask` gains `accept_bytes`: the parent's footprint while accepting. It defaults to `host_bytes`, which reproduces today's accounting.
+- `WorkerTask` gains `accept_bytes`: the parent's footprint while accepting. Zero means use the current `host_bytes`, preserving existing callers that populate that field after construction.
 - On a valid response, release `host_bytes − accept_bytes` under the dispatch mutex. The child has already dropped the task's images before replying (`MaskWorker.cpp:200-216`).
 - Masks charge 8 B/px of the task's largest frame. Two masks plus the PNG encoder are ≈4–6 B/px [INFERENCE]; P0's peak commit checks this.
 - Two pipelining workers on 5760×3240 then need 2 × (4.45 + 0.14) ≈ 9.2 GiB of the 12.9 GiB budget.
@@ -122,7 +122,7 @@ There are two production callers: masks and geometry (`geometry_main.cpp:1458-14
 1. After that release, try to claim the next task **without waiting**. Only if one fits now, send it to the same child.
 2. Run the caller's `prepare(i, response, why)` with no dispatcher lock.
 3. Run `accept(i, response, why)` under a separate `accept_mutex`.
-4. Release `accept_bytes` and read the next response.
+4. After successful acceptance, run an optional `published(i)` callback outside `accept_mutex`, still charging `accept_bytes`; then release the charge and read the next response.
 
 If nothing fits, the order is exactly today's: accept, release, blocking claim. A thread never waits for budget while it holds an unaccepted result.
 
@@ -133,6 +133,14 @@ If nothing fits, the order is exactly today's: accept, release, blocking claim. 
 - The first failure from either step wins. The in-flight request is abandoned, and the cancellation thread kills the children as today.
 
 *Contract after D1.* Exactly-once, serialized callbacks, bytes covered through acceptance, no rollback. Acceptance follows response order within a worker. Across workers it follows `prepare` completion; both callers only count and log.
+
+*Callback seam (execution decision).* Append optional `prepare` and `published`
+parameters after the existing `error` argument. `published` requires `prepare`;
+reject `accept_bytes > host_bytes`. All three callbacks for one task run on the
+same thread. `published` runs once after successful acceptance, including if a
+different worker fails meanwhile; exceptions follow the existing failure path.
+No-prepare callers retain the original sequence. This explicit third hook is
+needed for filmstrip loads outside the commit lock without a queue.
 
 **D2: mask callback split** (`DatasetPrep.cpp:3831-3941`).
 
@@ -330,13 +338,39 @@ instrumentation is in progress; no performance gate has passed and no permanent
 optimization is authorized by measurement yet. Private fixture paths and hashes
 remain in the local scratch evidence directory, not the work branch.
 
+P0 setup verification: the instrumented Vulkan build passed with patented
+decoding OFF (917.6 s). An eight-frame real-GUI smoke completed all masks in
+29.422 s, with replies from both children in each camera-family segment,
+per-child model timings, per-frame acceptance timings, GPU counters and peak
+commit captured. The GUI closed after cancellation of the later stage.
+The 120-frame L,S ×3 plus S/W2 matrix is running. A screenshot confirms live
+masking progress and filmstrip rendering. Share drift probes use identical
+corpora and fresh reader processes; neither client nor server cache coldness is
+guaranteed. GPU telemetry is summed engine utilization per LUID, not a physical
+adapter occupancy measurement. No optimization decision has been made.
+
+P0 completed all seven arms. Local seconds: 136.549, 137.292, 140.528
+(median 137.292); SMB: 164.092, 161.869, 159.888 (median 161.869).
+SMB is 17.90% slower. Median serialized acceptance / summed worker envelopes
+is 62.81% local and 59.75% SMB. Steady-task residual / roundtrip medians are
+38.27% and 40.82%, excluding each child's first task; residual includes host
+work and I/O, not just a task-boundary tail. S/W2 took 179.752 s, 11.05% slower
+than S/W1. These observations select D1+D2, D3 and D4 under P0's gates.
+The complete logs and analysis remain in local scratch.
+
+Before implementation, an expert is resolving the missing post-accept hook
+needed to load filmstrip images outside the commit lock. Telemetry correction
+is also in progress: one S1 sampled process predates its GUI parent, exposing
+a PID-reuse ancestry error. Raw samples are retained; no uncorrected resource
+summary is treated as proof. The matched, uninstrumented A/B build is preparing.
+
 ## Execution handoff
 
-> **Goal and active phase:** keep both GPUs busy through mask publication on SMB workspaces (PERF-020/021). Start at P0; P1/P2 apply only the designs P0 confirms; P4 readies, but does not open, an upstream PR.
+> **Goal and active phase:** keep both GPUs busy through mask publication on SMB workspaces (PERF-020/021). P0 is complete and selects D1–D4. Execute P1/P2 after settling the post-accept callback contract, then P3; P4 readies, but does not open, an upstream PR.
 >
 > **Acceptance and evidence:** the Done section above. Results, commands, device UUIDs and verdicts go in this file's execution record on `plan/storage-latency`. Bulky logs stay on the executing machine; summarize them.
 >
-> **Authority and exclusions:** set by the owner's prompt to the executing session. This plan assumes:
+> **Authority and exclusions:** the owner authorized this execution and the isolated SMB test folder with copied fixture frames; the recorded limits remain:
 > - allowed: worktrees, local builds (patented OFF except the one P4 CI-parity build), GPU runs on fixture copies, commits on `perf/mask-publish-pipeline` and `plan/storage-latency`;
 > - pushes to `origin` only if that prompt allows them;
 > - not allowed: anything to `upstream`, opening a PR, `geometry_main.cpp`, default changes, new settings or UI text, writes outside the test folder on the share, the machine's own Spirula settings, NVIDIA.
@@ -351,4 +385,4 @@ remain in the local scratch evidence directory, not the work branch.
 >
 > **Stop/escalate:** after two failed attempts on one problem, climb `task` → `expert` → `expert-max` → owner. Ask the owner before any default change, a full-stage run on production data, or a scope change. P0 refuting every design ends the plan with a result.
 >
-> **Readiness:** ready once the prerequisites exist on the executing machine.
+> **Readiness:** P0 prerequisites verified and fixture smoke passed. Ready for P1/P2 once the callback contract is settled. P3 resource reporting must use corrected process-identity attribution; no final performance or parity acceptance yet.
