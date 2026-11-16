@@ -115,8 +115,8 @@ There are two production callers: masks and geometry (`geometry_main.cpp:1458-14
 *Admission.*
 - `WorkerTask` gains `accept_bytes`: the parent's footprint while accepting. Zero means use the current `host_bytes`, preserving existing callers that populate that field after construction.
 - On a valid response, release `host_bytes − accept_bytes` under the dispatch mutex. The child has already dropped the task's images before replying (`MaskWorker.cpp:200-216`).
-- Masks charge 8 B/px of the task's largest frame. Two masks plus the PNG encoder are ≈4–6 B/px [INFERENCE]; P0's peak commit checks this.
-- Two pipelining workers on 5760×3240 then need 2 × (4.45 + 0.14) ≈ 9.2 GiB of the 12.9 GiB budget.
+- Execution decision: masks retain the full `host_bytes` charge through prepare, accept and published. The proposed 8 B/px charge was not defensible for stencil planes, external stencil decoding, fixed I/O buffers and encoder temporaries.
+- Early claim remains available only when another full task fits. Concurrent prepare, local staging and batches of eight do not depend on a reduced charge; P3 decides whether they meet Done.
 
 *Pipelining.*
 1. After that release, try to claim the next task **without waiting**. Only if one fits now, send it to the same child.
@@ -132,7 +132,7 @@ If nothing fits, the order is exactly today's: accept, release, blocking claim. 
 - Check `failed` and `cancel` before `prepare`, and again under `accept_mutex` before `accept`.
 - The first failure from either step wins. The in-flight request is abandoned, and the cancellation thread kills the children as today.
 
-*Contract after D1.* Exactly-once, serialized callbacks, bytes covered through acceptance, no rollback. Acceptance follows response order within a worker. Across workers it follows `prepare` completion; both callers only count and log.
+*Contract after D1.* Exactly-once, serialized accept callbacks, concurrent prepare callbacks, bytes covered through publication, no rollback. Acceptance follows response order within a worker. Across workers it follows prepare completion; both callers only count and log.
 
 *Callback seam (execution decision).* Append optional `prepare` and `published`
 parameters after the existing `error` argument. `published` requires `prepare`;
@@ -286,9 +286,9 @@ No test asserts cross-worker commit order. The existing cases stay green unchang
 
 ## Risks
 
-- **Early release** assumes the child's per-task memory is free once it replies; P0's per-process peak commit checks this. If wrong, `accept_bytes` falls back to `host_bytes` and pipelining engages only where three tasks fit.
+- **Early release:** peak commit cannot prove task-memory release. Masks retain full `host_bytes`; reduced-charge support is generic and tested, not enabled for this caller.
 - **CPU contention:** the parent's prepares run on two dispatch threads beside two workers × `hardware_threads()/2` threads each. Watch whole-system CPU.
-- **`replace_file` on SMB:** each replace is write-through, so its cost lands in the serialized commit; P3 records commit time. Falling back to remove + rename is a one-line change.
+- **`replace_file` on SMB:** write-through replacement remains serialized. Failure aborts; do not replace it with remove + rename, which introduces a deletion gap. Commit attribution comes from P0; uninstrumented P3 measures the full mask window.
 - **Filmstrip:** pictures refresh at most once a second during masking (it was up to ~8/s).
 - **Temp space:** bounded by in-flight frames.
 - **Geometry:** unaffected, since it passes no `prepare`. Its timing runs should still record the dispatcher commit. Do not land D1 between the geometry plan's A and B arms.
@@ -358,15 +358,151 @@ work and I/O, not just a task-boundary tail. S/W2 took 179.752 s, 11.05% slower
 than S/W1. These observations select D1+D2, D3 and D4 under P0's gates.
 The complete logs and analysis remain in local scratch.
 
-Before implementation, an expert is resolving the missing post-accept hook
-needed to load filmstrip images outside the commit lock. Telemetry correction
-is also in progress: one S1 sampled process predates its GUI parent, exposing
-a PID-reuse ancestry error. Raw samples are retained; no uncorrected resource
-summary is treated as proof. The matched, uninstrumented A/B build is preparing.
+P1/P2 are implemented in `172caa57af`. Expert design decisions added an
+optional post-publication callback outside both locks and retained the full
+task host-memory charge for masks: the proposed 8 B/pixel charge did not bound
+stencil, decoder, hash-buffer and encoder allocations. Generic reduced-charge
+support remains tested. Geometry retains its old dispatch ordering.
+
+Candidate Vulkan build and all six targeted checks passed: manifest,
+subprocess lifecycle, dispatcher, device selection, GPU mask parity and dataset
+preparation. The concurrency review passed. The matched 20-frame smoke produced
+40 byte-identical mask files using both GPUs. The earlier eight-frame runner
+setup could not exercise two workers after batching; its completed masks also
+matched, but it is not the two-GPU acceptance run.
+
+Telemetry ownership now checks process creation times along the parent chain.
+Only P0 S1 included an invalid identity: 71 samples, 42,221,568-byte peak commit.
+Corrected memory evidence is separate; old aggregated S1 owned-GPU readings
+cannot be corrected exactly and are not accepted as attribution proof.
+Timing-based P0 gates are unaffected. P3 retains per-PID GPU samples.
+
+P3 passed all timing and byte-parity gates across six A/B pairs. Both worker
+UUIDs appeared in every arm; each pair compared all 240 mask/feature-mask files
+by path, size and SHA256. The inspected local filmstrip advanced during masking;
+the inspected final SMB arm also rendered the mask view correctly. Capture
+overhead remained in B. A commit-tool CRLF issue was resolved with byte-verified
+LF normalization and amendment; source behavior did not change.
+
+| Location | A median (range), seconds | B median (range), seconds | Median reduction |
+|---|---:|---:|---:|
+| Local | 111.978 (111.898–112.132) | 86.561 (86.382–87.530) | 22.70% |
+| SMB | 124.251 (124.234–125.056) | 94.063 (93.992–94.474) | 24.30% |
+
+SMB B beat A in every pair; local B stayed below A's observed range.
+These uninstrumented comparisons, not P0's instrumented times, establish the
+improvement. No full production-stage result is claimed.
+
+Resource evidence is retained per PID and creation time in P3 `summary.json`
+and each arm's raw samples. The table reports GUI peak commit and the largest
+descendant peak in MiB; it does not sum lifetime peaks as simultaneous usage.
+GPU columns are mean owned engine-utilization sums for LUIDs ending `94b0` and
+`b63c`, not physical occupancy; sums may exceed 100%.
+
+| Arm | GUI peak MiB | Largest descendant MiB | GPU sums (%) |
+|---|---:|---:|---:|
+| L-A1 | 3255.1 | 2804.8 | 28.96 / 32.23 |
+| L-B1 | 2254.1 | 2892.3 | 32.73 / 46.26 |
+| L-A2 | 3250.1 | 2805.5 | 28.64 / 29.70 |
+| L-B2 | 3287.5 | 2889.7 | 37.51 / 48.21 |
+| L-A3 | 3487.2 | 2807.8 | 30.55 / 28.03 |
+| L-B3 | 2253.9 | 2891.8 | 34.54 / 39.61 |
+| S-A1 | 3198.0 | 2805.7 | 29.86 / 21.52 |
+| S-B1 | 3423.3 | 2871.7 | 33.08 / 38.77 |
+| S-A2 | 3292.4 | 2807.4 | 29.16 / 22.73 |
+| S-B2 | 1782.1 | 2871.6 | 33.68 / 40.23 |
+| S-A3 | 3234.1 | 2805.9 | 27.70 / 26.04 |
+| S-B3 | 3241.4 | 2891.3 | 29.40 / 37.47 |
+
+Fresh-process share probes repeated the same large file for 30 seconds, then
+opened/read 4 KiB from the same 100-file ordered corpus. Cache state was not
+flushed: the 6828.4–8470.2 MiB/s repeated-read rates are cache-influenced, not
+wire throughput or cold-cache evidence. Median open/read/close latency ranged
+29.480–31.415 ms; the largest observed open was 48.383 ms.
+
+| SMB arm | Repeated-read MiB/s, before → after | Median open ms, before → after |
+|---|---:|---:|
+| A1 | 7669.6 → 6828.4 | 29.480 → 30.282 |
+| B1 | 7486.5 → 7990.9 | 30.540 → 29.739 |
+| A2 | 8470.2 → 7781.2 | 31.262 → 31.290 |
+| B2 | 8043.0 → 7309.2 | 31.203 → 31.415 |
+| A3 | 7799.2 → 8081.2 | 30.710 → 29.611 |
+| B3 | 8210.7 → 8345.8 | 30.143 → 30.268 |
+
+P4 fetched upstream again: `8949092e` remains current and is the work commit's
+direct parent, so no replay is needed. The private-path check passed.
+The Windows CI-parity patented-ON build and `spirula train --help` passed.
+The OFF rebuild passed, followed by all four registered targeted tests and
+direct `dataset_prep_test` and two-GPU `mask_worker_parity_test` runs.
+The final parity verdict covers independent and whole-sequence worker masks.
+No temporary masks are written under final mask directories (reviewed source).
+P0–P4 are complete; the PR remains a draft below, with no push or PR opened.
+
+Evidence retained under the local `mask-publish-20261116` scratch root includes
+`p3-matrix/summary.json`, per-arm logs/hash manifests/raw samples/probes,
+filmstrip screenshots, `p4-patented-build.log`, `p4-off-build.log`,
+`p4-tests.log`, `p4-dataset-prep.log` and `p4-mask-parity.log`.
+Benchmark runners are retained with that evidence, not added to the work branch.
+All benchmark processes exited through the runner's normal cleanup.
+
+Vetoable implementation default: full mask host-memory charges, not the
+unproved reduced charge. Expert consultations settled callback/accounting design;
+the tooling escalation resolved CRLF normalization after the initial supported
+edit approach preserved line endings. No expert-max escalation was needed.
+Deferred by scope: production-stage benchmarking, Linux/macOS execution,
+single-GPU measurements, cold-cache certification and publication.
+
+### Upstream PR draft (not opened)
+
+**Title:** Reduce multi-GPU masking stalls during output publication
+
+**Summary**
+
+Mask workers wait while the GUI prepares and publishes completed masks,
+especially on SMB workspaces. Prepare independent results concurrently, keep
+final replacement serialized, and load filmstrip images after publication.
+Stage worker outputs locally and batch eight independent frames per task.
+Temporal grouping, encoder settings and geometry dispatch ordering are unchanged;
+masks retain their full host-memory reservation.
+
+On a 120-image fixture with two Radeon AI PRO R9700 GPUs, alternating A/B three
+times reduced median SMB mask time from 124.251 to 94.063 seconds (24.30%).
+Local median time fell from 111.978 to 86.561 seconds (22.70%). Every pair's
+240 training/feature-mask files had identical paths and SHA256 hashes.
+
+**Testing**
+
+Windows Vulkan build, targeted dispatcher/lifecycle/manifest/device tests,
+dataset-preparation test and two-GPU mask parity passed. The concurrency review
+passed, and the GUI filmstrip visibly followed during masking. Test code uses
+temporary synthetic inputs; no generated binaries, photographs or model weights
+are added to the patch. The GPU test needs a locally accepted/cached SAM 3 model.
+
+```text
+build_develop.bat -DSS_BACKEND=vulkan -DSS_ENABLE_PATENTED=ON
+build_vulkan\spirula.exe train --help
+build_develop.bat -DSS_BACKEND=vulkan -DSS_ENABLE_PATENTED=OFF
+ctest --test-dir build_vulkan -R "^(inference_worker_test|inference_worker_devices_test|mask_worker_manifest_test|subprocess_lifecycle_test)$" --output-on-failure --no-tests=error
+build_vulkan\dataset_prep_test.exe
+build_vulkan\mask_worker_parity_test.exe "%SAM3_MODEL%" "%DEVICES%"
+bash tools/check_private_paths.sh
+```
+
+`SAM3_MODEL` is the cached q4_0 model path; `DEVICES` is a comma-separated pair
+of supported Vulkan device UUID selectors. Both configurations and all six
+targeted checks passed; the final build has patented decoding OFF.
+
+**Limitations**
+
+Measured on one Windows host, two AMD GPUs and one SMB share, not a full
+production stage. The private photographic benchmark fixture is not distributed.
+GPU engine sums are not physical occupancy, and the share probes do not establish
+cold-cache performance. Linux/macOS builds and single-GPU performance were not
+exercised. No defaults, settings or user-visible copy changed.
 
 ## Execution handoff
 
-> **Goal and active phase:** keep both GPUs busy through mask publication on SMB workspaces (PERF-020/021). P0 is complete and selects D1–D4. Execute P1/P2 after settling the post-accept callback contract, then P3; P4 readies, but does not open, an upstream PR.
+> **Goal and active phase:** keep both GPUs busy through mask publication on SMB workspaces (PERF-020/021). P0–P4 complete; no active execution phase remains. The upstream PR is drafted, not opened.
 >
 > **Acceptance and evidence:** the Done section above. Results, commands, device UUIDs and verdicts go in this file's execution record on `plan/storage-latency`. Bulky logs stay on the executing machine; summarize them.
 >
@@ -385,4 +521,4 @@ summary is treated as proof. The matched, uninstrumented A/B build is preparing.
 >
 > **Stop/escalate:** after two failed attempts on one problem, climb `task` → `expert` → `expert-max` → owner. Ask the owner before any default change, a full-stage run on production data, or a scope change. P0 refuting every design ends the plan with a result.
 >
-> **Readiness:** P0 prerequisites verified and fixture smoke passed. Ready for P1/P2 once the callback contract is settled. P3 resource reporting must use corrected process-identity attribution; no final performance or parity acceptance yet.
+> **Readiness:** complete for the authorized local deliverable. Performance, byte parity, GUI follow behavior, concurrency review, patented-ON/OFF builds and final targeted checks passed. Source commit `172caa57af` is directly based on current upstream `8949092e`; publication requires a new explicit request.
