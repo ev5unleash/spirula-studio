@@ -1,6 +1,6 @@
 # Keep the GPUs fed through mask publication (rank 1, PERF-020/021)
 
-Status: revision 2, 2026-11-16, fork-only plan on branch `plan/storage-latency`. Revision 1 failed an expert review (Claude Fable); this revision adopts all eight findings (see "Review record"). Planning only; the executing session's prompt grants authority. The ranking it belongs to is [storage-latency-plan.md](storage-latency-plan.md). Line numbers refer to `upstream/master` at `8949092e`.
+Status: revision 2, 2026-11-16, fork-only plan on branch `plan/storage-latency`. Executed P0–P4; published as upstream [PR #357](https://github.com/harry7557558/spirula-studio/pull/357). Revision 1 failed an expert review (Claude Fable); revision 2 adopts all eight findings (see "Review record"). The ranking it belongs to is [storage-latency-plan.md](storage-latency-plan.md). Line numbers refer to `upstream/master` at `8949092e`.
 
 ## Goal
 
@@ -452,7 +452,14 @@ edit approach preserved line endings. No expert-max escalation was needed.
 Deferred by scope: production-stage benchmarking, Linux/macOS execution,
 single-GPU measurements, cold-cache certification and publication.
 
-### Upstream PR draft (not opened)
+2026-11-16 21:10Z: the owner opened upstream
+[PR #357](https://github.com/harry7557558/spirula-studio/pull/357) from
+`origin/perf/mask-publish-pipeline` at `172caa57af`, unchanged since P4. Its body
+is an edited version of the draft below, adding the results table and the exact
+test commands. At 21:16Z GitHub reported it mergeable; lint passed; the Linux,
+macOS and Windows builds were pending; there were no reviews or comments.
+
+### Upstream PR draft (superseded by the body of #357)
 
 **Title:** Reduce multi-GPU masking stalls during output publication
 
@@ -502,14 +509,14 @@ exercised. No defaults, settings or user-visible copy changed.
 
 ## Execution handoff
 
-> **Goal and active phase:** keep both GPUs busy through mask publication on SMB workspaces (PERF-020/021). P0–P4 complete; no active execution phase remains. The upstream PR is drafted, not opened.
+> **Goal and active phase:** keep both GPUs busy through mask publication on SMB workspaces (PERF-020/021). P0–P4 complete. Active phase: follow-up on upstream PR #357 (CI and maintainer review).
 >
 > **Acceptance and evidence:** the Done section above. Results, commands, device UUIDs and verdicts go in this file's execution record on `plan/storage-latency`. Bulky logs stay on the executing machine; summarize them.
 >
 > **Authority and exclusions:** the owner authorized this execution and the isolated SMB test folder with copied fixture frames; the recorded limits remain:
 > - allowed: worktrees, local builds (patented OFF except the one P4 CI-parity build), GPU runs on fixture copies, commits on `perf/mask-publish-pipeline` and `plan/storage-latency`;
-> - pushes to `origin` only if that prompt allows them;
-> - not allowed: anything to `upstream`, opening a PR, `geometry_main.cpp`, default changes, new settings or UI text, writes outside the test folder on the share, the machine's own Spirula settings, NVIDIA.
+> - PR follow-up: fixes for CI or review go on `perf/mask-publish-pipeline`. Pushing that branch updates #357, so each push needs the owner's explicit OK;
+> - not allowed: other pushes to `upstream`, opening another PR, `geometry_main.cpp`, default changes, new settings or UI text, writes outside the test folder on the share, the machine's own Spirula settings, NVIDIA.
 >
 > **Prerequisites:**
 > - ≥2 non-NVIDIA Vulkan GPUs (the reference is 2× R9700 32 GB); one GPU works with the caveat under Risks;
@@ -521,4 +528,4 @@ exercised. No defaults, settings or user-visible copy changed.
 >
 > **Stop/escalate:** after two failed attempts on one problem, climb `task` → `expert` → `expert-max` → owner. Ask the owner before any default change, a full-stage run on production data, or a scope change. P0 refuting every design ends the plan with a result.
 >
-> **Readiness:** complete for the authorized local deliverable. Performance, byte parity, GUI follow behavior, concurrency review, patented-ON/OFF builds and final targeted checks passed. Source commit `172caa57af` is directly based on current upstream `8949092e`; publication requires a new explicit request.
+> **Readiness:** published as PR #357 from `172caa57af`, based directly on `upstream/master` `8949092e`. Open items: the Linux, macOS and Windows CI builds, and maintainer review. Known CI risks from earlier fork PRs: macOS libc++ ambiguities and patented-ON link errors.
