@@ -187,6 +187,10 @@ bool pair_fits(uint64_t first, uint64_t second, uint64_t task_budget, size_t chi
     const uint64_t share = task_budget / children;
     return first <= share && second <= share - first;
 }
+bool geometry_serial_fallback(bool explicit_memory, uint64_t model_bytes,
+                              uint64_t memory, size_t children) {
+    return !explicit_memory && children != 0 && model_bytes > memory / children;
+}
 bool request_flags_match(bool normal, bool depth, bool want_normal, bool want_depth) {
     return (normal || depth) && (!normal || want_normal) && (!depth || want_depth);
 }
@@ -195,7 +199,6 @@ bool geometry_map_complete(bool worker, bool requested, bool enabled,
                            const fs::path& path, const std::string& key) {
     return !(worker ? requested : enabled) || app::geometry_output_complete(path, key);
 }
-
 
 int output_self_check() {
     const fs::path root = fs::temp_directory_path() / ("spirula-geometry-check-" +
@@ -215,6 +218,12 @@ int output_self_check() {
           "pairing accepts the share boundary without unsigned underflow");
     check(!pair_fits(UINT64_MAX, 1, UINT64_MAX, 1),
           "pairing rejects an overflowing sum");
+    check(geometry_serial_fallback(false, 11, 20, 2) &&
+          !geometry_serial_fallback(false, 10, 20, 2),
+          "default worker memory falls back only above the per-worker share");
+    check(!geometry_serial_fallback(true, 11, 20, 2) &&
+          !geometry_serial_fallback(false, 11, 20, 0),
+          "explicit memory and serial runs never use the worker fallback");
     check(request_flags_match(true, false, true, true) &&
           request_flags_match(false, true, true, true) &&
           request_flags_match(true, true, true, true),
@@ -812,6 +821,7 @@ int spirula_geometry_main(int argc, char** argv) {
     // An explicit --device, including an empty one: `--device ""` is the
     // caller's Auto, which must beat SS_VK_DEVICE the way a chosen index does.
     bool device_set = false;
+    bool worker_memory_set = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -856,6 +866,7 @@ int spirula_geometry_main(int argc, char** argv) {
                     mb > std::numeric_limits<uint64_t>::max() / (1024 * 1024))
                     throw std::invalid_argument("range");
                 o.worker_memory = mb * 1024 * 1024;
+                worker_memory_set = true;
             } catch (...) {
                 std::fprintf(stderr, "--worker-memory-mb needs a positive integer\n");
                 return 2;
@@ -908,7 +919,7 @@ int spirula_geometry_main(int argc, char** argv) {
     try {
         const unsigned copies = o.worker ? 1 : app::workers_per_gpu();
         if (copies > 1 && o.worker_devices.empty()) o.worker_devices = selector;
-        const auto worker_devices = app::expand_worker_devices(
+        auto worker_devices = app::expand_worker_devices(
             app::parse_worker_devices(o.worker_devices), copies);
         // ---- the dataset --------------------------------------------------
         DatasetParserConfig cfg;
@@ -921,7 +932,7 @@ int spirula_geometry_main(int argc, char** argv) {
 
         std::vector<std::string> keys(o.worker ? 0 : (size_t)N);
         std::vector<int> group(o.worker ? 0 : (size_t)N, 0);
-        std::vector<int64_t> group_first(o.worker ? 1 : 0);
+        std::vector<int64_t> group_first(o.worker ? 2 : 0);
         if (!o.worker) {
             std::vector<std::string> seen;
             for (int64_t i = 0; i < N; ++i) {
@@ -959,13 +970,27 @@ int spirula_geometry_main(int argc, char** argv) {
             if (const int rc = install_model(o.model, o.want_depth, o.want_normal)) return rc;
         }
 
+        uint64_t model_host_bytes = 0;
+        int patch = 0;
+        if (!worker_devices.empty()) {
+            patch = app::geometry_model_preflight(
+                o.model, o.want_depth, o.want_normal, model_host_bytes);
+            const size_t children = std::min(worker_devices.size(), (size_t)N);
+            if (geometry_serial_fallback(worker_memory_set, model_host_bytes,
+                                         o.worker_memory, children)) {
+                NN_LOG_WARN("%s\n", format(G::warn_serial_memory,
+                    {o.model, gb(model_host_bytes), gb(o.worker_memory)}).c_str());
+                o.worker_devices.clear();
+                worker_devices.clear();
+            }
+        }
         app::GeometryModel pred;
-        if (o.worker_devices.empty()) pred.load(o.model, selector, o.want_depth, o.want_normal);
+        if (o.worker_devices.empty()) {
+            pred.load(o.model, selector, o.want_depth, o.want_normal);
+            patch = pred.sizeGranularity();
+        }
 
         // ---- camera plans --------------------------------------------------
-        uint64_t model_host_bytes = 0;
-        const int patch = o.worker_devices.empty() ? pred.sizeGranularity()
-            : app::geometry_model_preflight(o.model, o.want_depth, o.want_normal, model_host_bytes);
         auto make_warp = [&](size_t g) {
             app::GeometryWarp warp;
             const int64_t i = group_first[g];
@@ -1389,7 +1414,10 @@ int spirula_geometry_main(int argc, char** argv) {
                 const auto* next = batch.find("next");
                 std::vector<std::string> requests{frame};
                 if (next) requests.push_back(next->as_string());
-                // A paired request acknowledges only after both staged families finish.
+                std::vector<Todo> pending;
+                pending.reserve(requests.size());
+                std::string cameras[2];
+                size_t camera_count = 0;
                 for (const auto& item : requests) {
                     const JsonValue request = json_parse(item);
                     const auto* image = request.find("i");
@@ -1410,31 +1438,50 @@ int spirula_geometry_main(int argc, char** argv) {
                              request_flags_match(normal->b, depth->b, o.want_normal, o.want_depth),
                              "geometry worker request does not match frozen flags");
                     const std::string camera = camera_key(ds, i);
-                    if (!current_warp || camera != worker_camera) {
-                        current_warp.reset();
-                        group_first[0] = i;
-                        current_warp.emplace(make_warp(0));
-                        current_group = 0;
-                        warps[0] = warp_info(*current_warp);
-                        worker_camera = camera;
+                    const size_t g = camera_count && camera != cameras[0] ? 1 : 0;
+                    if (g == camera_count) {
+                        cameras[g] = camera;
+                        group_first[g] = i;
+                        ++camera_count;
                     }
-                    const auto hash = spirula::sha256_file(ds.image_filenames[(size_t)i]);
-                    NN_CHECK(!hash.empty() && key->str == input_key(hash, camera, warps[0]),
-                             "geometry worker request does not match frozen inputs");
                     Todo task;
                     task.i = i;
+                    task.g = g;
                     task.key = key->str;
                     task.normal = normal->b;
                     task.depth = depth->b;
                     const fs::path folder(stage->str);
-                    NN_CHECK(fs::create_directory(folder), "geometry staging directory is not private");
                     if (task.normal)
                         task.np = folder / (o.normal_format == "jpg" ? "normal.jpg" : "normal.png");
                     if (task.depth) task.dp = folder / "depth.png";
-                    std::vector<Todo> pending;
                     pending.push_back(std::move(task));
-                    process(pending);
                 }
+                bool known[2] = {};
+                for (size_t g = 0; g < camera_count; ++g) {
+                    if (current_warp && cameras[g] == worker_camera) {
+                        warps[g] = warp_info(*current_warp);
+                        current_group = g;
+                        known[g] = true;
+                    }
+                }
+                // Plan the second camera first so the first map can stay resident for inference.
+                for (size_t g = camera_count; g-- > 0;) {
+                    if (known[g]) continue;
+                    current_warp.reset();
+                    current_warp.emplace(make_warp(g));
+                    current_group = g;
+                    warps[g] = warp_info(*current_warp);
+                }
+                for (const auto& task : pending) {
+                    const auto hash = spirula::sha256_file(ds.image_filenames[(size_t)task.i]);
+                    NN_CHECK(!hash.empty() &&
+                             task.key == input_key(hash, cameras[task.g], warps[task.g]),
+                             "geometry worker request does not match frozen inputs");
+                    const fs::path folder = (task.normal ? task.np : task.dp).parent_path();
+                    NN_CHECK(fs::create_directory(folder), "geometry staging directory is not private");
+                }
+                process(pending);
+                worker_camera = cameras[pending.back().g];
                 NN_CHECK(app::worker_write_frame(frame), "geometry worker acknowledgement failed");
             }
             return 0;
@@ -1473,7 +1520,7 @@ int spirula_geometry_main(int argc, char** argv) {
                 add_pixels(source_w, source_h);
                 add_pixels(warp.sample_w, warp.sample_h);
                 add_pixels(warp.out_w, warp.out_h);
-                // WP1: 64 B/pixel plus model reserve is >=1.9x the 2.87 GB worker peak commit.
+                // MoGe-2 L, 5760x3240 in 6 faces: 2.87 GB peak worker commit; 64 B/pixel + model reserve keeps >=1.9x.
                 constexpr uint64_t bytes_per_pixel = 64;
                 NN_CHECK(pixels <= std::numeric_limits<uint64_t>::max() / bytes_per_pixel,
                          "geometry task memory estimate overflow");
