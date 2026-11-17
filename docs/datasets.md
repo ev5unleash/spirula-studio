@@ -85,19 +85,25 @@ available, it instead runs two workers on the primary GPU. Each process
 loads its own models; the shared host-memory admission budget does not grow,
 and this setting does not impose a VRAM cap. Tracking sequences remain owned
 by one worker, so a single sequence cannot use all requested processes.
+On two Radeon AI PRO R9700s, two geometry workers per GPU cut MoGe-2 L normals
+on 200 full-resolution 360° frames from 190 s to 169 s (11%), with identical
+outputs and twice the peak host commit (11.1 GB against 5.5 GB). The default
+stays 1 because nothing checks that a second model fits in VRAM.
 
 Workers share a host-memory admission budget of half the machine's physical
 RAM, with a minimum of 4 GiB. This is not a per-process allowance, a strict
 runtime RAM cap or a VRAM limit. Model residency, tasks and geometry warp plans
-are charged against it; insufficient admission memory is an error, not a
-silent reduction in workers. A worker decodes its next image while the current
-one runs, and encodes finished outputs on a `WriterPool` before the parent
-accepts them, in the original order. Independent images go to workers in
-pairs; a tracked sequence stays one task, in frame order. Each worker's CPU
-loops and writers use `max(1, hardware_threads / workers)` threads. A mask
+are charged against it. With the default budget, a geometry model too large for
+the requested workers runs serially on the primary GPU, and the log says so;
+an explicit `--worker-memory-mb` that does not fit is an error. A worker decodes
+its next image while the current one runs, and encodes finished outputs on a
+`WriterPool` before the parent accepts them in completion order. Independent
+images go to workers in pairs; a tracked sequence stays one task, in frame
+order. Each worker's CPU loops and writers use
+`max(1, hardware_threads / workers)` threads. A mask
 task reserves two frames of the budget, a tracked sequence's included, and the
-step fails when that does not fit; a geometry pair that does not fit is sent
-as two single images.
+step fails when that does not fit; a geometry pair that exceeds one worker's
+share of the task budget is sent as two single images.
 
 The geometry CLI can explicitly select worker UUIDs and override the shared
 budget: `spirula geometry <dataset> --worker-devices <uuid,...> --worker-memory-mb 8192`.
