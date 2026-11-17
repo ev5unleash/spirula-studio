@@ -95,6 +95,20 @@ struct Options {
     colorspace::Exposure image_exposure;
 };
 
+std::string geometry_input_key(const Options& o, const std::string& source,
+                               const std::string& camera, int out_w, int out_h, int faces) {
+    return source + "|" + camera + "|" +
+        o.model + "|" + std::to_string(out_w) + "," +
+        std::to_string(out_h) + "," + std::to_string(faces) + "|" +
+        std::to_string(o.max_size) + "," + std::to_string(o.num_tokens) + "," +
+        std::to_string(o.refine_steps) + "," + std::to_string((int)o.split) + "," +
+        std::to_string((int)o.face_res) + "," + std::to_string((int)o.ray_depth) + "," +
+        std::to_string(o.depth_mm) + "|" + o.image_gamut + "|" +
+        (o.image_is_linear ? (*o.image_is_linear ? "linear" : "srgb") : "auto") + "|" +
+        std::to_string(o.image_exposure.automatic) + "," +
+        std::to_string(o.image_exposure.stops);
+}
+
 void help_row(const char* flags, const spirula::i18n::Msg& m, int col = 26) {
     std::string left = std::string("    ") + flags;
     if (spirula::i18n::display_width(left) >= col + 4) {
@@ -187,9 +201,15 @@ bool pair_fits(uint64_t first, uint64_t second, uint64_t task_budget, size_t chi
     const uint64_t share = task_budget / children;
     return first <= share && second <= share - first;
 }
-bool geometry_serial_fallback(bool explicit_memory, uint64_t model_bytes,
-                              uint64_t memory, size_t children) {
-    return !explicit_memory && children != 0 && model_bytes > memory / children;
+std::optional<uint64_t> geometry_task_budget(uint64_t model, uint64_t warp,
+                                            uint64_t largest_task, uint64_t memory,
+                                            size_t children) {
+    if (!children || warp > memory / children) return std::nullopt;
+    memory -= warp * children;
+    if (model > memory / children) return std::nullopt;
+    memory -= model * children;
+    if (largest_task > memory) return std::nullopt;
+    return memory;
 }
 bool request_flags_match(bool normal, bool depth, bool want_normal, bool want_depth) {
     return (normal || depth) && (!normal || want_normal) && (!depth || want_depth);
@@ -200,6 +220,8 @@ bool geometry_map_complete(bool worker, bool requested, bool enabled,
     return !(worker ? requested : enabled) || app::geometry_output_complete(path, key);
 }
 
+
+int complete_output_self_check(const fs::path& root);
 int output_self_check() {
     const fs::path root = fs::temp_directory_path() / ("spirula-geometry-check-" +
         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -218,12 +240,19 @@ int output_self_check() {
           "pairing accepts the share boundary without unsigned underflow");
     check(!pair_fits(UINT64_MAX, 1, UINT64_MAX, 1),
           "pairing rejects an overflowing sum");
-    check(geometry_serial_fallback(false, 11, 20, 2) &&
-          !geometry_serial_fallback(false, 10, 20, 2),
-          "default worker memory falls back only above the per-worker share");
-    check(!geometry_serial_fallback(true, 11, 20, 2) &&
-          !geometry_serial_fallback(false, 11, 20, 0),
-          "explicit memory and serial runs never use the worker fallback");
+    check(!geometry_task_budget(11, 0, 0, 20, 2) &&
+          geometry_task_budget(10, 0, 0, 20, 2) == 0,
+          "worker models fit exactly at the shared budget boundary");
+    check(!geometry_task_budget(8, 3, 0, 20, 2) &&
+          !geometry_task_budget(8, 1, 3, 20, 2) &&
+          geometry_task_budget(8, 1, 2, 20, 2) == 2,
+          "worker admission reserves warp plans and the largest task as well as models");
+    check(geometry_task_budget(8, 1, 3, 20, 1) == 11,
+          "one remaining image needs only one resident worker");
+    check(!geometry_task_budget(0, 0, 0, 20, 0) &&
+          !geometry_task_budget(UINT64_MAX, 0, 1, UINT64_MAX, 2) &&
+          !geometry_task_budget(0, UINT64_MAX, 1, UINT64_MAX, 2),
+          "worker admission rejects empty and overflowing reservations");
     check(request_flags_match(true, false, true, true) &&
           request_flags_match(false, true, true, true) &&
           request_flags_match(true, true, true, true),
@@ -368,6 +397,7 @@ int output_self_check() {
         check(writers.failures() == 1 && !app::geometry_output_complete(path, normal_key),
               "failed asynchronous writes report failure without completion");
     }
+    failures += complete_output_self_check(root / "complete");
     return failures;
 }
 
@@ -772,6 +802,62 @@ std::string camera_key(const ParsedDataset& ds, int64_t i) {
     return k;
 }
 
+int complete_output_self_check(const fs::path& root) {
+    fs::create_directories(root / "images");
+    fs::create_directories(root / "normals");
+    fs::create_directories(root / "depths");
+    const auto model = root / "invalid.pt";
+    { std::ofstream out(model, std::ios::binary); out << "not a predictor"; }
+    {
+        std::ofstream out(root / "transforms.json");
+        out << R"({"camera_model":"PINHOLE","w":4,"h":3,"fl_x":4,"fl_y":4,)"
+               R"("cx":2,"cy":1.5,"frames":[{"file_path":"images/source.png",)"
+               R"("transform_matrix":[[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]}]})";
+    }
+    nn::Image image;
+    image.width = 4; image.height = 3; image.channels = 3;
+    image.data.assign(36, 127);
+    NN_CHECK(nn::save_image(image, (root / "images/source.png").string(), -1),
+             "cannot write complete-output source fixture");
+    DatasetParserConfig cfg;
+    cfg.require_image_files = false;
+    cfg.probe_image_size = probe_image_size;
+    const auto ds = parse_dataset(root.string(), cfg, "");
+    Options o;
+    o.model = model.string();
+    o.max_size = 0;
+    o.split = Tri::No;
+    const auto key = geometry_input_key(o,
+        spirula::sha256_file(ds.image_filenames[0]), camera_key(ds, 0), 4, 3, 1);
+    const auto normal = root / "normals/source.png";
+    const auto depth = root / "depths/source.png";
+    NN_CHECK(app::publish_geometry_output(normal, key + "|normal|png|95",
+        [&](const std::string& part) { return nn::save_image(image, part, -1); }),
+        "cannot publish complete-output normal fixture");
+    NN_CHECK(app::publish_geometry_output(depth, key + "|depth",
+        [&](const std::string& part) {
+            const std::vector<uint16_t> values(12, 1234);
+            return app::save_depth_png16(part, values.data(), 4, 3);
+        }), "cannot publish complete-output depth fixture");
+    int failures = 0;
+    auto run = [&](std::vector<std::string> flags, const char* what) {
+        std::vector<std::string> args = {"geometry", root.string(), "--model",
+            model.string(), "--max-size", "0", "--split", "no"};
+        args.insert(args.end(), flags.begin(), flags.end());
+        std::vector<char*> argv;
+        for (auto& arg : args) argv.push_back(arg.data());
+        const int rc = spirula_geometry_main((int)argv.size(), argv.data());
+        const bool good = rc == 0;
+        std::printf("  %s geometry resume: %s\n", good ? "ok  " : "FAIL", what);
+        if (!good) ++failures;
+    };
+    run({}, "complete normals return before the invalid predictor loads");
+    run({"--depth", "--no-normal"},
+        "complete depth returns before the invalid predictor loads");
+    run({"--depth"}, "complete output families return before the invalid predictor loads");
+    return failures;
+}
+
 std::string gb(uint64_t b) {
     char buf[32];
     std::snprintf(buf, sizeof buf, "%.1f GB", b / 1e9);
@@ -906,21 +992,10 @@ int spirula_geometry_main(int argc, char** argv) {
     // Explicit --device beats SS_VK_DEVICE, then Auto.
     const spirula::vkselect::Request req =
         spirula::vkselect::requestFrom(device, device_set);
-    try {
-        nn::configure_device(req.text);
-    } catch (const std::exception& e) {
-        std::fprintf(stderr, "\nerror: %s\n", e.what());
-        return 1;
-    }
-    // The canonical identity, which is what the predictor and every later
-    // context of the process inherits; no ordinal survives this line.
-    const std::string selector = nn::configured_device_selector();
 
     try {
         const unsigned copies = o.worker ? 1 : app::workers_per_gpu();
-        if (copies > 1 && o.worker_devices.empty()) o.worker_devices = selector;
-        auto worker_devices = app::expand_worker_devices(
-            app::parse_worker_devices(o.worker_devices), copies);
+        const bool want_workers = copies > 1 || !o.worker_devices.empty();
         // ---- the dataset --------------------------------------------------
         DatasetParserConfig cfg;
         cfg.require_image_files = false;   // the point cloud is not our business
@@ -970,25 +1045,10 @@ int spirula_geometry_main(int argc, char** argv) {
             if (const int rc = install_model(o.model, o.want_depth, o.want_normal)) return rc;
         }
 
+        // Metadata determines the patch grid without loading a predictor.
         uint64_t model_host_bytes = 0;
-        int patch = 0;
-        if (!worker_devices.empty()) {
-            patch = app::geometry_model_preflight(
-                o.model, o.want_depth, o.want_normal, model_host_bytes);
-            const size_t children = std::min(worker_devices.size(), (size_t)N);
-            if (geometry_serial_fallback(worker_memory_set, model_host_bytes,
-                                         o.worker_memory, children)) {
-                NN_LOG_WARN("%s\n", format(G::warn_serial_memory,
-                    {o.model, gb(model_host_bytes), gb(o.worker_memory)}).c_str());
-                o.worker_devices.clear();
-                worker_devices.clear();
-            }
-        }
-        app::GeometryModel pred;
-        if (o.worker_devices.empty()) {
-            pred.load(o.model, selector, o.want_depth, o.want_normal);
-            patch = pred.sizeGranularity();
-        }
+        const int patch = app::geometry_model_preflight(
+            o.model, o.want_depth, o.want_normal, model_host_bytes);
 
         // ---- camera plans --------------------------------------------------
         auto make_warp = [&](size_t g) {
@@ -1133,16 +1193,7 @@ int spirula_geometry_main(int argc, char** argv) {
             });
         auto input_key = [&](const std::string& source,
                              const std::string& camera, const WarpInfo& warp) {
-            return source + "|" + camera + "|" +
-                o.model + "|" + std::to_string(warp.out_w) + "," +
-                std::to_string(warp.out_h) + "," + std::to_string(warp.faces) + "|" +
-                std::to_string(o.max_size) + "," + std::to_string(o.num_tokens) + "," +
-                std::to_string(o.refine_steps) + "," + std::to_string((int)o.split) + "," +
-                std::to_string((int)o.face_res) + "," + std::to_string((int)o.ray_depth) + "," +
-                std::to_string(o.depth_mm) + "|" + o.image_gamut + "|" +
-                (o.image_is_linear ? (*o.image_is_linear ? "linear" : "srgb") : "auto") + "|" +
-                std::to_string(o.image_exposure.automatic) + "," +
-                std::to_string(o.image_exposure.stops);
+            return geometry_input_key(o, source, camera, warp.out_w, warp.out_h, warp.faces);
         };
         if (!o.worker) for (int64_t i = 0; i < N; ++i) {
             // out_path creates the folder it names, so a map that was not asked
@@ -1154,7 +1205,7 @@ int spirula_geometry_main(int argc, char** argv) {
             if (o.want_normal)
                 t.np = out_path(normal_dir, i, o.normal_format == "jpg" ? ".jpg" : ".png");
             if (o.want_depth) t.dp = out_path(depth_dir, i, ".png");
-            if (!o.worker_devices.empty()) {
+            if (want_workers) {
                 for (const auto& path : {t.np, t.dp}) {
                     if (path.empty()) continue;
                     auto canonical = fs::weakly_canonical(path).generic_string();
@@ -1195,6 +1246,66 @@ int spirula_geometry_main(int argc, char** argv) {
             return geometry_map_complete(o.worker, t.normal, o.want_normal, t.np, normal_key(t)) &&
                    geometry_map_complete(o.worker, t.depth, o.want_depth, t.dp, t.key + "|depth");
         };
+        if (!o.worker && todo.empty()) {
+            for (const auto& t : retained)
+                NN_CHECK(complete(t), "retained geometry family is incomplete for image %lld",
+                         (long long)t.i);
+            std::printf("%s\n", format(G::log_done, {0LL, (long long)skipped,
+                format_duration((nn::now_ms() - t_start) / 1000.0)}).c_str());
+            return 0;
+        }
+
+        nn::configure_device(req.text);
+        const std::string selector = nn::configured_device_selector();
+        if (copies > 1 && o.worker_devices.empty()) o.worker_devices = selector;
+        auto worker_devices = app::expand_worker_devices(
+            app::parse_worker_devices(o.worker_devices), copies);
+        const size_t children = std::min(worker_devices.size(), todo.size());
+        std::vector<uint64_t> task_bytes;
+        uint64_t task_budget = 0;
+        if (children) {
+            task_bytes.reserve(todo.size());
+            uint64_t largest_task = 0;
+            for (const auto& t : todo) {
+                const auto& warp = warps[t.g];
+                int source_w = 0, source_h = 0;
+                NN_CHECK(probe_image_size(ds.image_filenames[(size_t)t.i].c_str(),
+                                         &source_w, &source_h),
+                         "cannot read geometry source dimensions");
+                uint64_t pixels = warp.pixels;
+                auto add_pixels = [&](int w, int h) {
+                    NN_CHECK(w > 0 && h > 0, "invalid geometry buffer dimensions");
+                    const uint64_t area = (uint64_t)w * h;
+                    NN_CHECK(area <= std::numeric_limits<uint64_t>::max() - pixels,
+                             "geometry task memory estimate overflow");
+                    pixels += area;
+                };
+                add_pixels(source_w, source_h);
+                add_pixels(warp.sample_w, warp.sample_h);
+                add_pixels(warp.out_w, warp.out_h);
+                // MoGe-2 L, 5760x3240 in 6 faces: 2.87 GB peak worker commit;
+                // 64 B/pixel + model reserve keeps >=1.9x.
+                constexpr uint64_t bytes_per_pixel = 64;
+                NN_CHECK(pixels <= std::numeric_limits<uint64_t>::max() / bytes_per_pixel,
+                         "geometry task memory estimate overflow");
+                task_bytes.push_back(pixels * bytes_per_pixel);
+                largest_task = std::max(largest_task, task_bytes.back());
+            }
+            const auto admitted = geometry_task_budget(model_host_bytes, max_warp_bytes,
+                largest_task, o.worker_memory, children);
+            if (!admitted) {
+                NN_CHECK(!worker_memory_set,
+                         "geometry models, warp plans and tasks exceed the shared worker memory budget");
+                NN_LOG_WARN("%s\n", format(G::warn_serial_memory,
+                    {o.model, gb(model_host_bytes), gb(o.worker_memory)}).c_str());
+                worker_devices.clear();
+            } else {
+                task_budget = *admitted;
+            }
+        }
+        app::GeometryModel pred;
+        if (worker_devices.empty())
+            pred.load(o.model, selector, o.want_depth, o.want_normal);
         std::optional<app::GeometryWarp> current_warp;
         size_t current_group = group_first.size();
         auto process = [&](const std::vector<Todo>& todo) {
@@ -1496,40 +1607,14 @@ int spirula_geometry_main(int argc, char** argv) {
             } cleanup{scratch};
             std::vector<std::vector<app::GeometryStagedOutput>> families;
             std::vector<app::WorkerTask> tasks;
-            const size_t children = std::min(worker_devices.size(), todo.size());
-            NN_CHECK(max_warp_bytes <= o.worker_memory / children,
-                     "resident geometry warp plans exceed the shared worker memory budget");
-            uint64_t task_budget = o.worker_memory - max_warp_bytes * children;
-            NN_CHECK(model_host_bytes <= task_budget / children,
-                     "resident geometry models exceed the shared worker memory budget");
-            task_budget -= model_host_bytes * children;
+            size_t task_index = 0;
             for (const auto& t : todo) {
-                const auto& warp = warps[t.g];
-                int source_w = 0, source_h = 0;
-                NN_CHECK(probe_image_size(ds.image_filenames[(size_t)t.i].c_str(),
-                                         &source_w, &source_h),
-                         "cannot read geometry source dimensions");
-                uint64_t pixels = warp.pixels;
-                auto add_pixels = [&](int w, int h) {
-                    NN_CHECK(w > 0 && h > 0, "invalid geometry buffer dimensions");
-                    const uint64_t area = (uint64_t)w * h;
-                    NN_CHECK(area <= std::numeric_limits<uint64_t>::max() - pixels,
-                             "geometry task memory estimate overflow");
-                    pixels += area;
-                };
-                add_pixels(source_w, source_h);
-                add_pixels(warp.sample_w, warp.sample_h);
-                add_pixels(warp.out_w, warp.out_h);
-                // MoGe-2 L, 5760x3240 in 6 faces: 2.87 GB peak worker commit; 64 B/pixel + model reserve keeps >=1.9x.
-                constexpr uint64_t bytes_per_pixel = 64;
-                NN_CHECK(pixels <= std::numeric_limits<uint64_t>::max() / bytes_per_pixel,
-                         "geometry task memory estimate overflow");
                 const fs::path folder = scratch / std::to_string(t.i);
                 JsonWriter request(false);
                 request.object().field("i", (long long)t.i).field("key", t.key)
                     .field("stage", fs::absolute(folder).string())
                     .field("normal", t.normal).field("depth", t.depth).end();
-                tasks.push_back({request.str(), pixels * bytes_per_pixel});
+                tasks.push_back({request.str(), task_bytes[task_index++]});
                 std::vector<app::GeometryStagedOutput> outputs;
                 if (t.normal) outputs.push_back({
                     folder / (o.normal_format == "jpg" ? "normal.jpg" : "normal.png"),

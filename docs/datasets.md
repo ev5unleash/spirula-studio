@@ -80,7 +80,8 @@ portable dataset presets do not carry it.
 `SS_WORKERS_PER_GPU` opts into multiple isolated inference processes per
 selected GPU. It must be an integer >= 1 and defaults to 1.
 The GUI's **Workers per GPU** control offers 1–4 and saves the choice locally
-in `gui.conf`, not in portable dataset presets.
+in `gui.conf`, not in portable dataset presets. A saved GUI choice takes
+precedence over the environment; without one, the GUI inherits the variable.
 For example, `SS_WORKERS_PER_GPU=2` runs two mask workers and two geometry workers per
 selected GPU, in their respective stages. With **None** or no extra GPU
 available, it instead runs two workers on the primary GPU. Each process
@@ -89,15 +90,20 @@ and this setting does not impose a VRAM cap. Tracking sequences remain owned
 by one worker, so a single sequence cannot use all requested processes.
 On two Radeon AI PRO R9700s, two geometry workers per GPU cut MoGe-2 L normals
 on 200 full-resolution 360° frames from 190 s to 169 s (11%), with identical
-outputs and twice the peak host commit (11.1 GB against 5.5 GB). The default
-stays 1 because nothing checks that a second model fits in VRAM.
+outputs and twice the peak host commit (11.1 GB against 5.5 GB). On one R9700,
+the same 200-frame workload took 340 s with one worker and 270 s with two
+(20.5% faster; medians of three runs). Outputs were byte-identical, with peak
+host commit rising from 3.02 GB to 5.87 GB. These gains are workload-specific;
+the default stays 1 because nothing checks that a second model fits in VRAM.
 
 Workers share a host-memory admission budget of half the machine's physical
 RAM, with a minimum of 4 GiB. This is not a per-process allowance, a strict
 runtime RAM cap or a VRAM limit. Model residency, tasks and geometry warp plans
-are charged against it. With the default budget, a geometry model too large for
-the requested workers runs serially on the primary GPU, and the log says so;
-an explicit `--worker-memory-mb` that does not fit is an error. A worker decodes
+are charged against it. Geometry sizes its worker pool from images still needing
+outputs. If the default budget cannot fit their model, warp and task reservations,
+it runs serially on the primary GPU and logs why. An explicit
+`--worker-memory-mb` that does not fit is an error. Fully complete geometry runs
+reuse their outputs without loading the model. A worker decodes
 its next image while the current one runs, and encodes finished outputs on a
 `WriterPool` before the parent accepts them in completion order. Independent
 images go to workers in pairs; a tracked sequence stays one task, in frame
