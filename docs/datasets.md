@@ -78,8 +78,10 @@ The additional selection is saved locally in `gui.conf` as `additional_gpus`;
 portable dataset presets do not carry it.
 
 `SS_WORKERS_PER_GPU` opts into multiple isolated inference processes per
-selected GPU. It must be an integer >= 1 and defaults to 1. For example,
-`SS_WORKERS_PER_GPU=2` runs two mask workers and two geometry workers per
+selected GPU. It must be an integer >= 1 and defaults to 1.
+The GUI's **Workers per GPU** control offers 1–4 and saves the choice locally
+in `gui.conf`, not in portable dataset presets.
+For example, `SS_WORKERS_PER_GPU=2` runs two mask workers and two geometry workers per
 selected GPU, in their respective stages. With **None** or no extra GPU
 available, it instead runs two workers on the primary GPU. Each process
 loads its own models; the shared host-memory admission budget does not grow,
