@@ -85,6 +85,10 @@ available, it instead runs two workers on the primary GPU. Each process
 loads its own models; the shared host-memory admission budget does not grow,
 and this setting does not impose a VRAM cap. Tracking sequences remain owned
 by one worker, so a single sequence cannot use all requested processes.
+On two Radeon AI PRO R9700s, two geometry workers per GPU cut MoGe-2 L normals
+on 200 full-resolution 360° frames from 190 s to 169 s (11%), with identical
+outputs and twice the peak host commit (11.1 GB against 5.5 GB). The default
+stays 1 because nothing checks that a second model fits in VRAM.
 
 Workers share a host-memory admission budget of half the machine's physical
 RAM, with a minimum of 4 GiB. This is not a per-process allowance, a strict
