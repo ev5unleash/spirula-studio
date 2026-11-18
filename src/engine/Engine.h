@@ -462,6 +462,10 @@ std::map<std::string, float> engine_train_step_managed(
     bool packed,
     const EngineStepConfig& cfg);
 
+// The config engine_train_step_managed runs: split_batch vs FPBO resolved for
+// the configured DataManager. Checkpoint save/resume layouts must use it too.
+EngineStepConfig engine_managed_step_config(const EngineStepConfig& cfg);
+
 // Answer the DataDecodeError a managed step threw: true re-runs the decode
 // the worker is parked on, false abandons the pipeline. See DataManager.h.
 void engine_resolve_data_error(bool retry);

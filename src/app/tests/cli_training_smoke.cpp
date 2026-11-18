@@ -95,7 +95,9 @@ int main(int argc, char** argv) {
                 "--refine-start-iter", "100000"};
         };
         auto direct_args = args(12);
-        direct_args.insert(direct_args.end(), {"--output-dir-name", "direct", "--device", device});
+        // Two cameras per step: split_batch turns FPBO off, and every full save must accept that.
+        direct_args.insert(direct_args.end(), {"--output-dir-name", "direct", "--device", device,
+                                               "--max-batch-per-epoch", "3"});
         int metric_lines = 0;
         bool nonfinite = false;
         auto observe = [&](const std::string& line) {
@@ -132,6 +134,9 @@ int main(int argc, char** argv) {
         require(direct_step == 12, "full checkpoint records completed direct training step");
         const auto direct_checkpoint =
             ckpt::resolve_checkpoint(outputs / "direct");
+        require(ckpt::read_state_json(direct_checkpoint.ckpt_dir)
+                        .get_double("use_fused_proj_bwd_optim", 1) == 0,
+                "two-camera split batches save their non-FPBO layout");
         const auto splats = spirula::read_splat_ply(
             (direct_checkpoint.ckpt_dir / "splat.ply").string());
         auto all_finite = [](const std::vector<float>& values) {
