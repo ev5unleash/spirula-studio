@@ -2172,16 +2172,12 @@ static bool is_image_ext(const fs::path& p) {
 // Is this folder a finished model rather than a dataset -- a run directory, or
 // one of its checkpoints? Then it belongs in the viewer.
 static bool looks_like_model(const fs::path& p) {
-    std::error_code ec;
-    if (fs::is_regular_file(p / "splat.ply", ec)) return true;
-    for (fs::directory_iterator it(p, ec), end; !ec && it != end; it.increment(ec)) {
-        const std::string b = it->path().filename().string();
-        if (it->is_directory(ec) &&
-            (b.rfind("step-", 0) == 0 || b.find(".ckpt") != std::string::npos) &&
-            fs::is_regular_file(it->path() / "splat.ply", ec))
-            return true;
+    try {
+        spirula::find_splat_ply(p.string());
+        return true;
+    } catch (const std::exception&) {
+        return false;
     }
-    return false;
 }
 
 // What the viewer will find in a recent model, asked of the file the way the
@@ -2918,11 +2914,12 @@ void GuiApp::draw_stencil_rows(const MaskingPanel& p) {
         auto open_panel = [&] {
             if (scan) {
                 _mask_try_scan = (int)t.scans[row.input - t.inputs];
-                open_scan_mask_preview((size_t)_mask_try_scan);
+                open_scan_mask_preview((size_t)_mask_try_scan, row.camera);
             } else {
                 _mask_try_scan = -1;
                 *p.preview_input = (int)row.input;
                 p.open_preview();
+                if (_segment.is_open()) _segment.edit_camera(row.camera);
             }
         };
         ImGui::TableNextRow();
@@ -3039,12 +3036,13 @@ bool GuiApp::scan_photos_busy() const {
            _scan_photos.wait_for(std::chrono::seconds(0)) != std::future_status::ready;
 }
 
-void GuiApp::open_scan_mask_preview(size_t scan) {
+void GuiApp::open_scan_mask_preview(size_t scan, std::optional<std::string> camera) {
     if (native_work_busy() || scan >= _lidar.size() || _workspace.empty()) return;
     std::vector<std::string> clouds;
     for (const LidarInput& l : _lidar) clouds.push_back(l.path);
     const std::string ws = _workspace;
     _scan_photos_for = scan;
+    _scan_camera = std::move(camera);
     log(i18n::format(ldmsg::scan_photos_extracting, {_lidar[scan].path}));
     _scan_photos = std::async(std::launch::async, [clouds, scan, ws] {
         std::string dir, err;
@@ -3057,6 +3055,7 @@ void GuiApp::pump_scan_photos() {
     if (!_scan_photos.valid() || scan_photos_busy()) return;
     const auto [dir, err] = _scan_photos.get();
     const std::optional<SegmentPanel::EditRequest> edit = std::exchange(_scan_edit, std::nullopt);
+    const std::optional<std::string> camera = std::exchange(_scan_camera, std::nullopt);
     const size_t scan = _scan_photos_for;
     if (scan >= _lidar.size()) return;   // removed meanwhile (forget_scan)
     if (!err.empty()) {
@@ -3071,6 +3070,7 @@ void GuiApp::pump_scan_photos() {
     PrepInput photos;
     photos.path = dir;
     open_segment(preview_source_for(photos, ""));
+    if (camera) _segment.edit_camera(*camera);
     if (edit) _segment.edit_saved(*edit);
 }
 
@@ -3840,7 +3840,8 @@ void GuiApp::draw_menu_bar() {
                       FileDialog::Mode::Folder);
         }
         if (ui::MenuItem(msg::resume_training, nullptr, false, !native_work_busy() && !training_busy()))
-            open_pick(PickAction::ResumeRun, msg::resume_training.get(), FileDialog::Mode::Folder);
+            open_pick(PickAction::ResumeRun, msg::resume_training.get(),
+                      FileDialog::Mode::FileOrFolder, {".tar", ".ply"});
         ui::help_on_hover_disabled(msg::resume_training_help);
         if (ui::MenuItem(msg::menu_new_dataset) && !native_work_busy()) {
             close_splat();
@@ -4127,7 +4128,8 @@ void GuiApp::draw_home() {
     if (_keep_full_ckpt) {
         ImGui::BeginDisabled(native_work_busy() || training_busy());
         if (ui::Button(msg::resume_training, ImVec2(-1, bh)))
-            open_pick(PickAction::ResumeRun, msg::resume_training.get(), FileDialog::Mode::Folder);
+            open_pick(PickAction::ResumeRun, msg::resume_training.get(),
+                      FileDialog::Mode::FileOrFolder, {".tar", ".ply"});
         ImGui::EndDisabled();
         ui::help_on_hover_disabled(msg::resume_training_help);
     }
