@@ -1014,7 +1014,8 @@ void TrainerSession::restore_checkpoint() {
     target.num_images     = (int)post.n_post;
     target.background_sh        = cfg.background_mode == "sh";
     target.background_sh_degree = cfg.background_sh_degree;
-    const OptimConfig target_optim = build_step_config(cfg, st, 0).optim;
+    const OptimConfig target_optim =
+        engine_managed_step_config(build_step_config(cfg, st, 0)).optim;
     target.sh_optim_bits = target_optim.sh_optim_bits;
     target.sh_value_bits = target_optim.sh_value_bits;
     target.non_sh_optim_bits = target_optim.non_sh_optim_bits;
@@ -1112,7 +1113,7 @@ void TrainerSession::save_checkpoint(int step) {
 
     try {
         const OptimConfig checkpoint_optim =
-            build_step_config(cfg, st, step).optim;
+            engine_managed_step_config(build_step_config(cfg, st, step)).optim;
         engine_save_checkpoint(staging.string(), cfg.save_full_checkpoint,
                                step, &checkpoint_optim);
         save_config_json(cfg, staging, preset);

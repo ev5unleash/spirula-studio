@@ -75,14 +75,9 @@ void engine_setup_data_manager(
 }
 
 
-// Resolve the `split_batch` + `use_fused_proj_bwd_optim` conflict. Both
-// turned on at once is an inconsistency: split_batch loops over single
-// cameras and accumulates atomicAdd into world-grad buffers, whereas FPBO
-// folds projection-bwd into the optim kernel and never materializes those
-// buffers. If we know (from the DataManager) that the post-split batch
-// size will always be 1, split_batch is a no-op and FPBO is the correct
-// choice. Otherwise the user wants the memory win of split_batch and we
-// must turn FPBO off. Prints a one-shot warning describing the choice.
+// split_batch accumulates per-camera world grads, which FPBO never
+// materializes: keep FPBO only when every batch is one camera (split_batch is
+// then a no-op); unknown (-1) or larger batches keep split_batch instead.
 static EngineStepConfig _resolve_split_vs_fpbo(const EngineStepConfig& cfg,
                                                int64_t max_batch_known,
                                                int max_face_passes) {
@@ -122,6 +117,12 @@ static EngineStepConfig _resolve_split_vs_fpbo(const EngineStepConfig& cfg,
         }
     }
     return out;
+}
+
+EngineStepConfig engine_managed_step_config(const EngineStepConfig& cfg) {
+    if (!engine().dm) return cfg;
+    return _resolve_split_vs_fpbo(cfg, engine().dm->max_input_batch_size(),
+                                  engine().dm->max_face_passes());
 }
 
 
@@ -292,12 +293,7 @@ std::map<std::string, float> engine_train_step_managed(
             "call engine_setup_data_manager(...) first.");
     }
 
-    // Resolve split_batch vs FPBO using the DataManager's view of the
-    // dataset (max train batch size × max K). Done once per session via
-    // the static warned flag inside the helper.
-    EngineStepConfig cfg = _resolve_split_vs_fpbo(
-        cfg_in, engine().dm->max_input_batch_size(),
-        engine().dm->max_face_passes());
+    EngineStepConfig cfg = engine_managed_step_config(cfg_in);
 
     const TrainStep& stp = engine().dm->next_train_step();
     if (stp.subs.empty())

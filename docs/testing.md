@@ -64,6 +64,8 @@ device preferences or download models.
 12 steps with a 256-splat cap and full checkpoints every five steps, then resumes
 through the scheduler/worker to step 24. It validates checkpoint contents using
 the production readers and matches the request/result identity and output paths.
+The direct run uses two-camera split batches, which require non-fused optimizer
+state across full checkpoint saves and scheduled resume.
 Longer finite attempts synchronize on a readable checkpoint before cooperative
 stop or force-stop. The former must be resumable; the latter must be interrupted,
 not successful, and retain a valid checkpoint. `checkpoint_resolution_test`
